@@ -74,10 +74,10 @@ def query(text):
     因为提示词的长度有限，每个匹配的相关摘要我在这里只取了前300个字符，如果想要更多的相关摘要，可以把这里的300改为更大的值
     """
     for result in search_result:
-        if len(text) > 300:
-            summary = text[:300]
+        if len(result.payload["text"]) > 300:
+            summary = result.payload["text"][:300]
         else:
-            summary = text
+            summary = result.payload["text"]
         answers.append({"title": result.payload["title"], "text": summary})
 
     completion = openai.ChatCompletion.create(
