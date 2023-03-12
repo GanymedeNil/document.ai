@@ -53,3 +53,9 @@ openAI 的Embedding模型数据更多是基于普遍性数据训练，如果你�
 目前我自身测试下来，使用问答数据集对GPT模型进行Fine-tune后，问答准确性会大幅提高。你可以理解为GPT通过大量的专业领域数据的学习后成为了该领域专家，然后配合调小接口中`temperature`参数，可以得到更准确的结果。
 
 但 现在 Fine-tune 训练和使用成本还是太高，每天都会有新的数据，不可能高频的进行 Fine-tune。我的一个想法是每隔一个长周期对数据进行 Fine-tune ，然后配合外置的向量数据库的相似查询来补足 Fine-tune 模型本身的数据落后问题。
+
+## Buy me a coffee
+<div align="center">
+<img height="360" src="https://user-images.githubusercontent.com/9687786/224522468-eafb7042-d000-4799-9d16-450489e8efa4.png"/>
+<img height="360" src="https://user-images.githubusercontent.com/9687786/224522477-46f3e80b-0733-4be9-a829-37928260038c.png"/>
+</div>
