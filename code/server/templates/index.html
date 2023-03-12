@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>MSD AI</title>
+    <meta name="viewport"
+          content="width=device-width,height=device-height, user-scalable=no,initial-scale=1, minimum-scale=1, maximum-scale=1,target-densitydpi=device-dpi ">
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@2.51.3/dist/full.css" rel="stylesheet" type="text/css"/>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+<div class="container">
+    <div class="flex flex-col items-center h-screen w-screen">
+        <div class="flex flex-col items-center justify-center">
+            <h1 class="text-5xl font-bold mt-20">Document AI</h1>
+            <p class="text-xl my-10">一个基于本地知识库的AI</p>
+        </div>
+        <div class="flex flex-row items-center justify-center w-full">
+            <input id="search" type="text" placeholder="请输出查询内容"
+                   class="input input-bordered w-2/3 lg:w-2/5 mr-2"/>
+            <button class="btn btn-primary">提交</button>
+        </div>
+        <div class="flex flex-col justify-start mt-10 mx-5">
+            <div class="card bg-base-100 shadow-md">
+                <div class="card-body">
+                    <h2 class="card-title">AI 回答</h2>
+                    <p class="text-lg" id="answer"></p>
+                    <div class="card-actions justify-start" id="tags">
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+    const submitButton = document.querySelector('button');
+    const search = document.querySelector('#search');
+    const card = document.querySelector('.card');
+    card.style.display = 'none';
+    submitButton.addEventListener('click', () => {
+        const data = {
+            search: search.value,
+        };
+        fetch('/search', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(data)
+        }).then(res => res.json()).then(data => {
+            card.style.display = 'block';
+            document.querySelector('#answer').innerHTML = data.data.answer;
+            document.querySelector('#tags').innerHTML = data.data.tags.map(tag => `<div class="badge badge-primary badge-outline">${tag}</div>`).join('');
+        });
+    });
+
+</script>
+</body>
+</html>
