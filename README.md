@@ -56,9 +56,9 @@ openAI 的Embedding模型数据更多是基于普遍性数据训练，如果你�
 为了做这个Demo我还训练了两个医疗问答相关的模型基于`cMedQQ`数据集，其他与上面的一致分别是[text2vec-cmedqq-lert-large](https://huggingface.co/GanymedeNil/text2vec-cmedqq-lert-large)和[text2vec-cmedqq-lert-base](https://huggingface.co/GanymedeNil/text2vec-cmedqq-lert-base)。
 
 #### 基于 Fine-tune
-目前我自身测试下来，使用问答数据集对GPT模型进行Fine-tune后，问答准确性会大幅提高。你可以理解为GPT通过大量的专业领域数据的学习后成为了该领域专家，然后配合调小接口中`temperature`参数，可以得到更准确的结果。
+目前我自身测试下来，使用问答数据集对GPT模型进行Fine-tune后，对于该类问题的准确性大幅提高。你可以理解为GPT通过大量的专业领域数据的训练后，当你对它提问的时候会更像在和这个领域的专家对话，然后配合调小接口中`temperature`参数，可以得到更确定的结果。
 
-但 现在 Fine-tune 训练和使用成本还是太高，每天都会有新的数据，不可能高频的进行 Fine-tune。我的一个想法是每隔一个长周期对数据进行 Fine-tune ，然后配合外置的向量数据库的相似查询来补足 Fine-tune 模型本身的数据落后问题。
+但 现在 Fine-tune 训练和使用成本还是太高，每天都会有新的数据，不可能高频的进行 Fine-tune。我的一个想法是每隔一个长周期对数据进行 Fine-tune ，然后配合外置的向量数据库的相似查询来补足 Fine-tune 模型本身的数据准确性问题。
 
 ## Buy me a coffee
 <div align="center">
