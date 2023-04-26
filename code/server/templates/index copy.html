@@ -11,33 +11,38 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         .qdrant-result {
+            background-color: #f8fafc;
+            padding: 16px;
+            border-radius: 8px;
             margin-bottom: 16px;
         }
-        
+    
         .result-title {
             font-size: 1.25rem;
             margin-bottom: 4px;
             color: #1967d2;
         }
-        
+    
         .result-metadata {
             font-size: 0.875rem;
             color: #4d5156;
         }
-        
+    
         .result-filename {
-            font-weight: bold;
+            /* font-weight: bold; */
+            color:green;
             margin-right: 8px;
         }
-        
+    
         .result-time {
             margin-left: 8px;
             color:green;
         }
         .result-text{
-            font-size:12px;
+            font-size:0.875rem;
         }
     </style>
+    
     
 </head>
 <body>
@@ -48,6 +53,9 @@
             <p class="text-xl my-10">一个基于本地知识库的AI</p>
         </div>
         <div class="flex flex-row items-center justify-center w-full">
+            <select id="collection-select" class="appearance-none rounded-md border-gray-300 border pl-3 pr-10 py-2 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+                <option value="" disabled selected>Select a Datasource</option>
+            </select>
             <input id="search" type="text" placeholder="请输出查询内容"
                    class="input input-bordered w-2/3 lg:w-2/5 mr-2"/>
             <button id="search-button" class="btn btn-primary flex items-center justify-center">
@@ -99,12 +107,38 @@
         // const aiOutput = document.getElementById('ai_output');
         aiOutput.innerHTML += data.content;
     });
+
+
+    function loadCollections() {
+        fetch('/collections')
+            .then(response => response.json())
+            .then(data => {
+            const select = document.getElementById('collection-select');
+            data.collections.forEach((collection, index) => {
+                const option = document.createElement('option');
+                option.value = collection;
+                option.text = collection;
+                select.appendChild(option);
+
+                if (index === 0) {
+                option.selected = true;
+                }
+            });
+        });
+    }
+
+    loadCollections();
+
+
     submitButton.addEventListener('click', () => {
         loading.style.display = 'block';
         submitText.style.display = 'none';
         aiOutput.innerHTML = "";
+        
+        const collection = document.getElementById('collection-select').value;  
         const data = {
             search: search.value,
+            collection:collection
         };
         fetch('/search', {
             method: 'POST',
@@ -121,16 +155,7 @@
 
             const qdrantResults = data.data.qdrant_results;
             const qdrantResultsContainer = document.querySelector("#qdrant-results");
-            // payload={
-            //                                 "title": chunk_summary, 
-            //                                 "text": chunk_text, 
-            //                                 "file_summary": chunk0_summary,
-            //                                 "file_type":file_type, 
-            //                                 "file_update_time": file_update_time, 
-            //                                 "file_name": file_name,
-            //                                 "file_uuid":file_uuid, 
-            //                                 "file_chunk": file_chunk
-            //                              }
+
             qdrantResultsContainer.innerHTML = qdrantResults.map(result => `
                 <div class="qdrant-result">
                     <h3 class="result-title">${result.payload.title}</h3>
@@ -142,7 +167,6 @@
                     <p class="result-text">${result.payload.text}</p>
                 </div>
             `).join('');
-            // qdrantResultsContainer.innerHTML = qdrantResults.map(result => `<p><strong>${result.title}</strong><br><span class="text-green-600">${result.time} ${result.filename}</span><br/>${result.text}</p><br/>`).join('');
 
         }).catch(error => {
             loading.style.display = 'none';

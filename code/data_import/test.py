@@ -70,6 +70,8 @@ def filter_chinese_and_punctuations(text):
     # 使用正则表达式过滤文本
     result = pattern.findall(text)
     filtered_text = ''.join(result)
+    # 去除中文和中文之间的换行符
+    filtered_text = re.sub(r'([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])', r'\1\2', filtered_text)
     return filtered_text
 
 # 读取PDF文件的内容到变量中
@@ -77,9 +79,91 @@ file = 'source_data/report_20230425/2023-04-25_东吴证券_电动车2023年4月
 content_pypdf2 = parse_pdf_with_pypdf2(file)
 content_pypdf2 = filter_chinese_and_punctuations(content_pypdf2)
 # # 输出解析结果
-print("pypdf2解析结果：")
-print(content_pypdf2)
+# print("pypdf2解析结果：")
+# print(content_pypdf2)
+
+# import re
+# from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+# WHITESPACE_HANDLER = lambda k: re.sub('\s+', ' ', re.sub('\n+', ' ', k.strip()))
+# model_name = "csebuetnlp/mT5_multilingual_XLSum"
+# tokenizer = AutoTokenizer.from_pretrained(model_name)
+# model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+# def get_summary(text, summary_length=200):
+    
+
+#     input_ids = tokenizer(
+#         [WHITESPACE_HANDLER(text)],
+#         return_tensors="pt",
+#         padding="max_length",
+#         truncation=True,
+#         max_length=512
+#     )["input_ids"]
+
+#     output_ids = model.generate(
+#         input_ids=input_ids,
+#         max_length=summary_length, #84
+#         no_repeat_ngram_size=2,
+#         num_beams=4
+#     )[0]
+
+#     summary = tokenizer.decode(
+#         output_ids,
+#         skip_special_tokens=True,
+#         clean_up_tokenization_spaces=False
+#     )
+#     return summary
+# def main():
+#     for _ in range(10):
+#         get_summary(content_pypdf2)
+    
+# if __name__ == "__main__":    
+#     main()
+# summary = get_summary(content_pypdf2)
+# import cProfile
+
+# cProfile.run("main()")
 
 # content_pdfminer = extract_text(file)
 # print("PDFMiner解析结果：")
-# print(content_pdfminer)
+# print(summary)
+
+
+import os
+import hashlib
+import shutil
+
+def file_hash(file_path):
+    with open(file_path, 'rb') as f:
+        file_data = f.read()
+        file_hash = hashlib.md5(file_data).hexdigest()
+    return file_hash
+
+def find_duplicate_files_and_move(src_folder, duplicate_folder):
+    if not os.path.exists(duplicate_folder):
+        os.makedirs(duplicate_folder)
+
+    file_hashes = {}
+    for root, _, files in os.walk(src_folder):
+        for file in files:
+            file_path = os.path.join(root, file)
+            print(f"Processing file: {file_path}")
+            current_file_hash = file_hash(file_path)
+
+            if current_file_hash in file_hashes:
+                existing_file_path = file_hashes[current_file_hash]
+                if len(file) > len(os.path.basename(existing_file_path)):
+                    duplicate_file_path = os.path.join(duplicate_folder, file)
+                    shutil.move(file_path, duplicate_file_path)
+                    print(f"Moved duplicate file: {file_path} to {duplicate_file_path}")
+                else:
+                    duplicate_file_path = os.path.join(duplicate_folder, os.path.basename(existing_file_path))
+                    shutil.move(existing_file_path, duplicate_file_path)
+                    print(f"Moved duplicate file: {existing_file_path} to {duplicate_file_path}")
+                    file_hashes[current_file_hash] = file_path
+            else:
+                file_hashes[current_file_hash] = file_path
+
+if __name__ == "__main__":
+    src_folder = "./"  # 替换为需要遍历的文件夹
+    duplicate_folder = "duplicate_delete"
+    find_duplicate_files_and_move(src_folder, duplicate_folder)

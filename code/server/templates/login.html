@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login</title>
+</head>
+<body>
+    <h1>Login</h1>
+    <form action="{{ url_for('login') }}" method="POST">
+        {{ form.csrf_token }}
+        <label for="{{ form.username.id }}">Username:</label>
+        <input type="text" id="{{ form.username.id }}" name="{{ form.username.name }}" required>
+        <br>
+        <label for="{{ form.password.id }}">Password:</label>
+        <input type="password" id="{{ form.password.id }}" name="{{ form.password.name }}" required>
+        <br>
+        <input type="submit" value="Login">
+    </form>
+</body>
+</html>

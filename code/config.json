@@ -1,0 +1,17 @@
+{
+    "base_dir": {
+      "heack": "./source_data/heack",
+      "qiyinxue": "./source_data/qiyinxue"
+    }, 
+    "users": [
+        {
+          "username": "laohe",
+          "password": "laohe123"
+        },
+        {
+          "username": "heack",
+          "password": "kongyang123"
+        }
+      ]
+  }
+  

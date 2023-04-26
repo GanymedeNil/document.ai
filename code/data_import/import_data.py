@@ -18,6 +18,45 @@ import torch
 from text2vec import SentenceModel
 from transformers import PegasusForConditionalGeneration
 
+"""
+找到重复的文件，并且移动到指定的目录中
+"""
+import os
+import hashlib
+import shutil
+
+def file_hash(file_path):
+    with open(file_path, 'rb') as f:
+        file_data = f.read()
+        file_hash = hashlib.md5(file_data).hexdigest()
+    return file_hash
+
+
+def find_duplicate_files_and_move(src_folder, duplicate_folder):
+    if not os.path.exists(duplicate_folder):
+        os.makedirs(duplicate_folder)
+
+    file_hashes = {}
+    for root, _, files in os.walk(src_folder):
+        for file in files:
+            file_path = os.path.join(root, file)
+            current_file_hash = file_hash(file_path)
+
+            if current_file_hash in file_hashes:
+                existing_file_path = file_hashes[current_file_hash]
+                if len(file) > len(os.path.basename(existing_file_path)):
+                    duplicate_file_path = os.path.join(duplicate_folder, file)
+                    shutil.move(file_path, duplicate_file_path)
+                    print(f"Moved duplicate file: {file_path} to {duplicate_file_path}")
+                else:
+                    duplicate_file_path = os.path.join(duplicate_folder, os.path.basename(existing_file_path))
+                    shutil.move(existing_file_path, duplicate_file_path)
+                    print(f"Moved duplicate file: {existing_file_path} to {duplicate_file_path}")
+                    file_hashes[current_file_hash] = file_path
+            else:
+                file_hashes[current_file_hash] = file_path
+
+
 
 def filter_chinese_and_punctuations(text):
     # 定义正则表达式，匹配中文、数字和标准的标点符号、英文字符和空格、回车符、制表符等，以及键盘上数字哪一行的所有符号
@@ -28,6 +67,7 @@ def filter_chinese_and_punctuations(text):
     # 使用正则表达式过滤文本
     result = pattern.findall(text)
     filtered_text = ''.join(result)
+    filtered_text = re.sub(r'([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])', r'\1\2', filtered_text)
     return filtered_text
 
 
@@ -63,12 +103,11 @@ import os
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 import re
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+WHITESPACE_HANDLER = lambda k: re.sub('\s+', ' ', re.sub('\n+', ' ', k.strip()))
+summary_model_name = "csebuetnlp/mT5_multilingual_XLSum"
+tokenizer = AutoTokenizer.from_pretrained(summary_model_name)
+summary_model = AutoModelForSeq2SeqLM.from_pretrained(summary_model_name)
 def get_summary(text, summary_length=200):
-    WHITESPACE_HANDLER = lambda k: re.sub('\s+', ' ', re.sub('\n+', ' ', k.strip()))
-    model_name = "csebuetnlp/mT5_multilingual_XLSum"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-
     input_ids = tokenizer(
         [WHITESPACE_HANDLER(text)],
         return_tensors="pt",
@@ -77,7 +116,7 @@ def get_summary(text, summary_length=200):
         max_length=512
     )["input_ids"]
 
-    output_ids = model.generate(
+    output_ids = summary_model.generate(
         input_ids=input_ids,
         max_length=summary_length, #84
         no_repeat_ngram_size=2,
@@ -162,8 +201,8 @@ def to_embeddings(text):
 
 from langchain.text_splitter import TokenTextSplitter
 def split_text_to_chunks(text, max_tokens=1000):
-    text = text.replace(" ","")
-    text = text.replace("\n","")
+    text = filter_chinese_and_punctuations(text)
+    text = text.replace("\n\n","\n").replace("  "," ").replace("\t\t","\t").replace("..",".")
     text_splitter = TokenTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
     texts = text_splitter.split_text(text)
     return texts
@@ -195,18 +234,21 @@ def split_text_to_chunks(text, max_tokens=1000):
 
 #     return chunks
 
-
+from PyPDF2.errors import PdfReadError
 def get_pdf_chunks(file_path, max_chunk_size=1000):
-    with open(file_path, "rb") as f:
-        pdf_reader = PyPDF2.PdfReader(f)
-        num_pages = len(pdf_reader.pages)
-        pages = [pdf_reader.pages[i].extract_text() for i in range(num_pages)]
+    chunks = []
+    try:
+        with open(file_path, "rb") as f:
+            pdf_reader = PyPDF2.PdfReader(f)
+            num_pages = len(pdf_reader.pages)
+            pages = [pdf_reader.pages[i].extract_text() for i in range(num_pages)]
 
-    full_text = "".join(pages)
-    
-    chunks = split_text_to_chunks(full_text, max_chunk_size)
-    # print(chunks)
+        full_text = "".join(pages)
+        chunks = split_text_to_chunks(full_text, max_chunk_size)
+    except PdfReadError:
+        print(f"Warning: Unable to read the PDF file '{file_path}', EOF marker not found. Skipping this file.")
     return chunks
+
 
 # if __name__ == '__main__':
 #     for root, dirs, files in os.walk("./source_data"):
@@ -250,39 +292,26 @@ def get_pdf_chunks(file_path, max_chunk_size=1000):
 #                 #     print(f"*********** title:{title}")
    
 # sys.exit(0)
-DEFAULT_COLLECTION_NAME = "heack"
  
-def main_loop():
+def main_loop(collection_name, base_dir):
+    # 清除掉重复的文件
+    print("start to delete duplicate files")
+    src_folder = base_dir  # 替换为需要遍历的文件夹
+    duplicate_folder = "duplicate_delete"
+    find_duplicate_files_and_move(src_folder, duplicate_folder)
+    
     client = QdrantClient("127.0.0.1", port=6333)
-    collection_name = DEFAULT_COLLECTION_NAME
-    # openai.api_key = os.getenv("OPENAI_API_KEY")
-    # 创建collection,如果已经创建了就不要改了
-    # client.recreate_collection(
-    #         collection_name=collection_name,
-    #         vectors_config=VectorParams(size=768, distance=Distance.COSINE),
-    #     )
-    # Check if the collection exists
     try:
         # Get information about existing collection
         collection_exists = client.get_collection(collection_name)
-        print(f"{DEFAULT_COLLECTION_NAME} exists")
+        print(f"{collection_exists} exists")
     except Exception as e:
         print(f"Collection {collection_name} not exists, create it")
         client.recreate_collection(
             collection_name=collection_name,
             vectors_config=VectorParams(size=768, distance=Distance.COSINE),
         )
-    try:
-        # Get information about existing collection
-        collection_exists = client.get_collection("qiyinxue")
-        print("Qiyinxue Collection exists")
-    except Exception as e:
-        print(f"Collection qiyinxue not exists, create it")
-        client.recreate_collection(
-            collection_name="qiyinxue",
-            vectors_config=VectorParams(size=768, distance=Distance.COSINE),
-        )
-    processed_list_file = "processed_list"
+    processed_list_file = os.path.join(base_dir, "processed_list")
     try:
         with open(processed_list_file, "r") as f:
             processed_files = set(line.strip() for line in f)
@@ -290,7 +319,7 @@ def main_loop():
         processed_files = set()  # If the file does not exist, create an empty set
 
     # count = 0
-    for root, dirs, files in os.walk("./source_data"):
+    for root, dirs, files in os.walk(base_dir):
         for file in tqdm.tqdm(files):
             file_path = os.path.join(root, file)
             file_name = os.path.basename(file_path)
@@ -301,13 +330,6 @@ def main_loop():
                 continue
             file_update_time = os.path.getmtime(file_path)
             file_uuid = str(uuid.uuid5(namespace, f"{file_path}_0")) # check file chunk 0 if exists
-
-            
-            # 判断文件是否在 source_data/qiyinxue 目录下
-            if "source_data/qiyinxue" in file_path.replace("\\", "/"):
-                collection_name = "qiyinxue"
-            else:
-                collection_name = DEFAULT_COLLECTION_NAME
                 
             print(f"processing file_path:{file_path} with UUiD:{file_uuid} to collection:{collection_name}")
             existing_points = client.retrieve(
@@ -344,9 +366,6 @@ def main_loop():
                 elif file.lower().endswith('.doc'):
                     print("cannot process .doc file, please convert it to .docx first, next...")
                     continue
-                    # file_type = "word"
-                    # text = docx2txt.process(file_path)
-                    # chunks = split_text_to_chunks(text)
                 elif file.lower().endswith('.txt'):
                     file_type = "text"
                     with open(file_path, 'r', encoding='utf-8') as f:
@@ -383,7 +402,25 @@ def main_loop():
                         ],
                     )
 import time
+import json
+import argparse
+
+parser = argparse.ArgumentParser(description="Update collections with specified collection name")
+parser.add_argument("--collection_name", type=str, required=True, help="Specify the collection name")
+args = parser.parse_args()
+collection_name = args.collection_name
+
 if __name__ == '__main__':
+    with open('../config.json', 'r') as f:
+        config = json.load(f)
+        
+    if collection_name not in config['base_dir']:
+        raise KeyError(f"Collection '{collection_name}' is not defined in config file.")
+    base_dir = config['base_dir'][collection_name]
+    if not os.path.isdir(base_dir):
+        print(f"Error: The base directory {base_dir} for collection '{args.collection_name}' does not exist.")
+        sys.exit(1)
+    print(f"process from dir {base_dir} to collection {collection_name}")
     while True:
-        main_loop()
+        main_loop(collection_name, base_dir)
         time.sleep(60)
