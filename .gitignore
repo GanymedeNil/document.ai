@@ -1,0 +1,29 @@
+# Ignore compiled Python files
+*.pyc
+
+# Ignore virtual environment folders
+venv/
+env/
+ENV/
+
+# Ignore generated files
+__pycache__/
+*.pyo
+*.egg-info/
+dist/
+build/
+*.log
+*.out
+
+# Ignore data files
+qdrant_storage
+
+# Ignore server dependencies
+code/server/venv/
+code/server/__pycache__/
+code/server/*.pyc
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.iml
