@@ -1,3 +1,17 @@
 qdrant_client
 openai
 Flask
+Flask-Login
+Flask-SocketIO
+Flask-WTF
+openai
+text2vec
+Werkzeug
+WTForms
+tqdm
+transformers
+langchain
+torch
+sentencepiece
+pexpect
+tiktoken

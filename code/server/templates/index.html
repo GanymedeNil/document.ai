@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>MSD AI</title>
+    <title>ChatDocs</title>
     <meta name="viewport"
           content="width=device-width,height=device-height, user-scalable=no,initial-scale=1, minimum-scale=1, maximum-scale=1,target-densitydpi=device-dpi ">
     <link href="https://cdn.jsdelivr.net/npm/daisyui@2.51.3/dist/full.css" rel="stylesheet" type="text/css"/>
@@ -10,6 +10,10 @@
     <!-- <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.4.1/socket.io.min.js" integrity="sha512-2RDFaWxfA7NvB6hfgV2Rri/y6kDQXUaXOOBZV6UxbF6Mtp8eyOv+MlkcJhBRO6fEQTl9OgF5OWPZlEy5gCJ5Qw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script> -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
+        .card-border {
+            border: 1px solid skyblue;
+            box-shadow: none;
+        }
         .qdrant-result {
             background-color: #f8fafc;
             padding: 16px;
@@ -41,34 +45,60 @@
         .result-text{
             font-size:0.875rem;
         }
+        .file-card {
+            width: calc(33.3333% - 1rem - 20px);
+            max-width: calc(33.3333% - 1rem - 20px);
+            margin-bottom: 1rem;
+            margin-left: 10px;
+            margin-right: 10px;
+            position: relative;
+            background-color: #f8fafc;
+        }
+
+        .file-card span:nth-child(2) {
+            color: green;
+        }
+
+        .file-card.selected {
+            border: 2px solid blue;
+        }
+
+        .checkmark {
+            position: absolute;
+            bottom: 2px;
+            right: 2px;
+            font-size: 10px;
+            color: blue;
+        }
+
     </style>
     
     
 </head>
 <body>
 <div class="container">
-    <div class="flex flex-col items-center h-screen w-screen">
+    <div class="flex flex-col items-center h-screen w-screen px-5">
         <div class="flex flex-col items-center justify-center">
-            <h1 class="text-5xl font-bold mt-20">Document AI</h1>
+            <h1 class="text-5xl font-bold mt-20">ChatDocs</h1>
             <p class="text-xl my-10">一个基于本地知识库的AI</p>
         </div>
         <div class="flex flex-row items-center justify-center w-full">
-
-
             <select id="collection-select" class="appearance-none rounded-md border-gray-300 border border-blue-500 h-full pl-3 pr-10 py-2 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 mr-2">
                 <option value="" disabled selected>Select a Datasource</option>
             </select>
-            <input id="search" type="text" placeholder="请输出查询内容" class="input input-bordered border border-blue-500 w-2/3 lg:w-2/5 mr-2"/>
+            <input id="search" type="text" placeholder="请输出查询内容" class="input input-bordered border  w-2/3 lg:w-2/5 mr-2"/>
             <button id="search-button" class="btn btn-primary flex items-center justify-center">
-                <span id="submit-text">提交</span>
+                <span id="submit-text">AI问答
+                </span>
                 <svg id="loading" class="animate-spin h-5 w-5 ml-2 text-white" style="display: none;" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                     <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                 </svg>
             </button>
+            <button id="search-files" class="btn btn-primary ml-2">搜索文件名</button>
         </div>
-        <div class="flex flex-col justify-start mt-10 mx-5">
-            <div class="card bg-base-100 shadow-md">
+        <div class="flex flex-col justify-start mt-10 mx-5 w-full">
+            <div class="card bg-base-100 shadow-md card-border">
                 <div class="card-body">
                     <h3 class="card-title">AI 回答</h3>
                     <div id="ai_output"></div>
@@ -78,8 +108,26 @@
                 </div>
             </div>
         </div>
-        <div class="flex flex-col justify-start mt-10 mx-5">
-            <div class="card bg-base-100 shadow-md">
+
+        <!-- 将文件名卡片和清除选择按钮放到一个卡片中 -->
+        <div class="flex flex-col justify-start mt-10 mx-5 w-full">
+            <div class="card bg-base-100 shadow-md card-border">
+                <div class="card-body">
+                    <h3 class="card-title">和文件对话</h3>
+                    <!-- 在搜索框下方添加一个区域显示文件名卡片 -->
+                    <div class="flex flex-wrap my-4 justify-center" id="file-cards-container">
+                    </div>
+                    <!-- 添加一个清除选择的按钮 -->
+                    <div class="flex items-center justify-center">
+                        <span id="select-file-text" class="text-center text-gray-500" >选择上面的文件以和文件(s)对话</span>
+                        <button id="clear-selection" class="btn btn-outline btn-primary mt-2 ml-2">清除选择</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="flex flex-col justify-start mt-10 mx-5 w-full">
+            <div class="card bg-base-100 shadow-md card-border">
                 <div class="card-body">
                     <h3 class="card-title">Qdrant 结果</h3>
                     <div class="text-lg" id="qdrant-results"></div>
@@ -131,17 +179,82 @@
 
     loadCollections();
 
+    function updateFileCards(uniqueFiles) {
+        const fileCardsContainer = document.querySelector("#file-cards-container");
+        // 为每个唯一的文件名创建卡片
+        fileCardsContainer.innerHTML = uniqueFiles.map(file => `
+            <div class="file-card text-gray-700 p-2 m-1 rounded cursor-pointer" data-file-name="${file.file_name}">
+                <span>${file.file_name}</span>
+                <span class="text-green-500">${file.time}</span>
+            </div>
+        `).join('');
+        const fileCards = document.querySelectorAll(".file-card");
+        fileCards.forEach(fileCard => {
+            fileCard.addEventListener("click", () => {
+                if (fileCard.classList.contains('selected')) {
+                    fileCard.classList.remove('selected');
+                    const checkmark = fileCard.querySelector('.checkmark');
+                    if (checkmark) {
+                        fileCard.removeChild(checkmark);
+                    }
+                } else {
+                    fileCard.classList.add('selected');
+                    const checkmark = document.createElement('div');
+                    checkmark.classList.add('checkmark');
+                    checkmark.innerHTML = '✔';
+                    fileCard.appendChild(checkmark);
+                }
+                // fileCard.classList.toggle("selected");
+            });
+        });
+
+        if (uniqueFiles.length > 0) {
+            document.querySelector('#clear-selection').style.display = 'inline-block';
+            document.querySelector('#select-file-text').style.display = 'block';
+        } else {
+            document.querySelector('#clear-selection').style.display = 'none';
+            document.querySelector('#select-file-text').style.display = 'none';
+        }
+    }
+
+    // 为清除选择按钮添加事件监听器
+    const clearSelectionButton = document.querySelector("#clear-selection");
+    clearSelectionButton.addEventListener("click", () => {
+        const fileCards = document.querySelectorAll(".file-card");
+        fileCards.forEach(fileCard => {
+            fileCard.classList.remove("selected");
+            const checkmark = fileCard.querySelector('.checkmark');
+            if (checkmark) {
+                fileCard.removeChild(checkmark);
+            }
+        });
+    });
+
+    document.getElementById('search-files').addEventListener('click', async () => {
+        if (search.value.length === 0) {
+            return;
+        }
+        const collectionName = document.getElementById('collection-select').value;  
+        const encodedSearchTerm = encodeURIComponent(search.value);
+        const response = await fetch(`/search_files/${collectionName}/${encodedSearchTerm}`);
+        const data = await response.json();
+        const files = data.files;
+        updateFileCards(files);
+    });
 
     submitButton.addEventListener('click', () => {
         loading.style.display = 'block';
         submitText.style.display = 'none';
         aiOutput.innerHTML = "";
-        
+        // 在搜索按钮的点击事件中，收集选中的卡片
+        const selectedFileNames = Array.from(document.querySelectorAll(".file-card.selected")).map(card => card.dataset.fileName);
+
         const collection = document.getElementById('collection-select').value;  
         const data = {
             search: search.value,
             collection:collection,
-            client_id:clientId
+            client_id:clientId,
+            selected_files: selectedFileNames
         };
         fetch('/search', {
             method: 'POST',
@@ -161,7 +274,7 @@
 
             qdrantResultsContainer.innerHTML = qdrantResults.map(result => `
                 <div class="qdrant-result">
-                    <h3 class="result-title">${result.payload.title}</h3>
+                    <h3 class="result-title"><a href="/download/${result.payload.file_dir}/${result.payload.file_name}" target=_blank>${result.payload.title}</a></h3>
                     <p class="result-metadata">
                         <span class="result-filename">${result.payload.file_name}</span>
                         <span class="result-file-summary">${result.payload.file_summary}</span>
@@ -170,6 +283,17 @@
                     <p class="result-text">${result.payload.text}</p>
                 </div>
             `).join('');
+            if (selectedFileNames.length === 0) {
+                const uniqueFiles = Array.from(
+                    new Set(qdrantResults.map(result => result.payload.file_name))
+                ).map(file_name => {
+                    return {
+                        file_name: file_name,
+                        time: qdrantResults.find(result => result.payload.file_name === file_name).time
+                    };
+                });
+                updateFileCards(uniqueFiles);
+            }
 
         }).catch(error => {
             loading.style.display = 'none';

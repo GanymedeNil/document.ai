@@ -1,7 +1,8 @@
 {
     "base_dir": {
       "heack": "./source_data/heack",
-      "qiyinxue": "./source_data/qiyinxue"
+      "qiyinxue": "./source_data/qiyinxue",
+      "chatdocs": "./source_data/test"
     }, 
     "users": [
         {

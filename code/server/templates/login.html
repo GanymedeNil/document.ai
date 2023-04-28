@@ -4,18 +4,27 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Login</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.16/dist/tailwind.min.css" crossorigin="anonymous">
 </head>
-<body>
-    <h1>Login</h1>
-    <form action="{{ url_for('login') }}" method="POST">
-        {{ form.csrf_token }}
-        <label for="{{ form.username.id }}">Username:</label>
-        <input type="text" id="{{ form.username.id }}" name="{{ form.username.name }}" required>
-        <br>
-        <label for="{{ form.password.id }}">Password:</label>
-        <input type="password" id="{{ form.password.id }}" name="{{ form.password.name }}" required>
-        <br>
-        <input type="submit" value="Login">
-    </form>
+<body class="bg-gray-100">
+    <div class="container mx-auto">
+        <div class="w-full max-w-xs mx-auto mt-20">
+            <h1 class="text-center text-3xl font-bold mb-8">Login</h1>
+            <form action="{{ url_for('login') }}" method="POST" class="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4">
+                {{ form.csrf_token }}
+                <div class="mb-4">
+                    <label for="{{ form.username.id }}" class="block text-gray-700 text-sm font-bold mb-2">Username:</label>
+                    <input type="text" id="{{ form.username.id }}" name="{{ form.username.name }}" required class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline">
+                </div>
+                <div class="mb-6">
+                    <label for="{{ form.password.id }}" class="block text-gray-700 text-sm font-bold mb-2">Password:</label>
+                    <input type="password" id="{{ form.password.id }}" name="{{ form.password.name }}" required class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 mb-3 leading-tight focus:outline-none focus:shadow-outline">
+                </div>
+                <div class="flex items-center justify-between">
+                    <input type="submit" value="Login" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline">
+                </div>
+            </form>
+        </div>
+    </div>
 </body>
 </html>

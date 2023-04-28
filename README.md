@@ -1,70 +1,61 @@
-# document.ai
-基于向量数据库与GPT3.5的通用本地知识库方案(A universal local knowledge base solution based on vector database and GPT3.5)
+<h1 align="center">
+  ChatDocs
+</h1>
 
+<p align="center">
+  <strong>开源本地文档智能对话AI Open Source Local Documents Based AI</strong>
+</p>
 
+<p align="left">
+  <strong>ChatDocs</strong> 可以对本地文档进行索引，并通过调用GPT接口，整合信息进行本地文档智能对话。相对于在线GPT，本程序有以下功能：
+  <p>1. 可以对本地文档进行索引，目前支持PDF/PPTX/DOCX/TXT，未来会支持更多。这里的信息在线GPT不可能知道，也无法提供帮助。<p>
+  <p>2. 对本地文档索引可以形成独立人格的只属于个人或者公司的知识库，而且会对各个文档的内容进行串联，形成一个贾维斯式大脑，大大提升工作效率和决策效率</p>
+  <p>3. 既支持和所有文件进行统一搜索，也支持针对特定文件(一个或多个)进行统一问询，大大增加知识获取的广度和深度</p>
+</p>
 
-## 目录
-
- `code` 目录中有本次MSD示例的相关示例代码
-
- `docs` 目录主要是关于我在这个方向的一些思考和总结
-
-
-## 流程
-
+### 流程
 ![](./docs/flow.png)
+### 首页
+![](./docs/home.png)
+### 搜索所有数据库，同时会把相关文档列出来，可以进一步选择文档(s)进行深度对话。
+![](./docs/search_text.png)
+### 选择具体文档进行对话
+![](./docs/talktodocs1.png)
 
-整个流程非常简单，也没有复杂的地方，相信关注GPT领域的都会看到过如上的流程。
+## 主要文件
 
-主要就以下几个点：
+1. `code/server/server.py`: 基于Flask服务器程序，http网址默认端口3000 http://localhost:3000
+2. `code/data_import/import_data.py`: 索引文件，目前支持pdf/docx/pptx/txt后缀文件，其他文件会忽略
+3. `config.json`: 配置文件，其中base_dir是配置collection_name和索引文件所在路径。users是登录的用户名，本地访问会忽略登录这一步
 
-- 将本地答案数据集，转为向量存储到向量数据
-- 当用户输入查询的问题时，把问题转为向量然后从向量数据库中查询相近的答案topK
-  这个时候其实就是我们最普遍的问答查询方案，在没有GPT的时候就直接返回相关的答案整个流程就结束了
-- 现在有GPT了可以优化回答内容的整体结构，在单纯的搜索场景下其实这个优化没什么意义。但如果在客服等的聊天场景下，引用相关领域内容回复时，这样就会显得不那么的突兀。
+### 环境要求
 
-## 使用范围
-请参考 OpenAI 的使用政策
+- Python 3.8+ (基于此环境开发的)
 
-https://openai.com/policies/usage-policies
+## 安装和使用
 
-我的 MSD 案例只是探索其中一个垂直领域的可行性，你可以把这个项目迁移到任何你熟悉的领域中，而不必拘泥于医疗领域
+1. 配置config.json，上面有提到
+2. 分别进入code/server和code/data_import目录，按照相应的README进行配置和运行
 
-## 难点
+## 致谢
 
-### 查询数据不准确
+感谢原作者（GitHub用户名GanymedeNil）的项目（https://github.com/GanymedeNil/document.ai）
+提供了一个非常好的基础框架，本项目基于其框架进行了大量修改和改进。
 
-#### 基于数据的优化
+## 许可
+如商用，请联系我。
 
-##### 问答拆分查询
 
-在上面的例子中，我们直接将问题和答案做匹配，有些时候因为问题的模糊性会导致匹配不相关的答案。
-
-如果在已经有大量的问答映射数据的情况下，问题直接搜索问题集，然后基于已有映射返回当前问题匹配的问题集的答案，这样可以提升一定的问题准确性。
-
-##### 抽取主题词生成向量数据
-因为答案中有大量非答案的内容，可以通过抽取答案主题然后组合生成向量数据，也可以在一定程度上提升相似度，主题算法有LDA、LSA等。
-
-#### 基于自训练的Embedding模型
-
-openAI 的Embedding模型数据更多是基于普遍性数据训练，如果你要做问答的领域太过于专业有可能就会出现查询数据不准确的情况。
-
-解决方案是自训练 Embedding 模型，在这里我推荐一个项目 [text2vec](https://github.com/shibing624/text2vec) ，shibing624 已经给出了一个模型基于 `CoSENT + MacBERT +STS-B`，[shibing624/text2vec-base-chinese](https://huggingface.co/shibing624/text2vec-base-chinese)。
-
-我也在前些日子训练了基于 `CoSENT + LERT + STS-B`的两个模型一个隐层大小是1024的[text2vec-large-chinese](https://huggingface.co/GanymedeNil/text2vec-large-chinese)，另一个是768的[text2vec-base-chinese](https://huggingface.co/GanymedeNil/text2vec-base-chinese)。也欢迎比对。
-
-为了做这个Demo我还训练了两个医疗问答相关的模型基于`cMedQQ`数据集，其他与上面的一致分别是[text2vec-cmedqq-lert-large](https://huggingface.co/GanymedeNil/text2vec-cmedqq-lert-large)和[text2vec-cmedqq-lert-base](https://huggingface.co/GanymedeNil/text2vec-cmedqq-lert-base)。
-
-#### 基于 Fine-tune
-目前我自身测试下来，使用问答数据集对GPT模型进行Fine-tune后，对于该类问题的准确性大幅提高。你可以理解为GPT通过大量的专业领域数据的训练后，当你对它提问的时候会更像在和这个领域的专家对话，然后配合调小接口中`temperature`参数，可以得到更确定的结果。
-
-但 现在 Fine-tune 训练和使用成本还是太高，每天都会有新的数据，不可能高频的进行 Fine-tune。我的一个想法是每隔一个长周期对数据进行 Fine-tune ，然后配合外置的向量数据库的相似查询来补足 Fine-tune 模型本身的数据准确性问题。
+<img height="360" src="./docs/wx_contact.JPG"/>
 
 ## Buy me a coffee
 <div align="center">
 <a href="https://www.buymeacoffee.com/ganymedenil" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 </div>
 <div align="center">
-<img height="360" src="https://user-images.githubusercontent.com/9687786/224522468-eafb7042-d000-4799-9d16-450489e8efa4.png"/>
-<img height="360" src="https://user-images.githubusercontent.com/9687786/224522477-46f3e80b-0733-4be9-a829-37928260038c.png"/>
+<img height="360" src="./docs/wx.JPG"/>
+<img height="360" src="./docs/zfb.JPG"/>
 </div>
+
+
+

@@ -6,20 +6,20 @@ from flask import jsonify
 import openai
 import os
 from datetime import datetime
-from langchain.llms import OpenAI
-from langchain.text_splitter import CharacterTextSplitter
 from langchain.text_splitter import TokenTextSplitter
 import time
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO
 from flask_socketio import join_room
-from flask import session
 
-from flask import Flask, request, session, render_template, redirect, url_for
+from flask import Flask, request, session, render_template, redirect, url_for, send_from_directory
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, SubmitField
 from wtforms.validators import DataRequired, Length
 from flask_login import login_required
+from werkzeug.utils import safe_join
+from qdrant_client.http.models import models 
+import fnmatch
 
 
 app = Flask(__name__)
@@ -43,19 +43,14 @@ def localnet_or_login_required(f):
 
 date_format = "%Y-%m-%d %H:%M:%S"
 
-import os
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
 
-from langchain.callbacks.base import AsyncCallbackManager,CallbackManager
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
-import sys
+from langchain.callbacks.base import CallbackManager
 from typing import Any, Dict, List, Union
 from langchain.callbacks.base import BaseCallbackHandler
 from langchain.schema import AgentAction, AgentFinish, LLMResult
 from typing import Any
-
-
 
 socketio = SocketIO(app)
 
@@ -105,54 +100,11 @@ class StreamingSocketIOCallbackHandler(BaseCallbackHandler):
         pass
 
 from langchain.chat_models import ChatOpenAI
-from langchain.prompts.chat import (
-    ChatPromptTemplate,
-    SystemMessagePromptTemplate,
-    AIMessagePromptTemplate,
-    HumanMessagePromptTemplate,
-)
 from langchain.schema import (
-    AIMessage,
     HumanMessage,
     SystemMessage
 )
 
-
-# llm = OpenAI(temperature=0, n=1, streaming=True, callback_manager=CallbackManager([StreamingSocketIOCallbackHandler(socketio)]), verbose=True, max_tokens=460, model_name="gpt-3.5-turbo")
-
-import re
-
-# Summary model
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-WHITESPACE_HANDLER = lambda k: re.sub('\s+', ' ', re.sub('\n+', ' ', k.strip()))
-summary_model_name = "csebuetnlp/mT5_multilingual_XLSum"
-tokenizer = AutoTokenizer.from_pretrained(summary_model_name)
-summary_model = AutoModelForSeq2SeqLM.from_pretrained(summary_model_name)
-def get_summary(text, summary_length=200):
-    input_ids = tokenizer(
-        [WHITESPACE_HANDLER(text)],
-        return_tensors="pt",
-        padding="max_length",
-        truncation=True,
-        max_length=512
-    )["input_ids"]
-
-    output_ids = summary_model.generate(
-        input_ids=input_ids,
-        max_length=summary_length, #84
-        no_repeat_ngram_size=2,
-        num_beams=4
-    )[0]
-
-    summary = tokenizer.decode(
-        output_ids,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False
-    )
-    return summary
-
-
-import tiktoken
 def split_text_to_chunks(text, max_tokens=1000):
     text_splitter = TokenTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
     texts = text_splitter.split_text(text)
@@ -160,6 +112,7 @@ def split_text_to_chunks(text, max_tokens=1000):
 
 
 """
+示例
 请根据下面的数据库信息，整理分析总结并回答我的问题：请介绍一下东方电子
 要求：1. 下面信息由几个段落组成，段落以日期开始，不同段落之间可能毫无关联。
 2. 利用和我问题相关的段落回答我的问题,忽略不相关的段落。
@@ -187,46 +140,21 @@ A：AI、半导体、通信这三个领域，都是现在非常热点的领域�
 段落结束。
 """
 def prompt(question, context):
-    """
-    生成对话的示例提示语句，格式如下：
-    demo_q:
-    使用以下段落来回答问题，如果段落内容不相关就返回未查到相关信息："成人头疼，流鼻涕是感冒还是过敏？"
-    1. 普通感冒：您会出现喉咙发痒或喉咙痛，流鼻涕，流清澈的稀鼻涕（液体），有时轻度发热。
-    2. 常年过敏：症状包括鼻塞或流鼻涕，鼻、口或喉咙发痒，眼睛流泪、发红、发痒、肿胀，打喷嚏。
-    demo_a:
-    成人出现头痛和流鼻涕的症状，可能是由于普通感冒或常年过敏引起的。如果病人出现咽喉痛和咳嗽，感冒的可能性比较大；而如果出现口、喉咙发痒、眼睛肿胀等症状，常年过敏的可能性比较大。
-    system:
-    你是一个医院问诊机器人
-    """
-    # demo_q = '使用以下段落来回答问题："成人头疼，流鼻涕是感冒还是过敏？"\n1. 普通感冒：您会出现喉咙发痒或喉咙痛，流鼻涕，流清澈的稀鼻涕（液体），有时轻度发热。\n2. 常年过敏：症状包括鼻塞或流鼻涕，鼻、口或喉咙发痒，眼睛流泪、发红、发痒、肿胀，打喷嚏。'
-    # demo_a = '成人出现头痛和流鼻涕的症状，可能是由于普通感冒或常年过敏引起的。如果病人出现咽喉痛和咳嗽，感冒的可能性比较大；而如果出现口、喉咙发痒、眼睛肿胀等症状，常年过敏的可能性比较大。'
     system = '你是我的财经投资分析师。'
-    # q = '使用以下段落来回答问题，如果段落内容不相关就返回未查到相关信息："'
-    # q = 'Answer my questions only using data from the included context below in markdown format, include any relevant media or code snippets, if the answer is not in the text, say I do not know.'
     q = f"请根据下面的数据库信息，整理分析总结并回答我的问题：\"{question}\"。要求：利用和我问题相关的段落回答我的问题,忽略不相关的段落。段落开始：\n"
     q += f" {context} 段落结束。"
-    # 带有索引的格式
-    # for index, answer in enumerate(answers):
-    #     q += str(index + 1) + '. ' + str(answer['title']) + ': ' + str(answer['text']) + '\n'
-    # q += " 请用中文回答。"
     print(q)
-    """
-    system:代表的是你要让GPT生成内容的方向，在这个案例中我要让GPT生成的内容是医院问诊机器人的回答，所以我把system设置为医院问诊机器人
-    前面的user和assistant是我自己定义的，代表的是用户和医院问诊机器人的示例对话，主要规范输入和输出格式
-    下面的user代表的是实际的提问
-    """
+
     return (system, q)
 
 def query_single(client_id, question, context):
     llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo", callback_manager=CallbackManager([StreamingSocketIOCallbackHandler(socketio, client_id)]), streaming=True, verbose=True, max_tokens=460)
-    print("llm model name:", llm.model_name)
     system_msg, prompt_text = prompt(question, context)
     messages = [
         SystemMessage(content=system_msg),
         HumanMessage(content=prompt_text)
     ]
     msg = llm(messages, client_id)
-    # print("msg", msg, msg.content)
     return msg.content
 
 from text2vec import SentenceModel    
@@ -240,7 +168,8 @@ You are a helpful assistant
 Answer my questions only using data from the included context below in markdown format, 
 include any relevant media or code snippets, if the answer is not in the text, say I do not know.
 """
-def query(client_id, text, collection="data_collection"):
+from qdrant_client.conversions import common_types as types
+def query(client_id, text, collection="data_collection", selected_files=None):
     """
     text 如果加上|，比如 东方雨虹 | 总结文档， 那么会根据东方雨虹从数据库进行搜索，然后跟gpt问的问题是总结文档，
     执行逻辑：
@@ -258,11 +187,28 @@ def query(client_id, text, collection="data_collection"):
     """
     因为提示词的长度有限，所以我只取了搜索结果的前三个，如果想要更多的搜索结果，可以把limit设置为更大的值
     """
+    score_threshold = 0.5
+    # 根据选择的文件名创建过滤器
+    if len(selected_files) > 0:
+        score_threshold = 0.1 # 既然选择文件了，那就一定要搜索出来东西
+        query_filter=models.Filter(
+            should=[
+                models.FieldCondition(
+                    key='file_name',
+                    match=models.MatchValue(value=filename)
+                    ) for filename in selected_files
+            ]
+        )
+    else:
+        query_filter = None
+        
+    print(selected_files, query_filter, f"score_threshold={score_threshold}")
     search_result = client.search(
         collection_name=collection_name,
         query_vector=sentence_embeddings,
         limit=20,
-        score_threshold=0.5,
+        score_threshold=score_threshold,
+        query_filter=query_filter,
         search_params={"exact": False, "hnsw_ef": 256}
     )
     if len(search_result) == 0:
@@ -280,13 +226,13 @@ def query(client_id, text, collection="data_collection"):
     """
     completion_num = 0
     for result in search_result:
-        # summary = get_summary(result.payload["text"], 200)
         """
         PointStruct(id=point_id, vector=embedding_vector, payload={
                                             "title": chunk_summary, 
                                             "text": chunk_text, 
                                             "file_summary": chunk0_summary,
                                             "file_type":file_type, 
+                                            "file_dir":file_dir, 
                                             "file_update_time": file_update_time, 
                                             "file_name": file_name,
                                             "file_uuid":file_uuid, 
@@ -319,21 +265,8 @@ def query(client_id, text, collection="data_collection"):
         question = texts[1]
     else:
         question = text
-    # print(f"completion_texts,question",completion_texts,question)
     completion = query_single(client_id, question, completion_texts[0])
-    # for i in range(min(2, len(completion_texts))):
-        # completion += query_single(question, completion_texts[i])
-        # time.sleep(1)
-    # completion = openai.ChatCompletion.create(
-    #     temperature=0.7,
-    #     model="gpt-3.5-turbo",
-    #     # model="gpt-4",
-    #     messages=prompt(text, answers),
-    # )
-    # combined_answer = "\n\n".join([completion["answer"] for completion in completions])
-
     return {
-        # "answer": completion.choices[0].message.content,
         "answer":completion, 
         "tags": tags,
         "qdrant_results": answers,
@@ -345,14 +278,24 @@ def query(client_id, text, collection="data_collection"):
 def hello_world():
     return render_template('index.html')
 
+@app.route('/download/<path:file_path>', methods=['GET'])
+@localnet_or_login_required
+def download(file_path):
+    base_path = os.path.join(app.root_path, '../data_import')
+    safe_file_path = safe_join(base_path, file_path)
+    safe_file_dir, safe_file_name = os.path.split(safe_file_path)
+    return send_from_directory(directory=safe_file_dir, path=safe_file_name, as_attachment=False)
+
 
 @app.route('/search', methods=['POST'])
 def search():
     data = request.get_json()
+    print(data)
     search = data['search']
     client_id = data['client_id']
     collection = data['collection']
-    res = query(client_id, search, collection)
+    selected_files = data['selected_files']
+    res = query(client_id, search, collection, selected_files)
     return {
         "code": 200,
         "data": {
@@ -365,12 +308,45 @@ def search():
 
 @app.route('/collections')
 def get_collections():
-    client = QdrantClient("127.0.0.1", port=6333)
-    collections_response = client.get_collections()
-    collection_names = [collection.name for collection in collections_response.collections]
-
+    with open('../config.json', 'r') as f:
+        config = json.load(f)
+    collection_names = list(config['base_dir'].keys())
     return jsonify({"collections": collection_names})
-           
+
+@app.route('/search_files/<collection_name>/<search_term>')
+@localnet_or_login_required
+def search_files(collection_name, search_term):
+    with open('../config.json', 'r') as f:
+        config = json.load(f)
+
+    if collection_name not in config['base_dir']:
+        raise KeyError(f"Collection '{collection_name}' is not defined in config file.")
+    base_dir = os.path.abspath(os.path.join("../data_import", config['base_dir'][collection_name]))
+    
+    # 读取file_processing_status.json文件
+    with open(os.path.join(base_dir, 'file_processing_status.json'), 'r') as status_file:
+        file_processing_status = json.load(status_file)
+
+    matches = []
+    for root, dirnames, filenames in os.walk(base_dir):
+        for filename in fnmatch.filter(filenames, f'*{search_term}*'):
+            file_path = os.path.join(root, filename)
+            # 由于配置文件是以./开头的，这里也要，否则匹配不上来
+            rel_path = "./" + os.path.relpath(file_path, os.path.join("..", "data_import"))  # 获取相对于data_import的路径
+            # print(rel_path)
+            # 检查文件是否已完成索引
+            if rel_path in file_processing_status and file_processing_status[rel_path]['is_completed']:
+                ctime = os.path.getctime(file_path)
+                formatted_time = datetime.fromtimestamp(ctime).strftime('%Y-%m-%d %H:%M:%S')
+                matches.append({
+                    'file_name': os.path.basename(file_path),
+                    'time': formatted_time
+                })
+    # 按时间倒序排列文件
+    matches = sorted(matches, key=lambda x: x['time'], reverse=True)
+    matches = matches[:24]  # 只返回前24个文件
+    return jsonify({"files": matches})
+   
 @socketio.on('join_room')
 def handle_join_room(client_id):
     print("join_room", client_id)
