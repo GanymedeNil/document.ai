@@ -14,3 +14,6 @@
 
 ## 运行
 `python import_data.py --collection_name=xxx`
+
+
+`python import_news.py --collection_name=xxx`
