@@ -17,6 +17,17 @@ import argparse
 from pptx import Presentation
 
 """
+以下是获取summary的并行代码，这个耗时比较长
+"""
+import concurrent.futures
+import sys
+sys.path.append("..")  # 添加父目录到系统路径中，以便可以找到tool.py
+from get_summary import get_summary
+
+def thread_text_summary(executor, text, summary_length=200):
+    return executor.submit(get_summary, text, summary_length)
+
+"""
 找到重复的文件，并且移动到指定的目录中
 """
 import hashlib
@@ -54,7 +65,16 @@ def find_duplicate_files_and_move(src_folder, duplicate_folder):
             else:
                 file_hashes[current_file_hash] = file_path
 
-
+# def remove_garbled_characters(text):
+#     # 保留有效字符的正则表达式，包括中文字符
+#     valid_chars_regex = re.compile(r'[\u4e00-\u9fa5a-zA-Z0-9\s\.,;?!@#\$%\^&\*\(\)\-_=\+{}\[\]"\':<>\\\|]+')
+#     # 寻找所有有效字符
+#     valid_chars = valid_chars_regex.findall(text)
+#     # 将有效字符重新组合成一个新的字符串
+#     clean_text = ''.join(valid_chars)
+#     # 删除多余的空格和换行符
+#     clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+#     return clean_text
 # 过滤文本中的中文字符、标点符号和空格。
 def filter_chinese_and_punctuations(text):
     # 定义正则表达式，匹配中文、数字和标准的标点符号、英文字符和空格、回车符、制表符等，以及键盘上数字哪一行的所有符号
@@ -64,38 +84,12 @@ def filter_chinese_and_punctuations(text):
     filtered_text = ''.join(result)
     # 汉字中间的空格给去掉，pdf转译出来有很多空格
     filtered_text = re.sub(r'([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])', r'\1\2', filtered_text)
+    filtered_text = re.sub(r'\s+', ' ', filtered_text).strip()
     return filtered_text
 
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
-# 使用预训练模型生成文本摘要。
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-WHITESPACE_HANDLER = lambda k: re.sub('\s+', ' ', re.sub('\n+', ' ', k.strip()))
-summary_model_name = "csebuetnlp/mT5_multilingual_XLSum"
-tokenizer = AutoTokenizer.from_pretrained(summary_model_name)
-summary_model = AutoModelForSeq2SeqLM.from_pretrained(summary_model_name)
-def get_summary(text, summary_length=200):
-    input_ids = tokenizer(
-        [WHITESPACE_HANDLER(text)],
-        return_tensors="pt",
-        padding="max_length",
-        truncation=True,
-        max_length=512
-    )["input_ids"]
 
-    output_ids = summary_model.generate(
-        input_ids=input_ids,
-        max_length=summary_length, #84
-        no_repeat_ngram_size=2,
-        num_beams=4
-    )[0]
-
-    summary = tokenizer.decode(
-        output_ids,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False
-    )
-    return summary
 
 # 使用预训练模型将给定文本转换为句向量表示
 namespace = uuid.NAMESPACE_URL
@@ -104,14 +98,51 @@ def to_embeddings(text):
     embeddings = embed_model.encode([text])
     return embeddings[0].tolist()
 
+from typing import List
+import tiktoken
 # 将文本分割为最多包含1000个token的块，用来做Qdrant的索引。
-from langchain.text_splitter import TokenTextSplitter
-def split_text_to_chunks(text, max_tokens=1000):
+def split_text_to_chunks(text: str, max_tokens: int = 800, loop_back_num:int=50) -> List[str]:
     text = filter_chinese_and_punctuations(text)
-    text = text.replace("\n\n","\n").replace("  "," ").replace("\t\t","\t").replace("..",".")
-    text_splitter = TokenTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
-    texts = text_splitter.split_text(text)
-    return texts
+    encoding = tiktoken.get_encoding("gpt2")
+    chunks = []
+    current_chunk = ""
+    current_chunk_token_count = 0
+    index = 0
+
+    while index < len(text):
+        char = text[index]
+        current_chunk += char
+        char_token_count = len(encoding.encode(char))
+        current_chunk_token_count += char_token_count
+
+        if current_chunk_token_count >= max_tokens:
+            look_back = 0
+            split_point = len(current_chunk)
+            while look_back < loop_back_num and split_point - look_back > 0:
+                if current_chunk[split_point - look_back - 1] in {'\n', ' ', '　', '。', '.', '，',','}:
+                    split_point -= look_back
+                    break
+                look_back += 1
+
+            chunks.append(current_chunk[:split_point])
+            current_chunk = current_chunk[split_point:]
+            current_chunk_token_count = len(encoding.encode(current_chunk))
+            # index -= look_back
+        index += 1
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+# 将文本分割为最多包含1000个token的块，用来做Qdrant的索引。
+# from langchain.text_splitter import TokenTextSplitter
+# def split_text_to_chunks(text, max_tokens=1000):
+#     text = filter_chinese_and_punctuations(text)
+#     text = text.replace("\n\n","\n").replace("  "," ").replace("\t\t","\t").replace("..",".")
+#     text_splitter = TokenTextSplitter(chunk_size=max_tokens, chunk_overlap=0,)
+#     texts = text_splitter.split_text(text)
+#     return texts
 
 # PDF Reader
 
@@ -127,6 +158,8 @@ def get_pdf_chunks(file_path, max_chunk_size=1000):
         chunks = split_text_to_chunks(full_text, max_chunk_size)
     except PdfReadError:
         print(f"Warning: Unable to read the PDF file '{file_path}', EOF marker not found. Skipping this file.")
+    except Exception as e:
+        print(e)
     return chunks
 
 # pptx Reader
@@ -223,122 +256,137 @@ def main_loop(collection_name, base_dir):
     if not os.path.exists(status_file_path):
         with open(status_file_path, 'w') as f:
             json.dump({}, f)
-    
-    for root, dirs, files in os.walk(base_dir):
-        for file in tqdm.tqdm(files):
-            file_path = os.path.join(root, file)
-            file_dir = os.path.dirname(file_path)
-            file_name = os.path.basename(file_path)
-            if file_path == status_file_path:
-                continue
-            file_update_time = os.path.getmtime(file_path)
-            file_uuid = str(uuid.uuid5(namespace, f"{file_path}_0")) # check file chunk 0 if exists
-            
-            file_status = get_file_processing_status(status_file_path, file_path)
-            if file_status and file_status['is_completed']:
-                print(f"Skipping already processed file: {file_path}")
-                continue
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
 
-            last_processed_chunk = file_status['last_processed_chunk'] if file_status else -1
-            if last_processed_chunk != -1:
-                print(f"Resuming processing of file: {file_path} from chunk {last_processed_chunk + 1}")
-
-            print(f"processing file_path:{file_path} with UUiD:{file_uuid} to collection:{collection_name}")
-            
-            
-            """
-            按照如下方法进行索引：
-            文件的文本分为1000个字符的chunk， 由多个chunk组成
-            每个chunk的索引由一下内容组成：
-            1. 文件名
-            2. 第一页的chunk的summary
-            3. 本页的summary
-            4. 本页的内容
-            然后把第一页也就是第一个chunk做summary，这个summary+文件名和其他所有的chunk每个都结合做索引，但是存储内容只有chunk自身的内容
-            """
-            # print(f"existing_points:{file_path}")
-            # file_type = "pdf" # 将来打算再加上text, web, userinput等类型
-            # if not existing_points:
+        for root, dirs, files in os.walk(base_dir):
+            for file in tqdm.tqdm(files):
+                file_path = os.path.join(root, file)
+                file_dir = os.path.dirname(file_path)
+                file_name = os.path.basename(file_path)
+                if file_path == status_file_path:
+                    continue
+                file_update_time = os.path.getmtime(file_path)
+                file_uuid = str(uuid.uuid5(namespace, f"{file_path}_0")) # check file chunk 0 if exists
                 
-            if file.lower().endswith('.pdf'):
-                file_type = "pdf"
-                chunks = get_pdf_chunks(file_path)
-            elif file.lower().endswith('.docx'):
-                file_type = "word"
-                doc = docx.Document(file_path)
-                text = '\n'.join([para.text for para in doc.paragraphs])
-                chunks = split_text_to_chunks(text)
-            elif file.lower().endswith('.doc'):
-                print("cannot process .doc file, please convert it to .docx first, next...")
-                continue
-            elif file.lower().endswith('.pptx'):
-                file_type = "pptx"
-                text = read_pptx_text(file_path)
-                chunks = split_text_to_chunks(text)
-            elif file.lower().endswith('.txt'):
-                file_type = "text"
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    text = f.read()
+                file_status = get_file_processing_status(status_file_path, file_path)
+                if file_status and file_status['is_completed']:
+                    # print(f"Skipping already processed file: {file_path}")
+                    continue
+
+                last_processed_chunk = file_status['last_processed_chunk'] if file_status else -1
+                if last_processed_chunk != -1:
+                    print(f"Resuming processing of file: {file_path} from chunk {last_processed_chunk + 1}")
+
+                print(f"processing file_path:{file_path} with UUiD:{file_uuid} to collection:{collection_name}")
+                
+                
+                """
+                按照如下方法进行索引：
+                文件的文本分为1000个字符的chunk， 由多个chunk组成
+                每个chunk的索引由一下内容组成：
+                1. 文件名
+                2. 第一页的chunk的summary
+                3. 本页的summary
+                4. 本页的内容
+                然后把第一页也就是第一个chunk做summary，这个summary+文件名和其他所有的chunk每个都结合做索引，但是存储内容只有chunk自身的内容
+                """
+                # print(f"existing_points:{file_path}")
+                # file_type = "pdf" # 将来打算再加上text, web, userinput等类型
+                # if not existing_points:
+                    
+                if file.lower().endswith('.pdf'):
+                    file_type = "pdf"
+                    chunks = get_pdf_chunks(file_path)
+                elif file.lower().endswith('.docx'):
+                    file_type = "word"
+                    doc = docx.Document(file_path)
+                    text = '\n'.join([para.text for para in doc.paragraphs])
                     chunks = split_text_to_chunks(text)
-            else:
-                continue
-            
-            chunk0_summary = None
-            for file_chunk, chunk_text in enumerate(chunks):
-                is_last_chunk = file_chunk == len(chunks) - 1
-                point_id = str(uuid.uuid5(namespace, f"{file_path}_{file_chunk}"))
-                existing_points = client.retrieve(
-                    collection_name=collection_name,
-                    ids=[point_id], # check current point if exists
-                    with_payload=True
-                )
-                if existing_points:
-                    # 下面这段运行一整个循环以后，就可以去掉了，因为之前索引的没有这个file_dir
-                    if 'file_dir' not in existing_points[0].payload:
-                        # existing_points[0].payload['file_dir'] = file_dir
-                        print(f"updating...... point_id:{point_id} file_name:{file_name} file_chunk:{file_chunk} file_dir:{file_dir}")
-                        client.set_payload(
+                elif file.lower().endswith('.doc'):
+                    print("cannot process .doc file, please convert it to .docx first, next...")
+                    continue
+                elif file.lower().endswith('.pptx'):
+                    file_type = "pptx"
+                    text = read_pptx_text(file_path)
+                    chunks = split_text_to_chunks(text)
+                elif file.lower().endswith('.txt'):
+                    file_type = "text"
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        text = f.read()
+                        chunks = split_text_to_chunks(text)
+                else:
+                    continue
+                
+                chunk0_summary_future = None
+                chunkid_futures = [] # 处理summary的线程池
+                for file_chunk, chunk_text in enumerate(chunks):
+                    is_last_chunk = file_chunk == len(chunks) - 1
+                    point_id = str(uuid.uuid5(namespace, f"{file_path}_{file_chunk}"))
+                    existing_points = client.retrieve(
+                        collection_name=collection_name,
+                        ids=[point_id], # check current point if exists
+                        with_payload=True
+                    )
+                    if existing_points:
+                        # 下面这段运行一整个循环以后，就可以去掉了，因为之前索引的没有这个file_dir
+                        if 'file_dir' not in existing_points[0].payload:
+                            # existing_points[0].payload['file_dir'] = file_dir
+                            print(f"updating...... point_id:{point_id} file_name:{file_name} file_chunk:{file_chunk} file_dir:{file_dir}")
+                            client.set_payload(
+                                collection_name=collection_name,
+                                wait=True,
+                                payload={
+                                    "file_dir": file_dir
+                                },
+                                points=[point_id]
+                            )
+                        if  file_chunk > last_processed_chunk:
+                            # 存在此数据， 但是却没有更新到
+                            update_processing_status_file(status_file_path, file_path, file_chunk, is_last_chunk)
+                            last_processed_chunk = file_chunk
+                    else:
+                        # 数据库并未存在此记录
+                        if chunk0_summary_future is None:
+                            chunk0_summary_future = thread_text_summary(executor, chunks[0])
+                        if file_chunk == 0:
+                            chunkid_futures.append((file_chunk, chunk0_summary_future)) #不要重复定义了
+                        else:    
+                            chunkid_futures.append((file_chunk, thread_text_summary(executor, chunk_text)))
+                        
+                if chunk0_summary_future is not None:
+                    # 代表有需要处理的chunk
+                    chunk0_summary = chunk0_summary_future.result()
+                    for file_chunk, chunk_summary_future in chunkid_futures:
+                        is_last_chunk = file_chunk == len(chunks) - 1
+                        point_id = str(uuid.uuid5(namespace, f"{file_path}_{file_chunk}"))
+                        chunk_summary = chunk_summary_future.result()
+                        chunk_text = chunks[file_chunk]
+                        # chunk_summary = get_summary(chunk_text) # summary cost too much time
+                        embedding_text = f"{file_name} {chunk0_summary} {chunk_summary} {chunk_text}"
+                        print("---------------------embedding_text---------------------")
+                        print(embedding_text)
+                        embedding_vector = to_embeddings(embedding_text)
+                        print(f"inserting...... point_id:{point_id} file_name:{file_name}\n file_chunk:{file_chunk}\n chunk_summary:{chunk_summary}\nchunk_text:{chunk_text}\n ")
+                        client.upsert(
                             collection_name=collection_name,
                             wait=True,
-                            payload={
-                                "file_dir": file_dir
-                            },
-                            points=[point_id]
+                            points=[
+                                # user file_path as id, for future search
+                                PointStruct(id=point_id, vector=embedding_vector, payload={
+                                                "title": chunk_summary, 
+                                                "text": chunk_text, 
+                                                "file_summary": chunk0_summary,
+                                                "file_type":file_type, 
+                                                "file_update_time": file_update_time, 
+                                                "file_name": file_name,
+                                                "file_dir": file_dir,
+                                                "file_uuid":file_uuid, 
+                                                "file_chunk": file_chunk
+                                                }),
+                            ],
                         )
-                    if  file_chunk > last_processed_chunk:
-                        # 存在此数据， 但是却没有更新到
+                        
                         update_processing_status_file(status_file_path, file_path, file_chunk, is_last_chunk)
-                        last_processed_chunk = file_chunk
-                else:
-                    # 数据库并未存在此记录
-                    if chunk0_summary is None:
-                        chunk0_summary = get_summary(chunks[0])
-                    chunk_summary = get_summary(chunk_text) # summary cost too much time
-                    embedding_text = f"{file_name} {chunk0_summary} {chunk_summary} {chunk_text}"
-                    print("---------------------embedding_text---------------------")
-                    print(embedding_text)
-                    embedding_vector = to_embeddings(embedding_text)
-                    print(f"inserting...... point_id:{point_id} file_name:{file_name}\nchunk_summary:{chunk_summary}\nchunk_text:{chunk_text}\n ")
-                    client.upsert(
-                        collection_name=collection_name,
-                        wait=True,
-                        points=[
-                            # user file_path as id, for future search
-                            PointStruct(id=point_id, vector=embedding_vector, payload={
-                                            "title": chunk_summary, 
-                                            "text": chunk_text, 
-                                            "file_summary": chunk0_summary,
-                                            "file_type":file_type, 
-                                            "file_update_time": file_update_time, 
-                                            "file_name": file_name,
-                                            "file_dir": file_dir,
-                                            "file_uuid":file_uuid, 
-                                            "file_chunk": file_chunk
-                                            }),
-                        ],
-                    )
-                    
-                    update_processing_status_file(status_file_path, file_path, file_chunk, is_last_chunk)
 
 
 
@@ -360,4 +408,4 @@ if __name__ == '__main__':
     print(f"process from dir {base_dir} to collection {collection_name}")
     while True:
         main_loop(collection_name, base_dir)
-        time.sleep(60)
+        time.sleep(120)

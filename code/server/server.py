@@ -52,7 +52,7 @@ from langchain.callbacks.base import BaseCallbackHandler
 from langchain.schema import AgentAction, AgentFinish, LLMResult
 from typing import Any
 
-socketio = SocketIO(app)
+socketio = SocketIO(app,cors_allowed_origins="*")
 
 
 class StreamingSocketIOCallbackHandler(BaseCallbackHandler):
@@ -102,13 +102,68 @@ class StreamingSocketIOCallbackHandler(BaseCallbackHandler):
 from langchain.chat_models import ChatOpenAI
 from langchain.schema import (
     HumanMessage,
-    SystemMessage
+    SystemMessage,
+    AIMessage
 )
 
-def split_text_to_chunks(text, max_tokens=1000):
-    text_splitter = TokenTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
-    texts = text_splitter.split_text(text)
-    return texts
+# 过滤文本中的中文字符、标点符号和空格。
+def filter_chinese_and_punctuations(text):
+    # 定义正则表达式，匹配中文、数字和标准的标点符号、英文字符和空格、回车符、制表符等，以及键盘上数字哪一行的所有符号
+    pattern = re.compile(r'[\u4e00-\u9fa5\d ，。！？、；：‘’“”（）《》【】\[\]【】a-zA-Z,.!?;:\'"/\\\{\}\(\)\<\>\+\-\*/=~=^`|&#%@_\n\r\t]+')
+    # 使用正则表达式过滤文本
+    result = pattern.findall(text)
+    filtered_text = ''.join(result)
+    # 汉字中间的空格给去掉，pdf转译出来有很多空格
+    filtered_text = re.sub(r'([\u4e00-\u9fa5])\s+([\u4e00-\u9fa5])', r'\1\2', filtered_text)
+    filtered_text = re.sub(r'\s+', ' ', filtered_text).strip()
+    return filtered_text
+
+from typing import List
+import tiktoken
+token_encoding = tiktoken.get_encoding("gpt2")
+
+def get_text_token_size(text:str):
+    return len(token_encoding.encode(text))
+
+# 将文本分割为最多包含1000个token的块，用来做Qdrant的索引。
+def split_text_to_chunks(text: str, max_tokens: int = 1000, loop_back:int=50) -> List[str]:
+    text = filter_chinese_and_punctuations(text)
+    
+    chunks = []
+    current_chunk = ""
+    current_chunk_token_count = 0
+    index = 0
+
+    while index < len(text):
+        char = text[index]
+        current_chunk += char
+        char_token_count = len(token_encoding.encode(char))
+        current_chunk_token_count += char_token_count
+
+        if current_chunk_token_count >= max_tokens:
+            look_back = 0
+            split_point = len(current_chunk)
+            while look_back < 20 and split_point - look_back > 0:
+                if current_chunk[split_point - look_back - 1] in {'\n', ' ', '　', '。', '.'}:
+                    split_point -= look_back
+                    break
+                look_back += 1
+
+            chunks.append(current_chunk[:split_point])
+            current_chunk = current_chunk[split_point:]
+            current_chunk_token_count = len(token_encoding.encode(current_chunk))
+            # index -= look_back
+        index += 1
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+# def split_text_to_chunks(text, max_tokens=1000):
+#     text_splitter = TokenTextSplitter(chunk_size=max_tokens, chunk_overlap=0)
+#     texts = text_splitter.split_text(text)
+#     return texts
 
 
 """
@@ -139,19 +194,42 @@ A：AI、半导体、通信这三个领域，都是现在非常热点的领域�
 
 段落结束。
 """
-def prompt(question, context):
+# def prompt(question, context):
+#     system = '你是我的财经投资分析师。'
+#     # q = f"请根据下面的数据库信息，整理分析总结并回答我的问题：\"{question}\"。要求：利用和我问题相关的段落回答我的问题,忽略不相关的段落。段落开始：\n"
+#     q = f"请根据下面的data，整理分析总结并回答我的问题：\"{question}\"。要求：利用和我问题相关的段落回答我的问题,忽略不相关的段落。data start：\n"
+#     q += f" {context} data end。"
+#     print(q)
+
+#     return (system, q)
+def prompt(question, sources):
     system = '你是我的财经投资分析师。'
-    q = f"请根据下面的数据库信息，整理分析总结并回答我的问题：\"{question}\"。要求：利用和我问题相关的段落回答我的问题,忽略不相关的段落。段落开始：\n"
-    q += f" {context} 段落结束。"
-    print(q)
+    template = """请根据下面的data，整理分析总结并回答我的问题。要求：利用和我问题相关的段落回答我的问题,忽略不相关的段落，有可能的话，标识出引用的Source。
+    ---------
+    QUESTION: {question}
+    =========
+    DATA: {content}
+    =========
+    ANSWER in chinese: """
+    # 创建content和source字符串
+    content_str = ""
+    for _, (file_name, content) in enumerate(sources.items()):
+        content_str += f"Source: {file_name}\nContent: {content}\n"
+    # 使用 format 方法为模板中的变量赋值
+    formatted_template = template.format(question=question, content=content_str)
+    formatted_template = split_text_to_chunks(formatted_template, 3800)[0]
+    print(formatted_template)
+    return (system, formatted_template)
 
-    return (system, q)
-
-def query_single(client_id, question, context):
+def query_single(client_id, question, sources, histories=""):
+    socketio.emit('start_new_output', {'content': ""}, room=client_id)
     llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo", callback_manager=CallbackManager([StreamingSocketIOCallbackHandler(socketio, client_id)]), streaming=True, verbose=True, max_tokens=460)
-    system_msg, prompt_text = prompt(question, context)
+    system_msg, prompt_text = prompt(question, sources)
+    
+    print("histories:", histories)
     messages = [
         SystemMessage(content=system_msg),
+        AIMessage(content=split_text_to_chunks(histories,500)[0] if histories != "" else ""), # 历史消息最多500个token
         HumanMessage(content=prompt_text)
     ]
     msg = llm(messages, client_id)
@@ -169,7 +247,49 @@ Answer my questions only using data from the included context below in markdown 
 include any relevant media or code snippets, if the answer is not in the text, say I do not know.
 """
 from qdrant_client.conversions import common_types as types
-def query(client_id, text, collection="data_collection", selected_files=None):
+
+import numpy as np
+# 计算softmax分数
+def softmax(scores):
+    exp_scores = np.exp(scores)
+    return exp_scores / np.sum(exp_scores)
+
+
+
+# 使用二分类器改善qdrant的搜索结果
+import torch
+import torch.nn as nn
+from text2vec import SentenceModel
+
+class BinaryClassifier(nn.Module):
+    def __init__(self, input_size):
+        super(BinaryClassifier, self).__init__()
+        self.fc1 = nn.Linear(input_size, 64)
+        self.fc2 = nn.Linear(64, 1)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.sigmoid(self.fc2(x))
+        return x.squeeze()
+
+# 加载预训练模型（如果存在）
+vector_classifier = None
+model_save_path = "saved_classfier_sentence.pth"
+# TODO 目前不加载，效果不好。。。要做个金融专门的二分器，明天继续做
+# if os.path.exists(model_save_path):
+#     vector_classifier = torch.load(model_save_path)
+#     print("vector classifier loaded")
+def calculate_similarity_score(embedding1, embedding2, vector_classifier):
+    # 转换为 NumPy 数组（如果需要）
+    embedding1 = np.array(embedding1)
+    embedding2 = np.array(embedding2)
+    combined_embeddings = np.concatenate((embedding1, embedding2))
+    combined_embeddings = torch.tensor(combined_embeddings, dtype=torch.float).unsqueeze(0)
+    similarity_score = vector_classifier(combined_embeddings).item()
+    return similarity_score
+
+
+def query(client_id, text, collection="data_collection", selected_files=None, histories=""):
     """
     text 如果加上|，比如 东方雨虹 | 总结文档， 那么会根据东方雨虹从数据库进行搜索，然后跟gpt问的问题是总结文档，
     执行逻辑：
@@ -183,11 +303,13 @@ def query(client_id, text, collection="data_collection", selected_files=None):
     collection_name = collection
     openai.api_key = os.getenv("OPENAI_API_KEY")
     sentence_embeddings = to_embeddings(texts[0])
+    
+    history_length = get_text_token_size(histories)
     # print("sentence_embeddings", sentence_embeddings)
     """
     因为提示词的长度有限，所以我只取了搜索结果的前三个，如果想要更多的搜索结果，可以把limit设置为更大的值
     """
-    score_threshold = 0.5
+    score_threshold = 0.2
     # 根据选择的文件名创建过滤器
     if len(selected_files) > 0:
         score_threshold = 0.1 # 既然选择文件了，那就一定要搜索出来东西
@@ -206,11 +328,55 @@ def query(client_id, text, collection="data_collection", selected_files=None):
     search_result = client.search(
         collection_name=collection_name,
         query_vector=sentence_embeddings,
-        limit=20,
+        limit=100,
         score_threshold=score_threshold,
         query_filter=query_filter,
-        search_params={"exact": False, "hnsw_ef": 256}
+        search_params={"exact": False, "hnsw_ef": 256},
+        with_vectors=True
     )
+    
+    print(f"origin search_result:")
+    for idx,result in enumerate(search_result):
+        print(f"result.score:{result.score}")
+        print(result.payload["text"])
+        # print(result.vector)
+        print("---------------------------------")
+        
+    print("===============================================")
+    if vector_classifier is not None:
+        print("vector_classifier is not none")
+        """
+        使用二分类器对结果进行重新整理
+        """
+        # 在这里，search_result 是从 Qdrant 数据库获取的搜索结果
+        sorted_search_result = []
+        # 将 sentence_embeddings 转换为 NumPy 数组
+        sentence_embeddings = np.array(sentence_embeddings)
+        for result in search_result:
+            # 获取嵌入向量
+            result_embedding = np.array(result.vector)
+
+            # 打印嵌入向量的形状
+            print("sentence_embeddings.shape:", sentence_embeddings.shape)
+            print("result_embedding.shape:", result_embedding.shape)
+            # 计算相似度得分
+            similarity_score = calculate_similarity_score(sentence_embeddings, result_embedding, vector_classifier)
+            # 将相似度得分添加到结果中
+            result.score = similarity_score
+            # result = result._replace(score=similarity_score)
+            sorted_search_result.append(result)
+
+        # 按相似度得分对结果进行排序
+        sorted_search_result.sort(key=lambda x: x.score, reverse=True)
+        search_result = sorted_search_result
+    print(f"classfier search_result:")
+    for idx,result in enumerate(search_result):
+        print(f"result.score:{result.score}")
+        print(result.payload["text"])
+        print("---------------------------------")
+        
+    print("===============================================")
+
     if len(search_result) == 0:
         return {
             "answer":[], 
@@ -224,8 +390,19 @@ def query(client_id, text, collection="data_collection", selected_files=None):
     """
     因为提示词的长度有限，每个匹配的相关摘要我在这里只取了前300个字符，如果想要更多的相关摘要，可以把这里的300改为更大的值
     """
-    completion_num = 0
-    for result in search_result:
+    # completion_num = 0
+    scores = [result.score for result in search_result[:10]]
+    if len(scores) > 0:
+        softmax_scores = softmax(scores)
+        total_score = sum(softmax_scores)
+    else:
+        softmax_scores = []
+        total_score = 1
+
+    sources = {}
+    
+    for idx,result in enumerate(search_result[:20]):
+        
         """
         PointStruct(id=point_id, vector=embedding_vector, payload={
                                             "title": chunk_summary, 
@@ -239,47 +416,51 @@ def query(client_id, text, collection="data_collection", selected_files=None):
                                             "file_chunk": file_chunk
                                          }),
         """
-        # answers.append({"title": result.payload["title"], "text": summary,"filename":result.payload["filename"],"time":datetime.fromtimestamp(result.payload["file_update_time"]).strftime(date_format)})
         answers.append({"payload":result.payload, "time":datetime.fromtimestamp(result.payload["file_update_time"]).strftime(date_format)})
-
-        if completion_num <= 4:
-            file_name = result.payload["file_name"]
-            file_summary = result.payload["file_summary"]
-            title = result.payload["title"]
-            text_chunk = split_text_to_chunks(result.payload["text"], 800)[0]
-
-            if file_name not in completion_text:
-                completion_text += f" {file_name}"
-            
-            if file_summary not in completion_text:
-                completion_text += f" {file_summary}"
-            completion_text += f" {title} {text_chunk}"
-            completion_num += 1
         
-    # completion = ""
-    completion_texts = split_text_to_chunks(completion_text, 3500)
-    
+        
+        if idx < 10:
+            # 根据softmax分数计算字符数量
+            char_count = int((2000-history_length) * (softmax_scores[idx] / total_score))
+            if idx < 4:
+                char_count += 300 # 前4个结果都有300的加成，这样总共有1200+2000=3200
+            print(f"result.score:{result.score}, softmax_scores[idx]:{softmax_scores[idx]}, total_score:{total_score}, char_count:{char_count}")
+            print("=======================")
+            file_name = result.payload["file_name"]
+            text_chunk = split_text_to_chunks(result.payload["text"], char_count)[0]
+            
+            # 添加或更新sources字典
+            if file_name not in sources:
+                sources[file_name] = text_chunk
+            else:
+                sources[file_name] += f". {text_chunk}"
+
+            # if file_name not in completion_text:
+            #     completion_text += f" {file_name}"
+            # completion_text += f" {text_chunk}"
+    # completion_texts = split_text_to_chunks(completion_text, 3500)
     if len(texts) == 1:
         question = texts[0]
     elif len(texts) == 2:
         question = texts[1]
     else:
         question = text
-    completion = query_single(client_id, question, completion_texts[0])
+    completion = query_single(client_id, question, sources, histories)
     return {
         "answer":completion, 
         "tags": tags,
         "qdrant_results": answers,
     }
 
-
 @app.route('/')
-@localnet_or_login_required
-def hello_world():
-    return render_template('index.html')
+def home():
+    if current_user.is_authenticated:
+        return render_template('index.html')
+    else:
+        return redirect(url_for('login'))
 
 @app.route('/download/<path:file_path>', methods=['GET'])
-@localnet_or_login_required
+@login_required
 def download(file_path):
     base_path = os.path.join(app.root_path, '../data_import')
     safe_file_path = safe_join(base_path, file_path)
@@ -295,7 +476,8 @@ def search():
     client_id = data['client_id']
     collection = data['collection']
     selected_files = data['selected_files']
-    res = query(client_id, search, collection, selected_files)
+    histories = data['histories']
+    res = query(client_id, search, collection, selected_files, histories)
     return {
         "code": 200,
         "data": {
@@ -306,19 +488,37 @@ def search():
         },
     }
 
+# @app.route('/collections')
+# def get_collections():
+#     with open('../config.json', 'r') as f:
+#         config = json.load(f)
+#     collection_names = list(config['base_dir'].keys())
+#     return jsonify({"collections": collection_names})
+
 @app.route('/collections')
+@login_required
 def get_collections():
-    with open('../config.json', 'r') as f:
-        config = json.load(f)
-    collection_names = list(config['base_dir'].keys())
-    return jsonify({"collections": collection_names})
+    username = current_user.username
+    user_collections = None
+
+    for user in config["users"]:
+        if user['username'] == username:
+            user_collections = user['collections']
+            break
+
+    if user_collections is not None:
+        return jsonify({"collections": user_collections})
+    else:
+        return "User not found", 404
+
 
 @app.route('/search_files/<collection_name>/<search_term>')
 @localnet_or_login_required
 def search_files(collection_name, search_term):
-    with open('../config.json', 'r') as f:
-        config = json.load(f)
-
+    # with open('../config.json', 'r') as f:
+    #     config = json.load(f)
+    search_term = search_term.replace("，", ",") # 将中文逗号替换为英文逗号
+    search_terms = search_term.split(",")
     if collection_name not in config['base_dir']:
         raise KeyError(f"Collection '{collection_name}' is not defined in config file.")
     base_dir = os.path.abspath(os.path.join("../data_import", config['base_dir'][collection_name]))
@@ -329,19 +529,23 @@ def search_files(collection_name, search_term):
 
     matches = []
     for root, dirnames, filenames in os.walk(base_dir):
-        for filename in fnmatch.filter(filenames, f'*{search_term}*'):
-            file_path = os.path.join(root, filename)
-            # 由于配置文件是以./开头的，这里也要，否则匹配不上来
-            rel_path = "./" + os.path.relpath(file_path, os.path.join("..", "data_import"))  # 获取相对于data_import的路径
-            # print(rel_path)
-            # 检查文件是否已完成索引
-            if rel_path in file_processing_status and file_processing_status[rel_path]['is_completed']:
-                ctime = os.path.getctime(file_path)
-                formatted_time = datetime.fromtimestamp(ctime).strftime('%Y-%m-%d %H:%M:%S')
-                matches.append({
-                    'file_name': os.path.basename(file_path),
-                    'time': formatted_time
-                })
+        for filename in filenames:
+            if not filename.strip():
+                continue
+            # 检查文件名是否与关键词列表中的任何一个关键词匹配
+            if any(fnmatch.fnmatch(filename, f'*{term}*') for term in search_terms):
+                # 如果file_path为空字符串，跳过它
+                file_path = os.path.join(root, filename)
+                # 由于配置文件是以./开头的，这里也要，否则匹配不上来
+                rel_path = "./" + os.path.relpath(file_path, os.path.join("..", "data_import"))  # 获取相对于data_import的路径
+                # 检查文件是否已完成索引
+                if rel_path in file_processing_status and file_processing_status[rel_path]['is_completed']:
+                    ctime = os.path.getctime(file_path)
+                    formatted_time = datetime.fromtimestamp(ctime).strftime('%Y-%m-%d %H:%M:%S')
+                    matches.append({
+                        'file_name': os.path.basename(file_path),
+                        'time': formatted_time
+                    })
     # 按时间倒序排列文件
     matches = sorted(matches, key=lambda x: x['time'], reverse=True)
     matches = matches[:24]  # 只返回前24个文件
@@ -357,9 +561,6 @@ with open('../config.json', 'r') as f:
     config = json.load(f)
 
 users = config.get('users', [])
-
-
-
 login_manager = LoginManager()
 login_manager.init_app(app)
 
@@ -399,7 +600,7 @@ def login():
         user = authenticate(username, password)
         if user:
             login_user(user)
-            return redirect(url_for('hello_world'))
+            return redirect(url_for('home'))
         else:
             return 'Invalid username or password'
     return render_template('login.html', form=form)
@@ -410,6 +611,56 @@ def logout():
     logout_user()
     return redirect(url_for('login'))
 
+@app.route('/get_current_user')
+@login_required
+def get_current_user():
+    return jsonify({
+        'username': current_user.username
+    })
     
+"""
+上传代码
+"""
+from werkzeug.utils import secure_filename
+ALLOWED_EXTENSIONS = {'txt', 'pdf', 'pptx', 'docs'}
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+import re
+def clean_filename(filename):
+    return re.sub(r'[^\w\-_]', '', filename)
+@app.route('/upload', methods=['POST'])
+@login_required
+def upload_file():
+    print("upload_file")
+    today = datetime.now().strftime("%Y%m%d")
+    collection = request.form.get('collection', '')
+    if not collection:
+        return jsonify({"error": "No collection provided"}), 400
+
+    uploaded_files = request.files.getlist("file")
+    if not uploaded_files:
+        return jsonify({"error": "No files provided"}), 400
+
+    # base_dir = config['base_dir'][collection]
+    base_dir = os.path.abspath(os.path.join("../data_import", config['base_dir'][collection]))
+    target_directory = f"{base_dir}/upload/{today}"
+    os.makedirs(target_directory, exist_ok=True)
+
+    for file in uploaded_files:
+        if file and allowed_file(file.filename):
+            filename_prefix = file.filename.rsplit('.', 1)[0]
+            filename_postfix = file.filename.rsplit('.', 1)[1]
+            cleaned_filename_prefix = clean_filename(filename_prefix)
+            filename = cleaned_filename_prefix + '_upload.' + filename_postfix
+            # filename = secure_filename(file.filename.rsplit('.', 1)[0] + '_upload.' + file.filename.rsplit('.', 1)[1])
+        else:
+            return jsonify({"error": f"File type not allowed for {file.filename}"}), 400
+
+        file.save(os.path.join(target_directory, filename))
+
+    return jsonify({"message": "All files uploaded and saved"}), 200
+
+    
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=3000)

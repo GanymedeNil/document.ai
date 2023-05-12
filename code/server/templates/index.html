@@ -71,32 +71,113 @@
             color: blue;
         }
 
+        #dropzone {
+            width: 300px;
+            height: 200px;
+            border: 2px dashed #ccc;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 1.2em;
+            margin-bottom: 1em;
+        }
+        #dropzone.dragover {
+            border-color: #000;
+        }
+
+        #chatbox-container {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            right: 20px;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0px 0px 10px 0px rgba(0,0,0,0.1);
+        }
+        #collection-select, #search {
+            height: 48px;
+        }
+        #collection-select, #search, #search-button, #clear_chats, #search-files {
+            height: 48px;
+        }
+        
+        #search:focus {
+            outline: none;
+            box-shadow: none;
+        }
+
+        .ai-answer {
+            border-top: 1px solid #dddddd;
+            padding: 5px;
+            background-color: rgb(247, 247, 248);
+        }
+
+        .user-question{
+            border-top: 1px solid #dddddd;
+            padding: 5px;
+            font-weight: bold;
+        }
+
+        .bottom_padder{
+            margin-bottom:120px;
+
+        }
+
+        /* #search-button, #clear_chats, #search-files {
+            background-color: #4b0082;
+            color: white;
+        } */
+
     </style>
     
     
 </head>
 <body>
-<div class="container">
-    <div class="flex flex-col items-center h-screen w-screen px-5">
+<!-- 导航栏 -->
+<nav class="bg-blue-500 p-4">
+    <div class="container mx-auto">
+      <div class="flex items-center justify-between">
+        <a href="/" class="text-white font-bold">首页</a>
+        <button id="upload-file-link" class="text-white font-bold ml-2">上传文件/文本</button>
+        <div id="user-info" class="hidden">
+          <span id="username" class="text-white font-bold mr-2"></span>
+          <a href="/logout" class="text-white font-bold">登出</a>
+        </div>
+        <a href="/login" id="login-link" class="text-white font-bold">登录</a>
+      </div>
+    </div>
+</nav>
+  
+<!-- 上传文件模态框 -->
+<div id="upload-file-modal" class="fixed inset-0 hidden w-full h-full flex items-center justify-center z-40">
+    <div class="absolute inset-0 bg-gray-800 opacity-75"></div>
+    <div class="w-3/4 lg:w-1/2 bg-white p-8 rounded-md z-50">
+        <label for="upload-collection-select" class="block mb-2">选择 Collection：</label>
+        <select id="upload-collection-select" class="appearance-none rounded-md border-gray-300 border border-blue-500 h-full pl-3 pr-10 py-2 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 mb-4">
+            <option value="" disabled selected>Select a Datasource</option>
+        </select>
+        <h2 class="text-2xl font-bold mb-4">上传文件</h2>
+        <form id="upload-form" action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
+            <div id="dropzone">Drop files here</div>
+            <input type="file" name="file" id="file-input" multiple style="display:none;">
+        </form>
+        <div id="file-list" class="mb-4"></div>
+        <textarea id="text-input" class="w-full h-32 mb-4 border p-1" placeholder="您也可以输入文字点击提交，也会把文字进行索引"></textarea>
+        <button id="choose-files" class="btn btn-primary">选择文件</button>
+        <button id="upload-files" class="btn btn-primary ml-4">上传</button>
+        <button id="close-modal" class="btn btn-outline btn-primary ml-4">关闭</button>
+    </div>
+</div>
+  
+      
+<div class="container bottom_padder">
+    <div class="flex flex-col items-center w-screen px-5">
         <div class="flex flex-col items-center justify-center">
             <h1 class="text-5xl font-bold mt-20">ChatDocs</h1>
             <p class="text-xl my-10">一个基于本地知识库的AI</p>
         </div>
-        <div class="flex flex-row items-center justify-center w-full">
-            <select id="collection-select" class="appearance-none rounded-md border-gray-300 border border-blue-500 h-full pl-3 pr-10 py-2 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 mr-2">
-                <option value="" disabled selected>Select a Datasource</option>
-            </select>
-            <input id="search" type="text" placeholder="请输出查询内容" class="input input-bordered border  w-2/3 lg:w-2/5 mr-2"/>
-            <button id="search-button" class="btn btn-primary flex items-center justify-center">
-                <span id="submit-text">AI问答
-                </span>
-                <svg id="loading" class="animate-spin h-5 w-5 ml-2 text-white" style="display: none;" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-            </button>
-            <button id="search-files" class="btn btn-primary ml-2">搜索文件名</button>
-        </div>
+        
         <div class="flex flex-col justify-start mt-10 mx-5 w-full">
             <div class="card bg-base-100 shadow-md card-border">
                 <div class="card-body">
@@ -133,17 +214,46 @@
                     <div class="text-lg" id="qdrant-results"></div>
                 </div>
             </div>
-        </div>        
+        </div>   
     </div>
 </div>
+
+<!-- <div class="container bottom_padder" >
+    <div class="flex flex-col items-center h-screen w-screen px-5">
+    </div>
+</div> -->
+<div id="chatbox-container" class="flex flex-row items-center justify-center">
+    <select id="collection-select" class="appearance-none rounded-md border-gray-300 border border-blue-500 h-full pl-3 pr-10 py-2 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 mr-2">
+        <option value="" disabled selected>Select a Datasource</option>
+    </select>
+    <input id="search" type="text" placeholder="请输出查询内容" class="input input-bordered border  w-2/3 lg:w-2/5 mr-2"/>
+    <button id="search-button" class="btn btn-primary flex items-center justify-center">
+        <span id="submit-text">AI问答</span>
+        <svg id="loading" class="animate-spin h-5 w-5 ml-2 text-white" style="display: none;" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+    </button>
+    <button id="clear_chats" class="btn btn-primary ml-2">清除会话</button>
+    <button id="search-files" class="btn btn-primary ml-2">搜索文件名</button>
+</div>
 <script>
-    const submitButton = document.querySelector('button');
+    const submitButton = document.querySelector('#search-button');
     const search = document.querySelector('#search');
     const card = document.querySelector('.card');
     const loading = document.querySelector('#loading');
     const submitText = document.querySelector('#submit-text');
     const socket = io();
     const aiOutput = document.getElementById('ai_output');
+    let currentOutputDiv = null; // 当前的输出div
+
+    const clearChatsButton = document.getElementById('clear_chats');
+
+    // 给清除会话按钮添加点击事件
+    clearChatsButton.addEventListener('click', () => {
+        aiOutput.innerHTML = "";
+    });
+
     card.style.display = 'block';
     document.getElementById("search").addEventListener("keydown", function(event) {
         if (event.key === "Enter") {
@@ -154,8 +264,19 @@
     const clientId = Date.now().toString(36) + Math.random().toString(36).substring(2); // 生成一个唯一的ID
     socket.emit('join_room', clientId); // 将ID发送给服务器以创建房间
     socket.on('new_output', function(data) {
+        // 将AI的回答添加到当前的输出div中
+        if (currentOutputDiv) {
+            currentOutputDiv.innerHTML += data.content;
+        }
         // const aiOutput = document.getElementById('ai_output');
-        aiOutput.innerHTML += data.content;
+        // aiOutput.innerHTML += data.content;
+    });
+
+    socket.on('start_new_output', function(data) {
+        // 创建一个新的div来接收AI的回答
+        currentOutputDiv = document.createElement('div');
+        currentOutputDiv.className = 'ai-answer';
+        aiOutput.appendChild(currentOutputDiv);
     });
 
 
@@ -163,15 +284,22 @@
         fetch('/collections')
             .then(response => response.json())
             .then(data => {
-            const select = document.getElementById('collection-select');
+            const collectionSelect = document.getElementById('collection-select');
+            const uploadCollectionSelect = document.getElementById('upload-collection-select');
+            collectionSelect.innerHTML = '';
+            uploadCollectionSelect.innerHTML = '';
             data.collections.forEach((collection, index) => {
                 const option = document.createElement('option');
                 option.value = collection;
                 option.text = collection;
-                select.appendChild(option);
+                collectionSelect.appendChild(option);
+
+                const uploadOption = option.cloneNode(true);
+                uploadCollectionSelect.appendChild(uploadOption);
 
                 if (index === 0) {
-                option.selected = true;
+                    option.selected = true;
+                    uploadOption.selected = true;
                 }
             });
         });
@@ -243,19 +371,35 @@
     });
 
     submitButton.addEventListener('click', () => {
+
+        const userQuestionDiv = document.createElement('div');
+        userQuestionDiv.className = 'user-question';
+        userQuestionDiv.textContent = search.value;
+        aiOutput.appendChild(userQuestionDiv);
+        
         loading.style.display = 'block';
         submitText.style.display = 'none';
-        aiOutput.innerHTML = "";
+        // aiOutput.innerHTML = "";
         // 在搜索按钮的点击事件中，收集选中的卡片
         const selectedFileNames = Array.from(document.querySelectorAll(".file-card.selected")).map(card => card.dataset.fileName);
 
+        // 获取所有的AI回答并合并文本，然后取最后1000个字符作为历史记录
+        let histories = '';
+        const aiAnswers = document.querySelectorAll('.ai-answer');
+        if (aiAnswers.length > 0) {
+            const allAnswers = Array.from(aiAnswers).map(answer => answer.textContent).join(' ');
+            histories = allAnswers.slice(-1000);
+        }
+        let search_value = search.value;
         const collection = document.getElementById('collection-select').value;  
         const data = {
-            search: search.value,
+            search: search_value,
             collection:collection,
             client_id:clientId,
-            selected_files: selectedFileNames
+            selected_files: selectedFileNames,
+            histories:histories
         };
+        search.value = "";
         fetch('/search', {
             method: 'POST',
             headers: {
@@ -300,13 +444,192 @@
             submitText.style.display = 'block';
             console.error('Error:', error);
         });
+    });
 
-        
+    //导航栏显示当前用户名
+    async function getCurrentUser() {
+        const response = await fetch('/get_current_user');
+        if (response.ok) {
+        const user = await response.json();
+            document.getElementById('username').textContent = user.username;
+            document.getElementById('user-info').classList.remove('hidden');
+            document.getElementById('login-link').classList.add('hidden');
+        } else {
+            document.getElementById('user-info').classList.add('hidden');
+            document.getElementById('login-link').classList.remove('hidden');
+        }
+    }
 
-        
+    getCurrentUser();
 
-        // Call the start_chat API to initiate the AI chat
-        // fetch('/start_chat', { method: 'POST' });
+
+    // 显示模态框
+    document.getElementById('upload-file-link').addEventListener('click', function() {
+        const isLoggedIn = document.getElementById('user-info').classList.contains('hidden') === false;
+        if (isLoggedIn) {
+            // 清空文件输入框
+            document.getElementById('file-input').value = '';
+            // 清空文本输入框
+            document.getElementById('text-input').value = '';
+            // 清空文件列表
+            document.getElementById('file-list').innerHTML = '';
+            document.getElementById('upload-file-modal').classList.remove('hidden');
+        } else {
+            window.location.href = '/login';
+        }
+    });
+
+    // 关闭模态框
+    document.getElementById('close-modal').addEventListener('click', function() {
+        document.getElementById('upload-file-modal').classList.add('hidden');
+    });
+
+    // 拖放文件
+    function updateFileList(files) {
+        const fileList = document.getElementById('file-list');
+        fileList.innerHTML = ''; // 清空文件列表
+
+        for (const file of files) {
+            const listItem = document.createElement('div');
+            listItem.textContent = file.name;
+
+            const deleteButton = document.createElement('button');
+            deleteButton.textContent = '删除';
+            deleteButton.addEventListener('click', function () {
+                listItem.remove();
+                // 更新文件输入框中的文件列表
+                const newFileList = Array.from(document.getElementById('file-input').files).filter(
+                    (f) => f.name !== file.name
+                );
+                const dataTransfer = new DataTransfer();
+                for (const newFile of newFileList) {
+                    dataTransfer.items.add(newFile);
+                }
+                document.getElementById('file-input').files = dataTransfer.files;
+            });
+
+            listItem.appendChild(deleteButton);
+            fileList.appendChild(listItem);
+        }
+    }
+    // 你可以根据需求修改此处的代码以支持拖放文件功能
+    // 选择文件
+    document.getElementById('choose-files').addEventListener('click', function() {
+        document.getElementById('file-input').click();
+    });
+
+    // 添加文件列表
+    document.getElementById('file-input').addEventListener('change', function() {
+        updateFileList(this.files);
+    });
+
+    // 上传文件
+    document.getElementById('upload-files').addEventListener('click', async function() {
+        const files = document.getElementById('file-input').files;
+        const textInput = document.getElementById('text-input');
+        const text = textInput.value;
+        if (files.length === 0 && text.trim() === '') {
+            alert('请先选择一个文件或输入文字');
+            return;
+        }
+
+        const selectedCollection = document.getElementById('upload-collection-select').value;
+
+        if (!selectedCollection) {
+            alert('请选择一个Collection');
+            return;
+        }
+
+        const formData = new FormData();
+        for (const file of files) {
+            formData.append('file', file);
+        }
+        formData.append('collection', selectedCollection);
+        // 如果有输入文本，将其作为 Blob 对象添加到 FormData 中
+        if (text.trim() !== '') {
+            const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+            const textBlob = new Blob([text], { type: 'text/plain' });
+            const textFilename = `${today}_${text.slice(0, 20)}.txt`;
+            formData.append('file', textBlob, textFilename);
+        }
+        try {
+            const response = await fetch('/upload', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                alert(result.message);
+                document.getElementById('file-input').value = ''; // 清空文件输入框
+                document.getElementById('file-list').innerHTML = ''; // 清空文件列表
+                document.getElementById('upload-file-modal').classList.add('hidden'); // 关闭模态框
+            } else {
+                const error = await response.json();
+                alert(error.error);
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            alert('上传文件时发生错误');
+        }
+    });
+
+    // dropzone
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('file-input');
+    const uploadForm = document.getElementById('upload-form');
+
+    dropzone.addEventListener('click', () => {
+        fileInput.click();
+    });
+
+    dropzone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropzone.classList.add('dragover');
+    });
+
+    dropzone.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('dragover');
+    });
+
+    dropzone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('dragover');
+
+        const files = e.dataTransfer.files;
+        fileInput.files = files;
+        updateFileList(files);
+    });
+
+    uploadForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const formData = new FormData(uploadForm);
+
+        fetch('{{ url_for("upload_file") }}', {
+            method: 'POST',
+            body: formData,
+            credentials: 'same-origin',
+        })
+        .then((response) => {
+            if (response.ok) {
+                return response.json();
+            } else {
+                throw new Error('Network error');
+            }
+        })
+        .then((data) => {
+            if (data.success) {
+                alert(data.success);
+            } else if (data.error) {
+                alert(data.error);
+            } else {
+                alert('Unknown error');
+            }
+        })
+        .catch((error) => {
+            alert(error.message);
+        });
     });
 
 </script>

@@ -1,2 +1,6 @@
 code/data_import/source_data/*
+code/data_import/test*
 code/data_import/duplicate_delete/*
+code/test*
+code/data_import/import_news.py
+.DS_Store

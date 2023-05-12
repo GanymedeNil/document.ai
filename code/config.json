@@ -7,11 +7,18 @@
     "users": [
         {
           "username": "laohe",
-          "password": "laohe123"
+          "password": "laohe123",
+          "collections":["heack"]
         },
         {
           "username": "heack",
-          "password": "kongyang123"
+          "password": "kongyang123",
+          "collections":["heack","qiyinxue"]
+        },
+        {
+          "username": "qiyinxue",
+          "password": "qiyinxue123",
+          "collections":["heack","qiyinxue"]
         }
       ]
   }
