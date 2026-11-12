@@ -14,7 +14,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
    export EAER_TEST_OPENSEARCH_URL=http://localhost:9200
    python -m pytest -q
    ```
-   在编写环境中（PostgreSQL 16、没有 OpenSearch）是 146 个通过、2 个跳过。`tests/test_opensearch_live.py` 从未在真实 OpenSearch 上运行过，`docker-compose.dev.yml` 也从未实际启动过——第一次跑出的问题请如实告诉用户，修复后记入 `docs/设计变更记录.md`。
+   2026-11-12 首次在真实环境运行（macOS + OrbStack，用 `docker-compose.dev.yml` 启动 PostgreSQL 18.6 与 OpenSearch 3.9.0，Python 3.14.5）：148 个全部通过，没有跳过和警告，没有需要修复的问题。OpenSearch 集成测试用的是 standard 分词器；别名只切换了一次，AC-5-3 要求的“重建期间持续查询”还没有测。CI 仍未运行过（仓库还没有远端）。之后跑出的问题请如实告诉用户，修复后记入 `docs/设计变更记录.md`。
 4. 如果还没有 git 仓库，先 `git init` 并提交一次。
 
 ## 目录
@@ -68,7 +68,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 
 ## 下一步（按优先级）
 
-1. **在真实环境跑通全部测试。** 包括 OpenSearch 集成测试；如果真实引擎的行为与内存实现不一致，以等价性测试 `test_dsl_and_python_filters_agree` 的思路排查。
+1. **在真实环境跑通全部测试。** 已于 2026-11-12 完成（148 个通过）。以后如果真实引擎的行为与内存实现不一致，以等价性测试 `test_dsl_and_python_filters_agree` 的思路排查。
 2. **中文分词。** 给 OpenSearch 安装 analysis-smartcn 插件（需要自定义镜像），对比两到三种分词与 Embedding 组合后按 AC-5-4 选定。
 3. **补齐第 4 周关口中不依赖外部资源的项。** AC-3-1 用导入规则做静态检查（如 import-linter）；AC-6-3 按开发文档 6.5 状态表逐行写用例；AC-6-4 端到端测“待审核不可搜”；AC-11-4 对接接口一致性测试套件。
 4. **接入 Docling。** 按 `eaer/ingestion/parsers.py` 的 `Parser` 接口实现，覆盖 PDF、扫描件、PPTX、XLSX；版本锁定 2.143.1。

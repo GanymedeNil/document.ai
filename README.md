@@ -78,7 +78,7 @@ alembic downgrade base    # 回滚
 ## 尚未实现
 
 - **Docling 解析器。** 它依赖 PyTorch 和需要从外网下载的版面模型，本仓库的开发环境装不上；按 `eaer/ingestion/parsers.py` 的 `Parser` 接口接入，PDF、扫描件、PPTX、XLSX 由它处理。目前 Word 和 HTML 用原生解析器。
-- **在真实 OpenSearch 上运行。** 查询语句与映射有单元测试，并用求值器证明过滤语义与内存实现一致；`tests/test_opensearch_live.py` 在设置 `EAER_TEST_OPENSEARCH_URL` 后运行，CI 已配置 OpenSearch 3.9.0 服务，但本仓库的开发环境下载不到 OpenSearch，尚未实际跑过。
+- **OpenSearch 的别名切换与 CI。** `tests/test_opensearch_live.py` 已于 2026-11-12 在本地 OpenSearch 3.9.0 上通过：60 组随机过滤条件下返回结果与内存实现一致，写入、更新、按版本删除和两路检索正常。尚未覆盖的是重建期间持续查询的别名切换测试（AC-5-3）和中文分词插件；CI 已配置但还没有运行过。
 - **真实的 Fast 基线。** 需要线上模型的接入配置（生成、Embedding、重排）。目前检索评测用的是向量化测试替身 `HashingEmbedder`，它的结果只说明评测流程和过滤逻辑正确，不代表产品效果。
 - **图表深度解析。** 需要视觉模型；目前表格已解析，图表类事实在评测中单列为“需视觉模型”。
 - **Deep 与 Verified。** 版本差异类问题需要 Deep 的“比较”模板同时检索新旧版本。
