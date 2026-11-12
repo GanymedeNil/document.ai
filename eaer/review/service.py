@@ -60,6 +60,10 @@ class Review:
                 results.append({"task_id": task_id, "ok": True, "error": None})
             except (ReviewError, InvalidState) as e:
                 results.append({"task_id": task_id, "ok": False, "error": str(e)})
+            except (psycopg.errors.IntegrityError, psycopg.errors.RaiseException) as e:
+                # 业务检查漏掉、被数据库不变量拒绝的情形：本份回滚并报错，其余份照常（6.3）
+                msg = e.diag.message_primary or str(e).splitlines()[0]
+                results.append({"task_id": task_id, "ok": False, "error": f"违反数据不变量：{msg}"})
         return results
 
     def _decide_one(self, tenant_id: str, d: dict, reviewer: str) -> str | None:

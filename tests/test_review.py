@@ -114,3 +114,44 @@ def test_task_of_other_tenant_is_not_found(env):
     res = env.review.decide("t2", [{"task_id": task_of(env.conn, r.version_id), "decision": "delete"}], "mallory")
     assert not res[0]["ok"] and "不存在" in res[0]["error"]
     assert status_of(env.conn, r.version_id) == "pending_review"
+
+
+def test_batch_item_failing_date_check_does_not_affect_others(env):
+    """同一文档的新版本与旧版本同日生效：该份返回可读错误，同批其余份照常发布（6.3、7.3）。"""
+    def up(title, ref, body="第一条　总则。"):
+        r = env.ing.receive("t1", html(title, body, "本规定自2026年1月1日起施行。"), f"{ref}.html",
+                            acl_policy_id=env.acl, source_ref=ref)
+        env.worker.run_until_idle()
+        return r.version_id
+    approve = lambda v: {"task_id": task_of(env.conn, v), "decision": "approve",   # noqa: E731
+                         "corrections": {"doc_type": "normative"}}
+    v1 = up("住宿规定", "INS")
+    assert env.review.decide("t1", [approve(v1)], "alice")[0]["ok"]
+    a, bad, b = up("采购规定", "A"), up("住宿规定", "INS", "第一条　修订后的总则。"), up("会议规定", "B")
+    assert bad != v1
+    res = env.review.decide("t1", [approve(a), approve(bad), approve(b)], "alice")
+    assert [r["ok"] for r in res] == [True, False, True]
+    assert "不晚于被取代版本的生效日 2026-01-01" in res[1]["error"]
+    assert [status_of(env.conn, v) for v in (a, bad, b)] == ["searchable", "pending_review", "searchable"]
+
+
+def test_batch_item_rejected_by_database_invariant_is_isolated(env, monkeypatch):
+    """业务检查漏掉、由数据库不变量拒绝的情形：该份回滚并报错，不中断整批。"""
+    vs = []
+    for i in range(3):
+        r = env.ing.receive("t1", html(f"规定{i}", "本规定自2026年1月1日起施行。"), f"r{i}.html", acl_policy_id=env.acl)
+        vs.append(r.version_id)
+    env.worker.run_until_idle()
+    real = env.lc.publish
+
+    def publish(vid, actor):
+        if vid == vs[1]:   # 模拟应用代码出错：写入一个空区间，由检查约束 interval_ordered 拒绝
+            env.conn.execute("UPDATE version_validity SET valid_to = valid_from WHERE version_id = %s", (vid,))
+        return real(vid, actor)
+
+    monkeypatch.setattr(env.lc, "publish", publish)
+    res = env.review.decide("t1", [{"task_id": task_of(env.conn, v), "decision": "approve",
+                                    "corrections": {"doc_type": "normative"}} for v in vs], "alice")
+    assert [r["ok"] for r in res] == [True, False, True]
+    assert res[1]["error"].startswith("违反数据不变量：") and "interval_ordered" in res[1]["error"]
+    assert status_of(env.conn, vs[1]) == "pending_review" and draft(env.conn, vs[1])["valid_to"] is None

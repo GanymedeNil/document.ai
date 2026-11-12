@@ -307,6 +307,12 @@ class Lifecycle:
             if r["status"] == "pending_review":
                 continue
             pred = self._current_validity(r["to_version_id"])
+            if pred.valid_from is not None and end <= pred.valid_from:
+                # 7.3 未覆盖的情形：推导出的作废日不晚于旧版本生效日，旧版本的有效区间会变成空的。
+                # 数据库约束 interval_ordered 会拒绝；这里先给出可读的错误，由审核人更正生效日或取代关系
+                raise InvalidState(
+                    f"新版本的{'生效日' if grade == 'explicit' else '审核通过日（推断的生效日）'} {end} "
+                    f"不晚于被取代版本的生效日 {pred.valid_from}，无法推导作废日；请更正新版本的生效日或取代关系")
             reason = "new_version" if r["document_id"] == succ["document_id"] else "superseded"
             if (pred.valid_to, pred.valid_to_grade, pred.valid_to_reason) == (end, grade, reason):
                 continue

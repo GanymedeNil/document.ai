@@ -93,3 +93,38 @@ def test_draft_can_change_until_publish(conn):
     assert current(conn, ids["v2"])["valid_from"] == date(2026, 2, 1)
     with pytest.raises(InvalidState):
         lc.set_draft_validity(ids["v2"], valid_from=date(2026, 3, 1), valid_from_grade="explicit")
+
+
+# ---------- 7.3 未覆盖的情形：推导出的作废日不晚于旧版本生效日 ----------
+
+@pytest.mark.parametrize("valid_from", [date(2025, 1, 1), date(2024, 6, 1)], ids=["same-day", "earlier"])
+def test_successor_not_later_than_predecessor_is_refused_readably(conn, valid_from):
+    lc, clock, ids = seed(conn)
+    lc.set_draft_validity(ids["v2"], valid_from=valid_from, valid_from_grade="explicit")
+    clock.set(date(2025, 12, 18))
+    with pytest.raises(InvalidState, match="不晚于被取代版本的生效日 2025-01-01"):
+        lc.publish(ids["v2"], "alice")
+    assert conn.execute("SELECT status FROM document_version WHERE id = %s", (ids["v2"],)).fetchone()["status"] \
+        == "pending_review"
+    assert current(conn, ids["v1"])["valid_to"] is None             # 整个发布回滚
+
+
+def test_inferred_end_before_predecessor_start_is_refused(conn):
+    lc, clock, ids = seed(conn)
+    clock.set(date(2025, 6, 1))
+    lc.correct_validity(ids["v1"], "carol", valid_from=date(2026, 6, 1))   # 旧版本将于未来生效
+    lc.set_draft_validity(ids["v2"], valid_from=None, valid_from_grade="inferred")
+    clock.set(date(2025, 12, 18))
+    with pytest.raises(InvalidState, match="审核通过日（推断的生效日） 2025-12-18"):
+        lc.publish(ids["v2"], "alice")
+
+
+def test_correcting_successor_to_an_impossible_date_is_refused(conn):
+    lc, clock, ids = seed(conn)
+    clock.set(date(2025, 12, 18))
+    lc.publish(ids["v2"], "alice")
+    clock.set(date(2026, 2, 1))
+    with pytest.raises(InvalidState, match="不晚于"):
+        lc.correct_validity(ids["v2"], "carol", valid_from=date(2024, 12, 1))
+    assert current(conn, ids["v2"])["valid_from"] == date(2026, 1, 1)
+    assert current(conn, ids["v1"])["valid_to"] == date(2026, 1, 1)
