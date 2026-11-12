@@ -1,0 +1,15 @@
+# 版本规则见开发文档 3.3：发布满 14 天的最新稳定版，精确锁定
+alembic==1.20.1
+fastapi==0.162.0
+starlette==1.10.0
+pydantic==2.14.1
+python-multipart==0.0.32
+uvicorn==0.54.0
+SQLAlchemy==2.1.6
+psycopg[binary]==3.3.6
+opensearch-py==3.2.0
+openpyxl==3.1.5
+python-docx==1.2.0
+matplotlib==3.11.2
+pytest==9.2.0
+httpx2==2.16.0

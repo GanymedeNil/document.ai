@@ -1,0 +1,25 @@
+# 本地开发与测试用：PostgreSQL 18.6 与 OpenSearch 3.9.0（版本与开发文档 3.3 一致）。
+# 注意：此文件在编写环境中无法实际运行（没有 Docker），首次使用请确认两个服务都能正常启动。
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#   export EAER_TEST_ADMIN_URL=postgresql://postgres:postgres@localhost:5432/postgres
+#   export EAER_TEST_OPENSEARCH_URL=http://localhost:9200
+#   python -m pytest -q
+services:
+  postgres:
+    image: postgres:18.6
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 5s
+      retries: 10
+  opensearch:
+    image: opensearchproject/opensearch:3.9.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports: ["9200:9200"]

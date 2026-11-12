@@ -1,0 +1,124 @@
+"""AC-4-2：每条不变量的违规操作都被数据库拒绝。AC-4-4（数据库部分）：删除待审核版本后无残留。
+
+这些用例绕过生命周期服务直接写 SQL，模拟应用代码出错时数据库这道防线是否有效。
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import date
+
+import psycopg
+import pytest
+from psycopg import errors
+
+from dbutil import seed
+from eaer.lifecycle.service import InvalidState
+
+
+@pytest.fixture
+def s(conn):
+    lc, clock, ids = seed(conn)
+    return conn, lc, clock, ids
+
+
+def current_validity_id(conn, vid):
+    return conn.execute("SELECT id FROM version_validity WHERE version_id = %s AND replaced_at IS NULL "
+                        "AND recorded_at IS NOT NULL", (vid,)).fetchone()["id"]
+
+
+VIOLATIONS = [
+    ("删除可搜索版本", "DELETE FROM document_version WHERE id = %(v1)s",
+     errors.RaiseException, "只有待审核的版本可以删除"),
+    ("改写 approved_at", "UPDATE document_version SET approved_at = now() WHERE id = %(v1)s",
+     errors.RaiseException, "approved_at 只能写一次"),
+    ("可搜索退回待审核", "UPDATE document_version SET status = 'pending_review', approved_at = NULL WHERE id = %(v1)s",
+     errors.RaiseException, "approved_at 只能写一次"),
+    ("可搜索直接退回待审核（不动 approved_at）", "UPDATE document_version SET status = 'pending_review' WHERE id = %(v1)s",
+     errors.RaiseException, "不允许的状态转换"),
+    ("待审核直接归档", "UPDATE document_version SET status = 'archived', archived_at = now() WHERE id = %(v2)s",
+     errors.RaiseException, "不允许的状态转换"),
+    ("归档但不写归档时间", "UPDATE document_version SET status = 'archived' WHERE id = %(v1)s",
+     errors.CheckViolation, "archived_iff_archived_at"),
+    ("修改已发布版本的内容哈希", "UPDATE document_version SET content_hash = 'sha256:x' WHERE id = %(v1)s",
+     errors.RaiseException, "不可修改"),
+    ("修改已记录的有效期", "UPDATE version_validity SET valid_from = '2024-01-01' WHERE id = %(cur)s",
+     errors.RaiseException, "只能写入 replaced_at"),
+    ("删除已记录的有效期", "DELETE FROM version_validity WHERE id = %(cur)s",
+     errors.RaiseException, "不可删除"),
+    ("同一版本写入第二行当前有效期",
+     "INSERT INTO version_validity (id, version_id, valid_from_grade, valid_to_grade, recorded_at) "
+     "VALUES (gen_random_uuid(), %(v1)s, 'unknown', 'unknown', now())",
+     errors.UniqueViolation, "version_validity_one_current"),
+    ("修改生命周期事件", "UPDATE lifecycle_event SET actor = 'mallory'",
+     errors.RaiseException, "只能追加"),
+    ("删除生命周期事件", "DELETE FROM lifecycle_event",
+     errors.RaiseException, "只能追加"),
+]
+
+
+@pytest.mark.parametrize("name, sql, exc, message", VIOLATIONS, ids=[v[0] for v in VIOLATIONS])
+def test_violation_is_rejected(s, name, sql, exc, message):
+    conn, _, _, ids = s
+    params = {**ids, "cur": current_validity_id(conn, ids["v1"])}
+    with pytest.raises(exc) as e:
+        conn.execute(sql, params)
+    assert message in str(e.value)
+
+
+def test_recorded_relation_cannot_change(s):
+    conn, lc, clock, ids = s
+    clock.set(date(2025, 12, 18))
+    lc.publish(ids["v2"], "alice")
+    with pytest.raises(errors.RaiseException, match="只能写入 retracted_at"):
+        conn.execute("UPDATE version_relation SET grade = 'inferred'")
+    # 撤销关系是允许的
+    conn.execute("UPDATE version_relation SET retracted_at = now()")
+
+
+def test_replacing_current_validity_is_allowed(s):
+    conn, _, _, ids = s
+    conn.execute("UPDATE version_validity SET replaced_at = now() WHERE id = %s",
+                 (current_validity_id(conn, ids["v1"]),))
+
+
+def test_service_refuses_before_database(s):
+    _, lc, _, ids = s
+    with pytest.raises(InvalidState):
+        lc.delete_pending(ids["v1"], "alice")
+    with pytest.raises(InvalidState):
+        lc.publish(ids["v1"], "alice")
+
+
+# ---------- AC-4-4（数据库部分） ----------
+
+def _count(conn, table, column, vid):
+    return conn.execute(f"SELECT count(*) AS n FROM {table} WHERE {column} = %s", (vid,)).fetchone()["n"]
+
+
+def test_delete_pending_leaves_no_residue(s):
+    conn, lc, _, ids = s
+    v2 = ids["v2"]
+    assert _count(conn, "evidence", "version_id", v2) == 1
+    uri = lc.delete_pending(v2, "bob")
+    assert uri == "file://v2"   # 调用方据此删除文件存储中的原件
+    for table, column in [("document_version", "id"), ("evidence", "version_id"),
+                          ("version_validity", "version_id"), ("version_relation", "from_version_id"),
+                          ("ingest_job", "version_id"), ("review_task", "version_id")]:
+        assert _count(conn, table, column, v2) == 0, table
+    # 审核记录保留谁在何时删除，但不指向版本、不保留内容
+    task = conn.execute("SELECT * FROM review_task WHERE status = 'deleted'").fetchone()
+    assert task["reviewer"] == "bob" and task["version_id"] is None and task["corrections"] is None
+    # 文档还有已发布的 v1，所以文档保留
+    assert _count(conn, "document", "id", ids["doc"]) == 1
+
+
+def test_deleting_only_version_removes_document(conn):
+    from dbutil import Clock
+    from eaer.lifecycle.service import Lifecycle
+    lc = Lifecycle(conn, Clock())
+    lc.ensure_tenant("t1")
+    acl = lc.create_acl_policy("t1", ["R"])
+    doc = lc.create_document("t1", "X", "临时文件")
+    v = lc.add_version(doc, content_hash="h", raw_object_uri="file://x", acl_policy_id=acl, parser_version="t")
+    lc.delete_pending(v, "bob")
+    assert _count(conn, "document", "id", doc) == 0

@@ -1,0 +1,8 @@
+[project]
+name = "eaer"
+version = "0.1.0"
+description = "EAER 企业级融合 RAG 系统"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

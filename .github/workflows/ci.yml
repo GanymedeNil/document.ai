@@ -1,0 +1,34 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+      opensearch:
+        image: opensearchproject/opensearch:3.9.0
+        env:
+          discovery.type: single-node
+          DISABLE_SECURITY_PLUGIN: "true"
+          DISABLE_INSTALL_DEMO_CONFIG: "true"
+          OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+        ports: ["9200:9200"]
+        options: >-
+          --health-cmd "curl -fs http://localhost:9200/_cluster/health" --health-interval 10s --health-timeout 5s --health-retries 20
+    env:
+      EAER_TEST_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      EAER_TEST_OPENSEARCH_URL: http://localhost:9200
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.10"
+      - run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
