@@ -16,7 +16,7 @@
 | 入库第 1–3、6 阶段 | `eaer/ingestion/`：接收与去重、文本解析（原生 Word/HTML，Docling 负责 PDF、扫描件、PPTX、XLSX、图片）、分类与时间抽取、表格深度解析、索引任务；后台任务可重试、可续跑 | AC-6-2、AC-6-8、AC-6-9（合成语料）、AC-7-5、AC-7-7（合成语料） |
 | 审核 | `eaer/review/service.py`：任务列表、逐份或批量决定、更正、删除 | AC-6-5 |
 | 对外接口 | `eaer/api/`：上传、审核任务、审核决定、归档、取消归档、证据；参考令牌身份校验，文档权限经授权接口 | AC-11-1 的部分用例、AC-11-2、AC-10-6 |
-| 检索 | `eaer/retrieval/`：引擎接口（OpenSearch 实现与内存参考实现）、对账、混合检索与数据库核对、回溯检索 | AC-5-1、AC-5-2、AC-5-3 的切换逻辑、AC-5-5、AC-6-7 |
+| 检索 | `eaer/retrieval/`：引擎接口（OpenSearch 实现与内存参考实现）、对账、混合检索与数据库核对、回溯检索；每次查询固定一个索引视图。全量重建与旧索引清理在 `eaer/ingestion/indexer.py`（`rebuild`、`drop_retired`） | AC-5-1、AC-5-2、AC-5-3、AC-5-5、AC-6-7 |
 | 对接接口 | `eaer/adapters/`：DataSource、Authorizer、ModelClient 三个接口，本地文件夹与本地账号两个参考实现，一致性套件 `conformance.py` | AC-11-4 |
 | 模块边界 | `tests/test_module_boundaries.py`：静态检查开发文档 3.2 的索引读写、版本状态、模型 SDK 三条规则 | AC-3-1 |
 | 检索评测 | `eaer/evalrun/retrieval.py`：按日期回放合成语料，每个查询在提问日提出，计算召回、拒答与越权 | AC-5-4 的评测流程 |
@@ -80,7 +80,7 @@ alembic downgrade base    # 回滚
 ## 尚未实现
 
 - **Docling 的真实样本核对（AC-6-1）。** Docling 2.143.1 已接入（PDF、扫描件、PPTX、XLSX、图片，Word 与 HTML 仍用原生解析器），只在测试生成的样例上验证过。版面与表格模型首次使用时从 Hugging Face 下载；私有化环境先运行 `docling-tools models download`，再用 `EAER_DOCLING_ARTIFACTS` 指向模型目录。
-- **OpenSearch 的别名切换与 CI。** `tests/test_opensearch_live.py` 已于 2026-11-12 在本地 OpenSearch 3.9.0 上通过：60 组随机过滤条件下返回结果与内存实现一致，写入、更新、按版本删除和两路检索正常。尚未覆盖的是重建期间持续查询的别名切换测试（AC-5-3）和中文分词插件；CI 已配置但还没有运行过。
+- **CI 与旧索引的定期清理。** OpenSearch 集成测试（过滤等价、写入与删除、检索评测回放、重建期间持续查询的别名切换）已在本地 OpenSearch 3.9.0 上通过；CI 已配置但还没有运行过。旧索引按 5.3 保留 24 小时，`drop_retired` 需要由部署方定时调用（第 13 节部署尚未实现）。
 - **真实的 Fast 基线。** 需要线上模型的接入配置（生成、Embedding、重排）。目前检索评测用的是向量化测试替身 `HashingEmbedder`，它的结果只说明评测流程和过滤逻辑正确，不代表产品效果。
 - **图表深度解析。** 需要视觉模型；目前表格已解析，图表类事实在评测中单列为“需视觉模型”。
 - **Deep 与 Verified。** 版本差异类问题需要 Deep 的“比较”模板同时检索新旧版本。

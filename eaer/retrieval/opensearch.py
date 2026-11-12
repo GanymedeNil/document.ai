@@ -86,6 +86,29 @@ class OpenSearchIndex:
         actions.append({"add": {"index": new_index, "alias": self.alias}})
         self.client.indices.update_aliases(body={"actions": actions})
 
+    def snapshot(self) -> "OpenSearchIndex":
+        """把别名解析成它此刻指向的索引；本次查询的所有请求都发往这个索引（AC-5-3）。
+        已经是具体索引名、或别名同时指向多个索引（不应出现）时，原样返回。"""
+        if not self.client.indices.exists_alias(name=self.alias):
+            return self
+        names = list(self.client.indices.get_alias(name=self.alias))
+        return OpenSearchIndex(self.client, alias=names[0], segmenter=self.segmenter) if len(names) == 1 else self
+
+    def builds(self) -> dict[str, int]:
+        """本别名下的全部索引版本及其创建时间（毫秒时间戳）。"""
+        got = self.client.indices.get(index=f"{self.alias}-*", ignore_unavailable=True, allow_no_indices=True)
+        return {name: int(v["settings"]["index"]["creation_date"]) for name, v in got.items()}
+
+    def current(self) -> set[str]:
+        if not self.client.indices.exists_alias(name=self.alias):
+            return set()
+        return set(self.client.indices.get_alias(name=self.alias))
+
+    def drop_index(self, name: str) -> None:
+        if not name.startswith(f"{self.alias}-"):
+            raise ValueError(f"{name} 不属于别名 {self.alias}")
+        self.client.indices.delete(index=name, ignore_unavailable=True)
+
     def drop_all(self) -> None:
         """删除本别名下的全部索引版本（评测与测试清理用）。"""
         self.client.indices.delete(index=f"{self.alias}-*", ignore_unavailable=True)

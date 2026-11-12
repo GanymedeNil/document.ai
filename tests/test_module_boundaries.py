@@ -2,7 +2,7 @@
 
 对 eaer/ 与 factset/ 的源码做静态检查（CI 中随 pytest 运行），三条规则：
 1. 检索索引：只有 retrieval 导入检索引擎客户端、发起检索（search_text / search_vector）；
-   只有 ingestion 与 lifecycle 写索引（upsert / update_fields / delete_version / switch_alias / drop_all）。
+   只有 ingestion 与 lifecycle 写索引（upsert / update_fields / delete_version / switch_alias / drop_all / drop_index）。
 2. 版本状态：只有 lifecycle 执行改变 document_version 状态的 SQL（新增版本、改 status、删除版本）。
 3. 模型：业务模块不导入模型厂商的 SDK，模型调用只能在 adapters（模型接口与参考实现）里。
 
@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 ENGINE_CLIENTS = {"opensearchpy", "opensearch", "elasticsearch"}
 INDEX_READS = {"search_text", "search_vector"}
-INDEX_WRITES = {"upsert", "update_fields", "delete_version", "switch_alias", "drop_all"}
+INDEX_WRITES = {"upsert", "update_fields", "delete_version", "switch_alias", "drop_all", "drop_index"}
 VENDOR_SDKS = {
     "openai", "anthropic", "google.generativeai", "google.genai", "vertexai", "dashscope", "zhipuai", "zai",
     "qianfan", "volcenginesdkarkruntime", "sparkai", "tencentcloud.hunyuan", "cohere", "mistralai", "voyageai",

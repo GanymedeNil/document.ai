@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import uuid
 from contextlib import contextmanager
-from typing import Any, Iterator
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Iterator
 
 import psycopg
 
@@ -89,3 +90,53 @@ def fresh_index(client: Any, alias: str, *, build_id: str, dims: int, analyzer: 
         yield ix
     finally:
         ix.drop_all()
+
+
+def rebuild(conn: psycopg.Connection, client: Any, alias: str, *, build_id: str, embedder: Embedder,
+            analyzer: str = "smartcn", segmenter: Segmenter | None = None,
+            before_switch: Callable[[], None] | None = None,
+            clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict:
+    """全量重建（开发文档 5.3：更换 Embedding 模型或分词器）。
+
+    1. 新建索引 <alias>-<build_id>，把数据库中全部可搜索版本写进去（向量取自 evidence_embedding 缓存，
+       换分词器不重新调用模型）；查询这时仍经别名访问旧索引；
+    2. 原子切换别名；
+    3. 补齐重建期间发生的变化（发布、归档、权限与有效期变更都会排入索引任务或记生命周期事件），
+       这些版本按数据库当前状态再对齐一次，此时写入经别名已到新索引；
+    4. 旧索引不在这里删除：保留 24 小时，由 drop_retired 定期清理，进行中的查询不会中断。
+    """
+    # 生命周期事件与索引任务用应用时钟记时间；留出余量，宁可多对齐几个版本（对齐可重复执行）
+    started = clock() - timedelta(minutes=5)
+    via_alias = OpenSearchIndex(client, alias=alias, segmenter=segmenter)
+    retired = via_alias.current()
+    name = via_alias.create(build_id, dims=embedder.dims, analyzer=analyzer)
+    building = Indexer(conn, OpenSearchIndex(client, alias=name, segmenter=segmenter), embedder, build_id)
+    versions = [r["id"] for r in conn.execute("SELECT id FROM document_version WHERE status = 'searchable'")]
+    for vid in versions:
+        building.sync_version(vid)
+    if before_switch is not None:
+        before_switch()
+    via_alias.switch_alias(name)
+    touched = [r["vid"] for r in conn.execute(
+        "SELECT version_id AS vid FROM lifecycle_event WHERE occurred_at >= %s UNION "
+        "SELECT version_id FROM ingest_job WHERE created_at >= %s AND stage IN ('publish_index', 'index_update')",
+        (started, started))]
+    for vid in touched:
+        building.sync_version(vid)
+    return {"index": name, "retired": sorted(retired - {name}), "synced": len(versions), "caught_up": len(touched)}
+
+
+def drop_retired(client: Any, alias: str, *, older_than: timedelta = timedelta(hours=24),
+                 now: datetime | None = None) -> list[str]:
+    """删除别名不再指向、且创建已超过保留期的旧索引（5.3：旧索引保留 24 小时后删除）。"""
+    ix = OpenSearchIndex(client, alias=alias)
+    current = ix.current()
+    cutoff = (now or datetime.now(timezone.utc)) - older_than
+    dropped = []
+    for name, created_ms in sorted(ix.builds().items()):
+        if name in current:
+            continue
+        if datetime.fromtimestamp(created_ms / 1000, timezone.utc) <= cutoff:
+            ix.drop_index(name)
+            dropped.append(name)
+    return dropped

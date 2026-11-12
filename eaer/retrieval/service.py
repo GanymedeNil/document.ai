@@ -55,8 +55,9 @@ class Retriever:
         on = as_of_valid or as_of_system or today
         f = Filters(scope.tenant_id, frozenset(scope.principals), on, system_t)
         factor = self.backtrack_factor if system_t else 1      # 回溯在检索后才筛有效期，候选放大
-        lexical = self.index.search_text(question, f, self.k_lexical * factor)
-        vector = self.index.search_vector(self.embedder.embed([question])[0], f, self.k_vector * factor)
+        index = self.index.snapshot()                          # 两路检索发往同一个索引，别名切换不混用（AC-5-3）
+        lexical = index.search_text(question, f, self.k_lexical * factor)
+        vector = index.search_vector(self.embedder.embed([question])[0], f, self.k_vector * factor)
         fused = rrf(lexical, vector, k=self.rrf_k)[: self.top_n * factor]
         hits = self._recheck(scope, fused, on, system_t)[: self.top_n]
         if self.reranker is not None and hits:

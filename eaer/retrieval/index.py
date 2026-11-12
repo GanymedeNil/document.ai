@@ -98,6 +98,9 @@ class SearchIndex(Protocol):
     def version_ids(self, tenant_id: str) -> set[str]: ...
     def search_text(self, query: str, f: Filters, k: int) -> list[tuple[str, float]]: ...
     def search_vector(self, vector: list[float], f: Filters, k: int) -> list[tuple[str, float]]: ...
+    def snapshot(self) -> "SearchIndex":
+        """本次查询固定使用的索引视图：别名中途切换时，同一次查询的各个请求仍发往同一个索引（AC-5-3）。"""
+        ...
 
 
 def rrf(*rankings: list[tuple[str, float]], k: int = 60) -> list[tuple[str, float]]:
@@ -165,6 +168,9 @@ class MemoryIndex:
             if s > 0:
                 scores.append((d.evidence_id, s))
         return sorted(scores, key=lambda x: (-x[1], x[0]))[:k]
+
+    def snapshot(self) -> "MemoryIndex":
+        return self
 
     def search_vector(self, vector: list[float], f: Filters, k: int) -> list[tuple[str, float]]:
         scored = [(d.evidence_id, sum(a * b for a, b in zip(vector, d.embedding)))

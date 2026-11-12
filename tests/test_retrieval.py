@@ -116,11 +116,12 @@ class FakeIndices:
 class FakeClient:
     def __init__(self, aliases=None, bulk_errors=False):
         self.indices = FakeIndices(aliases)
-        self.searches, self.bulks, self.deletes = [], [], []
+        self.searches, self.bulks, self.deletes, self.search_indices = [], [], [], []
         self.bulk_errors = bulk_errors
 
     def search(self, index, body):
         self.searches.append(body)
+        self.search_indices.append(index)
         return {"hits": {"hits": []}, "aggregations": {"v": {"buckets": []}}}
 
     def bulk(self, body, refresh):
@@ -193,6 +194,17 @@ def test_opensearch_writes_and_alias_switch():
         {"remove": {"index": "eaer-b1", "alias": "eaer"}}, {"add": {"index": "eaer-b2", "alias": "eaer"}}]})
     with pytest.raises(RuntimeError, match="批量写入"):
         OpenSearchIndex(FakeClient(bulk_errors=True)).upsert([doc])
+
+
+def test_one_query_uses_one_concrete_index_across_alias_switch():
+    """AC-5-3：每次查询先把别名解析成具体索引，两路检索都发往它；下一次查询才看到切换后的索引。"""
+    client = FakeClient(aliases={"eaer-b1": {}})
+    r = Retriever(conn=None, index=OpenSearchIndex(client), embedder=HashingEmbedder())
+    scope = Scope("t1", frozenset({"R_STAFF"}))
+    r.search(scope, "住宿上限", today=date(2026, 1, 1))
+    client.indices.aliases = {"eaer-b2": {}}                       # 别名切换
+    r.search(scope, "住宿上限", today=date(2026, 1, 1))
+    assert client.search_indices == ["eaer-b1", "eaer-b1", "eaer-b2", "eaer-b2"]
 
 
 def test_rrf_uses_ranks_only():
