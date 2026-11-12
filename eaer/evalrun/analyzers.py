@@ -3,9 +3,11 @@
 同一份事实表、同一批合成文档，在真实 OpenSearch 上每种分词器各建一个索引，按日期完整回放一遍检索评测，
 分“仅关键词”与“关键词 + 向量”两种方式计分。每次运行用一个新的、已迁移的数据库，互不影响。
 
+候选 jieba 不是引擎插件，在应用侧切词（eaer/retrieval/segment.py），其余候选是 OpenSearch 的分词器。
+
     EAER_ENV=eval python -m eaer.evalrun.analyzers 事实表.xlsx \
         --admin-url postgresql://postgres:postgres@localhost:5432/postgres \
-        --opensearch http://localhost:9200 [--analyzers standard,cjk,smartcn,icu_analyzer] [--format docx|html]
+        --opensearch http://localhost:9200 [--analyzers standard,cjk,smartcn,icu_analyzer,jieba] [--format docx|html]
 
 注意：向量化用的是测试替身 HashingEmbedder 时，“关键词 + 向量”一栏只说明流程能跑通，
 不能作为选型结论；接入真实 Embedding 模型后重跑，再按 AC-5-4 选定分词与模型的组合。
@@ -30,10 +32,12 @@ from eaer.evalrun.retrieval import Report, run
 from eaer.retrieval.embed import Embedder, HashingEmbedder
 from eaer.retrieval.index import Filters, SearchIndex
 from eaer.retrieval.opensearch import OpenSearchIndex
+from eaer.retrieval.segment import JiebaSegmenter
 from eaer.storage import LocalFileStore
 from factset.model import FactSet
 
-DEFAULT_ANALYZERS = ("standard", "cjk", "smartcn", "icu_analyzer")
+DEFAULT_ANALYZERS = ("standard", "cjk", "smartcn", "icu_analyzer", "jieba")
+APP_SEGMENTERS = {"jieba": JiebaSegmenter}        # 在应用侧切词的候选
 
 
 class LexicalOnly:
@@ -72,6 +76,10 @@ class Row:
         return sum(r.outcome in ("refused", "refusal_leak") for r in self.report.results)
 
     @property
+    def mrr(self) -> float:
+        return self.report.mrr
+
+    @property
     def misses(self) -> list[str]:
         return [r.query_id for r in self.report.results if r.outcome in ("miss", "refusal_leak")]
 
@@ -84,7 +92,8 @@ def compare(fs: FactSet, corpus: Path, manifest: dict, *, client, new_db: Callab
     for analyzer in analyzers:
         for mode in ("lexical", "hybrid"):
             alias = f"eaer-cmp-{uuid.uuid4().hex[:8]}"
-            ix = OpenSearchIndex(client, alias=alias)
+            seg = APP_SEGMENTERS[analyzer]() if analyzer in APP_SEGMENTERS else None
+            ix = OpenSearchIndex(client, alias=alias, segmenter=seg)
             ix.switch_alias(ix.create(analyzer.replace("_", "-"), dims=embedder.dims, analyzer=analyzer))
             index: SearchIndex = ix if mode == "hybrid" else LexicalOnly(ix)
             conn = psycopg.connect(new_db(), autocommit=True, row_factory=dict_row)
@@ -101,11 +110,11 @@ def compare(fs: FactSet, corpus: Path, manifest: dict, *, client, new_db: Callab
 def table(rows: list[Row]) -> str:
     emb = rows[0].report.embedder if rows else ""
     lines = [f"分词器对比（向量化 {emb}，前 {rows[0].report.top_m if rows else 0} 条）",
-             "| 分词器 | 方式 | 命中 / 可计分 | 拒答正确 | 越权 | 对账差异 | 未命中 |",
-             "| --- | --- | --- | --- | --- | --- | --- |"]
+             "| 分词器 | 方式 | 命中 / 可计分 | MRR | 拒答正确 | 越权 | 对账差异 | 未命中 |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
     for r in rows:
         lines.append(f"| {r.analyzer} | {'仅关键词' if r.mode == 'lexical' else '关键词 + 向量'} | "
-                     f"{r.hits} / {r.scored} | {r.refused_ok} / {r.refusals} | {r.report.leaks} | "
+                     f"{r.hits} / {r.scored} | {r.mrr:.3f} | {r.refused_ok} / {r.refusals} | {r.report.leaks} | "
                      f"{r.report.reconcile_diffs} | {'、'.join(r.misses) or '—'} |")
     return "\n".join(lines)
 

@@ -69,7 +69,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 ## 下一步（按优先级）
 
 1. **在真实环境跑通全部测试。** 已于 2026-11-12 完成（148 个通过）。以后如果真实引擎的行为与内存实现不一致，以等价性测试 `test_dsl_and_python_filters_agree` 的思路排查。
-2. **中文分词。** 给 OpenSearch 安装 analysis-smartcn 插件（需要自定义镜像），对比两到三种分词与 Embedding 组合后按 AC-5-4 选定。
+2. **中文分词。** 自定义镜像（smartcn、icu）、应用侧 jieba 候选和对比工具 `python -m eaer.evalrun.analyzers` 已完成（2026-11-12）。事实表样例只有 12 个可计分查询，五种候选召回都是 11/12，MRR 在 0.79–0.88 之间，区分不出来；用户倾向 jieba。接入真实 Embedding 并扩充评测集后重跑，按 AC-5-4 选定。jieba 0.42.1 自 2020 年未更新，在 Python 3.14 上导入有 SyntaxWarning，正式采用前评估替代实现。
 3. **补齐第 4 周关口中不依赖外部资源的项。** AC-3-1 用导入规则做静态检查（如 import-linter）；AC-6-3 按开发文档 6.5 状态表逐行写用例；AC-6-4 端到端测“待审核不可搜”；AC-11-4 对接接口一致性测试套件。
 4. **接入 Docling。** 按 `eaer/ingestion/parsers.py` 的 `Parser` 接口实现，覆盖 PDF、扫描件、PPTX、XLSX；版本锁定 2.143.1。
 5. **模型接口与 Fast 模式。** 实现 `ModelClient`（生成、Embedding、重排），然后是 Fast 模式的生成与引用检查，跑真实的 Fast 基线。需要用户提供线上模型的接入配置，不要自行假设服务商或密钥。

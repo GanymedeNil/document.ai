@@ -4,23 +4,29 @@
 新建索引全量重建，完成后切换别名（AC-5-3）。关键词检索与向量检索各发一次查询，在应用侧用 RRF 融合，
 两路都带同一组过滤条件。
 
-注意：本实现的查询语句与映射已有单元测试，并用求值器证明过滤语义与内存实现一致，
-但尚未连接真实的 OpenSearch 3.9.0 运行；接入开发环境后需跑一遍集成测试。
+中文分词有两种方式：默认由引擎的分词插件处理（smartcn，需 docker/opensearch 镜像）；
+传入 segmenter 时在应用侧切词（如 jieba），text 字段改用内置 whitespace 分词器，见 segment.py。
+2026-11-12 起集成测试在真实 OpenSearch 3.9.0 上运行。
 """
 from __future__ import annotations
 
 from typing import Any
 
+from dataclasses import replace
+
 from eaer.retrieval.index import Filters, IndexDoc
+from eaer.retrieval.segment import Segmenter
 
 ALIAS = "eaer"
+PRE_SEGMENTED = "whitespace"       # 应用侧已切好词时 text 字段使用的分词器
 
 
-def mapping(dims: int, analyzer: str = "smartcn") -> dict:
+def mapping(dims: int, analyzer: str = "smartcn", segmenter: str | None = None) -> dict:
+    """segmenter 不为空时表示 text 已在应用侧切词，记入 _meta，便于核对索引与应用配置一致。"""
     kw = {"type": "keyword"}
     return {
         "settings": {"index": {"knn": True}},
-        "mappings": {"properties": {
+        "mappings": {"_meta": {"text_analysis": segmenter or analyzer}, "properties": {
             "evidence_id": kw, "version_id": kw, "document_id": kw, "tenant_id": kw,
             "principals": kw, "doc_type": kw, "modality": kw, "valid_grade": kw, "index_build_id": kw,
             "text": {"type": "text", "analyzer": analyzer},
@@ -44,16 +50,25 @@ def vector_query(vector: list[float], f: Filters, k: int) -> dict:
 
 
 class OpenSearchIndex:
-    def __init__(self, client: Any, alias: str = ALIAS):
+    def __init__(self, client: Any, alias: str = ALIAS, segmenter: Segmenter | None = None):
         self.client = client
         self.alias = alias
+        self.segmenter = segmenter
 
     # ---------- 索引管理 ----------
 
     def create(self, build_id: str, dims: int, analyzer: str = "smartcn") -> str:
+        """应用侧切词时忽略 analyzer，text 字段固定用 whitespace。"""
         name = f"{self.alias}-{build_id}"
-        self.client.indices.create(index=name, body=mapping(dims, analyzer))
+        if self.segmenter is not None:
+            body = mapping(dims, PRE_SEGMENTED, self.segmenter.name)
+        else:
+            body = mapping(dims, analyzer)
+        self.client.indices.create(index=name, body=body)
         return name
+
+    def _seg(self, text: str) -> str:
+        return " ".join(self.segmenter.segment(text)) if self.segmenter is not None else text
 
     def switch_alias(self, new_index: str) -> None:
         """原子切换别名：同一次请求里移除旧索引、加上新索引，查询不中断。"""
@@ -71,6 +86,8 @@ class OpenSearchIndex:
             return
         body: list[dict] = []
         for d in docs:
+            if self.segmenter is not None:
+                d = replace(d, text=self._seg(d.text))
             body += [{"index": {"_index": self.alias, "_id": d.evidence_id}}, d.to_source()]
         self._bulk(body)
 
@@ -108,7 +125,10 @@ class OpenSearchIndex:
         return {b["key"] for b in resp["aggregations"]["v"]["buckets"]}
 
     def search_text(self, query: str, f: Filters, k: int) -> list[tuple[str, float]]:
-        resp = self.client.search(index=self.alias, body=text_query(query, f, k))
+        q = self._seg(query)
+        if not q.strip():
+            return []
+        resp = self.client.search(index=self.alias, body=text_query(q, f, k))
         return [(h["_id"], h["_score"]) for h in resp["hits"]["hits"]]
 
     def search_vector(self, vector: list[float], f: Filters, k: int) -> list[tuple[str, float]]:

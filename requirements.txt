@@ -8,6 +8,7 @@ uvicorn==0.54.0
 SQLAlchemy==2.1.6
 psycopg[binary]==3.3.6
 opensearch-py==3.2.0
+jieba==0.42.1
 openpyxl==3.1.5
 python-docx==1.2.0
 matplotlib==3.11.2

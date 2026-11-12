@@ -6,6 +6,8 @@
 计分：
 - 命中：每条依据事实都至少有一条证据出现在前 top_m 条中（严格，多条依据缺一条即未命中）；
 - 拒答类：前 top_m 条中不得出现目标事实键的任何取值；
+- 名次：命中查询的名次取各条依据事实最早出现位置中最靠后的一个，用来计算 MRR（未命中记 0），
+  召回率相同时用它比较排序质量；
 - 越权：任一返回证据在提问时不可搜索或提问角色无权查看，即计一次，应为 0；
 - 图表类事实需要视觉模型解析，尚未接入时单独列出，不计入召回分母。
 时间参数直接取事实表中的生效时间点与回溯时间点，相当于时间识别完全正确；时间识别的准确率另行评测（AC-7-6）。
@@ -49,6 +51,7 @@ class QueryResult:
     needed: int = 0
     leaks: int = 0
     top: list[str] = field(default_factory=list)
+    rank: int | None = None       # 命中时全部依据都已出现的名次（从 1 开始）
 
 
 @dataclass
@@ -64,6 +67,11 @@ class Report:
         return sum(r.outcome == "hit" for r in scored) / len(scored) if scored else float("nan")
 
     @property
+    def mrr(self) -> float:
+        scored = [r for r in self.results if r.outcome in ("hit", "miss")]
+        return sum(1 / r.rank for r in scored if r.outcome == "hit" and r.rank) / len(scored) if scored else float("nan")
+
+    @property
     def leaks(self) -> int:
         return sum(r.leaks for r in self.results)
 
@@ -75,7 +83,7 @@ class Report:
 
     def text(self) -> str:
         lines = [f"检索评测：{len(self.results)} 个查询，向量化 {self.embedder}，前 {self.top_m} 条",
-                 f"召回率（不含需视觉模型的查询）：{self.recall:.1%}",
+                 f"召回率（不含需视觉模型的查询）：{self.recall:.1%}；MRR {self.mrr:.3f}",
                  f"拒答类查询：{sum(r.outcome == 'refused' for r in self.results)} 个正确，"
                  f"{sum(r.outcome == 'refusal_leak' for r in self.results)} 个泄露取值",
                  f"越权返回：{self.leaks} 次；索引对账差异：{self.reconcile_diffs} 个版本"]
@@ -172,13 +180,16 @@ def _ask(conn, fs: FactSet, q, retriever: Retriever, ids, tenant_id: str) -> Que
     facts = [fs.facts[i] for i in q.basis]
     if any(f.carrier == "图表" for f in facts):
         return QueryResult(q.id, q.type, "needs_vision", needed=len(facts), leaks=leaks, top=top)
-    found = 0
+    found, rank = 0, 0
     for f in facts:
         want = norm(f"{f.value}{f.unit or ''}")
         version = str(ids[f.version_id])
-        if any(h.version_id == version and want in norm(h.content) for h in hits):
-            found += 1
-    return QueryResult(q.id, q.type, "hit" if found == len(facts) else "miss", found, len(facts), leaks, top)
+        pos = next((i for i, (h, t) in enumerate(zip(hits, texts), start=1)
+                    if h.version_id == version and want in t), None)
+        if pos is not None:
+            found, rank = found + 1, max(rank, pos)
+    hit = found == len(facts)
+    return QueryResult(q.id, q.type, "hit" if hit else "miss", found, len(facts), leaks, top, rank if hit else None)
 
 
 def _leaks(conn, hits, role: str) -> int:
