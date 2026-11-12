@@ -27,6 +27,8 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 | `eaer/review/` | 审核服务 |
 | `eaer/retrieval/` | 检索引擎接口、OpenSearch 实现与客户端工厂、内存参考实现、应用侧分词（jieba 候选）、对账、检索服务 |
 | `eaer/api/` | FastAPI 对外接口（上传、审核、归档、取消归档） |
+| `eaer/adapters/` | 对接接口（11.3）：数据源（参考实现本地文件夹 + `_acl.yaml`）、授权（参考实现本地账号）、模型（只有接口与测试替身，线上客户端待用户提供配置）；`conformance.py` 是客户实现交付前必跑的一致性套件 |
+| `eaer/domain/` | 证据 id 规则、身份与授权范围（`Identity`、`Scope`） |
 | `eaer/evalload/`、`eaer/evalrun/` | 评测专用的历史日期装载入口与检索评测运行器，只在 `EAER_ENV=eval` 时可用 |
 | `factset/` | 合成评测集工具：校验事实表、生成文档、检查文档、计算标准答案 |
 | `tests/` | 每个测试文件的文档字符串注明对应的验收项（AC-x-y） |
@@ -58,7 +60,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 
 | 状态 | 验收项 |
 | --- | --- |
-| 已通过 | AC-3-1，AC-4-1~4-5，AC-5-1、5-2、5-5，AC-6-2、6-3、6-4（检索层面）、6-5、6-6（检索层面）、6-7、6-8，AC-7-4、7-5，AC-11-2、11-6，AC-14-1、14-3 |
+| 已通过 | AC-3-1，AC-4-1~4-5，AC-5-1、5-2、5-5，AC-6-2、6-3、6-4（检索层面）、6-5、6-6（检索层面）、6-7、6-8，AC-7-4、7-5，AC-11-2、11-4（ModelClient 用测试替身，线上参考实现待配置）、11-6，AC-14-1、14-3 |
 | 合成语料上通过，待真实数据 | AC-6-9（分类）、AC-7-7（时间抽取）、AC-14-2 的程序检查部分 |
 | 只有逻辑或流程，未在真实环境验证 | AC-5-3（别名切换）、AC-5-4（检索评测流程已有，用的是测试替身）、AC-3-3（CI 已配置，未运行） |
 | 部分完成 | AC-11-1（契约测试只覆盖已有接口） |
@@ -70,7 +72,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 
 1. **在真实环境跑通全部测试。** 已于 2026-11-12 完成（148 个通过）。以后如果真实引擎的行为与内存实现不一致，以等价性测试 `test_dsl_and_python_filters_agree` 的思路排查。
 2. **中文分词。** 自定义镜像（smartcn、icu）、应用侧 jieba 候选和对比工具 `python -m eaer.evalrun.analyzers` 已完成（2026-11-12）。事实表样例只有 12 个可计分查询，五种候选召回都是 11/12，MRR 在 0.79–0.88 之间，区分不出来；用户倾向 jieba。接入真实 Embedding 并扩充评测集后重跑，按 AC-5-4 选定。jieba 0.42.1 自 2020 年未更新，在 Python 3.14 上导入有 SyntaxWarning，正式采用前评估替代实现。
-3. **补齐第 4 周关口中不依赖外部资源的项。** AC-3-1 用导入规则做静态检查（如 import-linter）；AC-6-3 按开发文档 6.5 状态表逐行写用例；AC-6-4 端到端测“待审核不可搜”；AC-11-4 对接接口一致性测试套件。
+3. **补齐第 4 周关口中不依赖外部资源的项。** 已于 2026-11-12 完成：AC-3-1（`tests/test_module_boundaries.py`）、AC-6-3（`tests/test_state_machine.py`）、AC-6-4（`tests/test_pending_not_searchable.py`，检索层面）、AC-11-4（`eaer/adapters/conformance.py`）。
 4. **接入 Docling。** 按 `eaer/ingestion/parsers.py` 的 `Parser` 接口实现，覆盖 PDF、扫描件、PPTX、XLSX；版本锁定 2.143.1。
 5. **模型接口与 Fast 模式。** 实现 `ModelClient`（生成、Embedding、重排），然后是 Fast 模式的生成与引用检查，跑真实的 Fast 基线。需要用户提供线上模型的接入配置，不要自行假设服务商或密钥。注意：后台任务进程 `python -m eaer.ingestion` 目前没有接索引任务（`Worker` 未传 `Indexer`，publish_index 与 index_update 不会执行），接入 `ModelClient.embed` 时一并接上，不能用测试替身 `HashingEmbedder`。
 

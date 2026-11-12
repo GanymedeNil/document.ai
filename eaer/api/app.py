@@ -7,7 +7,6 @@
 """
 
 import uuid
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Any, Callable, Iterator, Literal, Protocol
 
@@ -19,6 +18,7 @@ from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
+from eaer.domain.identity import Identity
 from eaer.ingestion.parsers import UnsupportedFormat
 from eaer.ingestion.pipeline import Ingestion
 from eaer.lifecycle.service import InvalidState, Lifecycle, utcnow
@@ -26,13 +26,6 @@ from eaer.review.service import Review
 from eaer.storage import FileStore
 
 MAX_DECISIONS = 1000
-
-
-@dataclass(frozen=True)
-class Identity:
-    user: str
-    tenant_id: str
-    roles: frozenset[str]
 
 
 class Authenticator(Protocol):

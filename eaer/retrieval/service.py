@@ -15,18 +15,12 @@ from typing import Protocol
 
 import psycopg
 
+from eaer.domain.identity import Scope
 from eaer.lifecycle.asof import end_of_day
 from eaer.retrieval.embed import Embedder
 from eaer.retrieval.index import Filters, MissingScope, SearchIndex, rrf
 
 RANK = {"explicit": 2, "inferred": 1, "unknown": 0}
-
-
-@dataclass(frozen=True)
-class Scope:
-    """授权接口 resolve 的结果：租户与可访问的角色。只以句柄形式在模块间传递，不进入模型上下文。"""
-    tenant_id: str
-    principals: frozenset[str]
 
 
 @dataclass(frozen=True)
