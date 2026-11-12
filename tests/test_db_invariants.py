@@ -122,3 +122,47 @@ def test_deleting_only_version_removes_document(conn):
     v = lc.add_version(doc, content_hash="h", raw_object_uri="file://x", acl_policy_id=acl, parser_version="t")
     lc.delete_pending(v, "bob")
     assert _count(conn, "document", "id", doc) == 0
+
+
+# ---------- AC-11-5（数据库部分）：强制验证清单只增不减 ----------
+
+FV_VIOLATIONS = [
+    ("清空规则", "UPDATE tenant_config SET forced_verify_rules = '[]' WHERE tenant_id = 't1'"),
+    ("删掉一条规则", "UPDATE tenant_config SET forced_verify_rules = forced_verify_rules - 0 WHERE tenant_id = 't1'"),
+    ("修改已有规则", "UPDATE tenant_config SET forced_verify_rules = jsonb_set(forced_verify_rules, '{0,value}', "
+                   "'\"差旅\"') WHERE tenant_id = 't1'"),
+    ("调换规则顺序", "UPDATE tenant_config SET forced_verify_rules = jsonb_build_array(forced_verify_rules -> 1, "
+                   "forced_verify_rules -> 0) WHERE tenant_id = 't1'"),
+    ("改成非数组", "UPDATE tenant_config SET forced_verify_rules = '{}' WHERE tenant_id = 't1'"),
+    ("删除带规则的租户配置", "DELETE FROM tenant_config WHERE tenant_id = 't1'"),
+]
+
+
+@pytest.fixture
+def fv_rules(s):
+    from datetime import datetime, timezone
+
+    from eaer.orchestrator.forced_verify import add_rule
+    conn = s[0]
+    now = datetime(2026, 11, 12, tzinfo=timezone.utc)
+    add_rule(conn, "t1", "keyword", "报销", "admin", now)
+    add_rule(conn, "t1", "doc_type", "record", "admin", now)
+    return conn
+
+
+@pytest.mark.parametrize("name, sql", FV_VIOLATIONS, ids=[v[0] for v in FV_VIOLATIONS])
+def test_forced_verify_shrink_is_rejected(fv_rules, name, sql):
+    before = fv_rules.execute("SELECT forced_verify_rules FROM tenant_config WHERE tenant_id = 't1'").fetchone()
+    with pytest.raises(errors.RaiseException, match="invariant: 强制验证清单"):
+        fv_rules.execute(sql)
+    after = fv_rules.execute("SELECT forced_verify_rules FROM tenant_config WHERE tenant_id = 't1'").fetchone()
+    assert after == before
+
+
+def test_forced_verify_append_and_empty_tenant_delete_are_allowed(fv_rules):
+    fv_rules.execute("UPDATE tenant_config SET forced_verify_rules = forced_verify_rules || "
+                     "'[{\"id\": \"fv_x\", \"kind\": \"all\", \"value\": null}]' WHERE tenant_id = 't1'")
+    assert len(fv_rules.execute("SELECT forced_verify_rules FROM tenant_config WHERE tenant_id = 't1'")
+               .fetchone()["forced_verify_rules"]) == 3
+    fv_rules.execute("INSERT INTO tenant_config (tenant_id, updated_at) VALUES ('t-empty', now())")
+    fv_rules.execute("DELETE FROM tenant_config WHERE tenant_id = 't-empty'")     # 没有规则的配置可以删除

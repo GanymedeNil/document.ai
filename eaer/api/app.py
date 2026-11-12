@@ -1,4 +1,4 @@
-"""对外接口：上传、审核、归档、取消归档、证据（开发文档 11.1、11.2）。
+"""对外接口：上传、审核、归档、取消归档、证据、强制验证清单（开发文档 11.1、11.2）。
 
 注意：本模块不能使用 from __future__ import annotations，FastAPI 需要在运行时解析依赖注解。
 
@@ -25,6 +25,7 @@ from eaer.domain.identity import Identity, Scope
 from eaer.ingestion.parsers import UnsupportedFormat
 from eaer.ingestion.pipeline import Ingestion
 from eaer.lifecycle.service import InvalidState, Lifecycle, utcnow
+from eaer.orchestrator import forced_verify as fv
 from eaer.review.service import Review
 from eaer.storage import FileStore
 
@@ -58,6 +59,12 @@ class Decision(BaseModel):
 
 class Decisions(BaseModel):
     decisions: list[Decision] = Field(min_length=1, max_length=MAX_DECISIONS)
+
+
+class ForcedVerifyRule(BaseModel):
+    kind: Literal["keyword", "document", "doc_type", "all"]
+    value: str | None = None
+    description: str | None = Field(default=None, max_length=200)
 
 
 def create_app(database_url: str, store: FileStore, auth: Authenticator,
@@ -122,6 +129,8 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
     Conn = Annotated[psycopg.Connection, Depends(get_conn)]
     Editor = Annotated[Identity, Depends(require("editor"))]
     Reviewer = Annotated[Identity, Depends(require("reviewer"))]
+    Admin = Annotated[Identity, Depends(require("admin"))]
+    Anyone = Annotated[Identity, Depends(identity)]
 
     def authorize(conn: Conn, ident: Annotated[Identity, Depends(identity)]) -> tuple[Authorizer, Scope]:
         """10.1 第 2 步：解析授权范围；授权接口不可用时直接拒绝（AC-10-5）。"""
@@ -200,6 +209,20 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         did = own_document(conn, ident, document_id)
         ids = Lifecycle(conn, clock).unarchive_document(did, ident.user)
         return {"document_id": str(did), "versions": [str(i) for i in ids], "status": "searchable"}
+
+    # 强制验证清单：只有读取与追加，不提供删除或修改的路径（AC-11-5）
+    @app.get("/v1/config/forced-verify")
+    def forced_verify_list(conn: Conn, ident: Anyone):
+        return {"builtin": fv.BUILTIN, "rules": fv.tenant_rules(conn, ident.tenant_id)}
+
+    @app.post("/v1/config/forced-verify", status_code=201)
+    def forced_verify_add(conn: Conn, ident: Admin, body: ForcedVerifyRule):
+        try:
+            rule, created = fv.add_rule(conn, ident.tenant_id, body.kind, body.value, ident.user, clock(),
+                                        body.description)
+        except fv.ForcedVerifyError as e:
+            raise ApiError(400, "invalid_request", str(e))
+        return JSONResponse(jsonable_encoder(rule), status_code=201 if created else 200)
 
     @app.get("/v1/evidence/{evidence_id}")
     def evidence(conn: Conn, authz: Authz, evidence_id: str):

@@ -8,7 +8,7 @@ from eaer.db import downgrade, migrate
 TABLES = {"tenant_config", "acl_policy", "document", "document_version", "version_validity",
           "version_relation", "evidence", "lifecycle_event", "review_task", "ingest_job", "query_log", "evidence_embedding"}
 TRIGGERS = {"version_delete_guard", "version_update_guard", "validity_guard", "relation_guard",
-            "lifecycle_event_append_only"}
+            "lifecycle_event_append_only", "forced_verify_append_only"}
 
 
 def _state(url):
@@ -23,5 +23,14 @@ def test_upgrade_downgrade_upgrade(empty_db_url):
     assert _state(empty_db_url) == (TABLES, TRIGGERS)
     downgrade(empty_db_url)
     assert _state(empty_db_url) == (set(), set())
+    migrate(empty_db_url)
+    assert _state(empty_db_url) == (TABLES, TRIGGERS)
+
+
+def test_each_revision_downgrades_one_step(empty_db_url):
+    """逐个版本回滚：0004 回滚只去掉强制验证清单的触发器，表结构不变。"""
+    migrate(empty_db_url)
+    downgrade(empty_db_url, "0003")
+    assert _state(empty_db_url) == (TABLES, TRIGGERS - {"forced_verify_append_only"})
     migrate(empty_db_url)
     assert _state(empty_db_url) == (TABLES, TRIGGERS)
