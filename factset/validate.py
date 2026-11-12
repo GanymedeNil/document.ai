@@ -114,6 +114,8 @@ def validate(fs: FactSet) -> list[Issue]:
                 add("事件", e.row, "有效期更正需要填写新生效日或新来源等级")
             if e.new_grade is not None and e.new_grade not in GRADE_RANK:
                 add("事件", e.row, f"新来源等级“{e.new_grade}”无效")
+            if is_ver and archived[e.target]:
+                add("事件", e.row, f"{e.target} 已归档，不能更正有效期（开发文档 6.5），应先取消归档")
         if e.type == "权限变更":
             if not is_doc:
                 add("事件", e.row, "权限变更的对象必须是文档")

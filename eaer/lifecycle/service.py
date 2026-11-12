@@ -183,7 +183,9 @@ class Lifecycle:
         """有效期更正：新增一行并替换旧行；它若取代了别的版本，同步调整那个版本的作废日。"""
         now = self.clock()
         with self.conn.transaction():
-            self._require_status(version_id, {"searchable", "archived"}, "只有已发布版本可以更正有效期", lock=True)
+            # 6.5：有效期更正只从“可搜索”出发；已归档的版本先取消归档再更正
+            self._require_status(version_id, {"searchable"}, "只有可搜索的版本可以更正有效期，已归档的请先取消归档",
+                                 lock=True)
             old = self._current_validity(version_id)
             new = Validity(valid_from if valid_from is not None else old.valid_from,
                            valid_from_grade or ("explicit" if valid_from is not None else old.valid_from_grade),
@@ -196,7 +198,11 @@ class Lifecycle:
             self._close_predecessors(version_id, now)
 
     def change_acl(self, document_id: uuid.UUID, principals: list[str], actor: str) -> uuid.UUID:
-        """权限变更：新建策略行并让文档全部版本指向它，旧策略保留以备审计；先改数据库，再排入索引更新。"""
+        """权限变更：新建策略行并让文档全部版本指向它，旧策略保留以备审计；先改数据库，再排入索引更新。
+
+        6.5 表中只列了“可搜索 → 权限变更 → 可搜索”。权限是文档属性、不改变状态，所以待审核与已归档的版本
+        同样跟随：否则撤权会在审核通过或取消归档时丢失（AC-10-3）。见 docs/设计变更记录.md。
+        """
         now = self.clock()
         with self.conn.transaction():
             doc = self.conn.execute("SELECT tenant_id FROM document WHERE id = %s", (document_id,)).fetchone()

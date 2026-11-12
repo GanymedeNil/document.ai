@@ -41,6 +41,7 @@ def test_sample_is_valid(sample_path):
     (lambda d: set_cell(d, "查询", "Q04", "回溯时间点", None), "回溯查询必须填写回溯时间点"),
     (lambda d: set_cell(d, "查询", "Q01", "依据事实", "F05"), "事实键与目标事实键不一致"),
     (lambda d: set_cell(d, "事件", "E03", "事件类型", "归档"), "已经处于归档"),
+    (lambda d: set_cell(d, "事件", "E02", "对象", "P005-v1"), "已归档，不能更正有效期"),
     (lambda d: set_cell(d, "文档", "P002", "可访问角色", "R_BOSS"), "R_BOSS 不在角色表中"),
     (lambda d: set_cell(d, "版本", "P001-v2", "生效日", None), "生效日为空"),
 ])
