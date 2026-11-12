@@ -11,24 +11,26 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
-      opensearch:
-        image: opensearchproject/opensearch:3.9.0
-        env:
-          discovery.type: single-node
-          DISABLE_SECURITY_PLUGIN: "true"
-          DISABLE_INSTALL_DEMO_CONFIG: "true"
-          OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
-        ports: ["9200:9200"]
-        options: >-
-          --health-cmd "curl -fs http://localhost:9200/_cluster/health" --health-interval 10s --health-timeout 5s --health-retries 20
     env:
       EAER_TEST_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
       EAER_TEST_OPENSEARCH_URL: http://localhost:9200
     steps:
       - uses: actions/checkout@v4
+      # OpenSearch 需要带中文分词插件的自定义镜像（docker/opensearch/Dockerfile），services 不能构建镜像，所以在步骤里启动
+      - name: 启动 OpenSearch
+        run: |
+          docker build -t eaer-opensearch:3.9.0 docker/opensearch
+          docker run -d --name opensearch -p 9200:9200 \
+            -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true \
+            -e DISABLE_INSTALL_DEMO_CONFIG=true -e OPENSEARCH_JAVA_OPTS="-Xms512m -Xmx512m" \
+            eaer-opensearch:3.9.0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14.10"
       - run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
       - run: pip install -r requirements.txt
+      - name: 等待 OpenSearch 就绪
+        run: |
+          for i in $(seq 1 60); do curl -fs http://localhost:9200/_cluster/health && exit 0; sleep 2; done
+          docker logs opensearch; exit 1
       - run: python -m pytest -q
