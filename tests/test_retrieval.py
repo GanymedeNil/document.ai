@@ -11,7 +11,8 @@ from eaer.evalrun.retrieval import run as run_eval
 from eaer.ingestion.pipeline import Worker
 from eaer.retrieval.embed import HashingEmbedder
 from eaer.retrieval.index import Filters, IndexDoc, MemoryIndex, MissingScope, rrf
-from eaer.retrieval.indexer import Indexer, reconcile
+from eaer.ingestion.indexer import Indexer
+from eaer.retrieval.reconcile import reconcile
 from eaer.retrieval.opensearch import OpenSearchIndex, mapping, text_query, vector_query
 from eaer.retrieval.service import Retriever, Scope
 from factset import load

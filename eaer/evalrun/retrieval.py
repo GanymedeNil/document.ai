@@ -23,11 +23,12 @@ from pathlib import Path
 
 import psycopg
 
+from eaer.ingestion.indexer import Indexer
 from eaer.ingestion.pipeline import Ingestion, Worker
 from eaer.lifecycle.service import Lifecycle
 from eaer.retrieval.embed import Embedder
 from eaer.retrieval.index import SearchIndex
-from eaer.retrieval.indexer import Indexer, reconcile
+from eaer.retrieval.reconcile import reconcile
 from eaer.retrieval.service import Retriever, Scope
 from eaer.review.service import Review
 from eaer.storage import FileStore

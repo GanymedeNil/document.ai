@@ -29,9 +29,10 @@ import psycopg
 from psycopg.rows import dict_row
 
 from eaer.evalrun.retrieval import Report, run
+from eaer.ingestion.indexer import fresh_index
 from eaer.retrieval.embed import Embedder, HashingEmbedder
 from eaer.retrieval.index import Filters, SearchIndex
-from eaer.retrieval.opensearch import OpenSearchIndex
+from eaer.retrieval.opensearch import connect
 from eaer.retrieval.segment import JiebaSegmenter
 from eaer.storage import LocalFileStore
 from factset.model import FactSet
@@ -93,16 +94,15 @@ def compare(fs: FactSet, corpus: Path, manifest: dict, *, client, new_db: Callab
         for mode in ("lexical", "hybrid"):
             alias = f"eaer-cmp-{uuid.uuid4().hex[:8]}"
             seg = APP_SEGMENTERS[analyzer]() if analyzer in APP_SEGMENTERS else None
-            ix = OpenSearchIndex(client, alias=alias, segmenter=seg)
-            ix.switch_alias(ix.create(analyzer.replace("_", "-"), dims=embedder.dims, analyzer=analyzer))
-            index: SearchIndex = ix if mode == "hybrid" else LexicalOnly(ix)
-            conn = psycopg.connect(new_db(), autocommit=True, row_factory=dict_row)
-            try:
-                rep = run(conn, fs, corpus, manifest, store=LocalFileStore(work_dir / alias), index=index,
-                          embedder=embedder, build_id=analyzer)
-            finally:
-                conn.close()
-                client.indices.delete(index=f"{alias}-*", ignore_unavailable=True)
+            with fresh_index(client, alias, build_id=analyzer.replace("_", "-"), dims=embedder.dims,
+                             analyzer=analyzer, segmenter=seg) as ix:
+                index: SearchIndex = ix if mode == "hybrid" else LexicalOnly(ix)
+                conn = psycopg.connect(new_db(), autocommit=True, row_factory=dict_row)
+                try:
+                    rep = run(conn, fs, corpus, manifest, store=LocalFileStore(work_dir / alias), index=index,
+                              embedder=embedder, build_id=analyzer)
+                finally:
+                    conn.close()
             rows.append(Row(analyzer, mode, rep))
     return rows
 
@@ -151,8 +151,6 @@ def scratch_databases(admin_url: str) -> Iterator[Callable[[], str]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from opensearchpy import OpenSearch
-
     from factset.load import load
     from factset.render import Renderer
     from factset.validate import validate
@@ -175,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory() as tmp, scratch_databases(args.admin_url) as new_db:
         work = Path(tmp)
         manifest = Renderer(fs).render(work / "corpus", args.format)
-        rows = compare(fs, work / "corpus", manifest, client=OpenSearch(args.opensearch), new_db=new_db,
+        rows = compare(fs, work / "corpus", manifest, client=connect(args.opensearch), new_db=new_db,
                        analyzers=tuple(a.strip() for a in args.analyzers.split(",") if a.strip()), work_dir=work)
     print(table(rows))
     return 0

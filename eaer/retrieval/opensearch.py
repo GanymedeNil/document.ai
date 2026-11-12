@@ -49,6 +49,13 @@ def vector_query(vector: list[float], f: Filters, k: int) -> dict:
             "query": {"knn": {"embedding": {"vector": list(vector), "k": k, "filter": f.to_dsl()}}}}
 
 
+def connect(url: str) -> Any:
+    """创建 OpenSearch 客户端。按边界规则 3.2，只有 retrieval 导入检索引擎客户端，其余模块经此取得。"""
+    from opensearchpy import OpenSearch
+
+    return OpenSearch(url)
+
+
 class OpenSearchIndex:
     def __init__(self, client: Any, alias: str = ALIAS, segmenter: Segmenter | None = None):
         self.client = client
@@ -78,6 +85,10 @@ class OpenSearchIndex:
             actions += [{"remove": {"index": i, "alias": self.alias}} for i in current if i != new_index]
         actions.append({"add": {"index": new_index, "alias": self.alias}})
         self.client.indices.update_aliases(body={"actions": actions})
+
+    def drop_all(self) -> None:
+        """删除本别名下的全部索引版本（评测与测试清理用）。"""
+        self.client.indices.delete(index=f"{self.alias}-*", ignore_unavailable=True)
 
     # ---------- 写入 ----------
 

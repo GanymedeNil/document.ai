@@ -1,5 +1,7 @@
 """索引任务（开发文档 5.3）：处理 publish_index 与 index_update。
 
+属于 ingestion（开发文档 3.1“建索引”）：按边界规则 3.2，只有 ingestion 与 lifecycle 写检索索引。
+
 数据库是唯一的事实来源。每次任务都按数据库当前状态把一个版本“对齐”到索引：
 - 不可搜索（待审核、已归档、已删除）：从索引删除；
 - 可搜索：新证据写入，向量优先取自 evidence_embedding 缓存，缓存里没有的才调用模型；
@@ -10,11 +12,15 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 import psycopg
 
 from eaer.retrieval.embed import Embedder
 from eaer.retrieval.index import IndexDoc, SearchIndex
+from eaer.retrieval.opensearch import OpenSearchIndex
+from eaer.retrieval.segment import Segmenter
 
 RANK = {"explicit": 2, "inferred": 1, "unknown": 0}
 
@@ -55,7 +61,6 @@ class Indexer:
             self.index.delete_version(vid)
             self.sync_version(version_id)
 
-
     def _vectors(self, evidence: list[dict]) -> list[list[float]]:
         """先查缓存，缺的才调用模型并写回缓存。"""
         if not evidence:
@@ -74,11 +79,13 @@ class Indexer:
         return [cached[e["id"]] for e in evidence]
 
 
-def reconcile(conn: psycopg.Connection, index: SearchIndex, tenant_id: str) -> dict[str, set[str]]:
-    """对账（AC-5-2）：数据库中可搜索的版本与索引中的版本应完全一致。"""
-    db = {str(r["id"]) for r in conn.execute(
-        "SELECT v.id FROM document_version v JOIN document d ON d.id = v.document_id "
-        "WHERE d.tenant_id = %s AND v.status = 'searchable' "
-        "AND EXISTS (SELECT 1 FROM evidence e WHERE e.version_id = v.id)", (tenant_id,))}
-    ix = index.version_ids(tenant_id)
-    return {"missing_in_index": db - ix, "unexpected_in_index": ix - db}
+@contextmanager
+def fresh_index(client: Any, alias: str, *, build_id: str, dims: int, analyzer: str = "smartcn",
+                segmenter: Segmenter | None = None) -> Iterator[OpenSearchIndex]:
+    """新建一个空索引并挂上别名，用完删除。供评测与对比工具使用；生产的全量重建应先写入、再切换别名（5.3）。"""
+    ix = OpenSearchIndex(client, alias=alias, segmenter=segmenter)
+    ix.switch_alias(ix.create(build_id, dims=dims, analyzer=analyzer))
+    try:
+        yield ix
+    finally:
+        ix.drop_all()
