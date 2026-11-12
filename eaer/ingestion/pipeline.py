@@ -80,7 +80,7 @@ class Ingestion:
         parsed = parser.parse(self.store.get(v["raw_object_uri"]), filename)
         with self.conn.transaction():
             for b in parsed.paragraphs():
-                self.lc.add_evidence(version_id, "text", {"section": list(b.section), "para": b.order}, b.text)
+                self.lc.add_evidence(version_id, "text", _locator(b, para=b.order), b.text)
             # parser_version 只在待审核时可改；记录实际使用的解析器
             self.conn.execute("UPDATE document_version SET parser_version = %s WHERE id = %s",
                               (parser.name, version_id))
@@ -146,8 +146,7 @@ class Ingestion:
                         if not row[c]:
                             continue
                         col = header[c] if c < len(header) else f"第{c + 1}列"
-                        self.lc.add_evidence(version_id, "table",
-                                             {"section": list(t.section), "table": t_index, "row": r, "column": c},
+                        self.lc.add_evidence(version_id, "table", _locator(t, table=t_index, row=r, column=c),
                                              f"{row[0]}｜{col}：{row[c]}", "deep")
             self._enqueue(version_id, "index_update", repeatable=True)
 
@@ -198,6 +197,15 @@ class Ingestion:
             self.conn.execute(
                 "INSERT INTO ingest_job (id, version_id, stage, status, created_at, updated_at) "
                 "VALUES (%s, %s, %s, 'queued', %s, %s)", (uuid.uuid4(), version_id, stage, now, now))
+
+
+def _locator(b, **extra) -> dict:
+    """证据定位：章节路径加位置；有页码的格式（PDF、PPTX、XLSX）带上页码，便于核对（AC-6-1）。
+    没有页码时不写这个键，原有 Word、HTML 证据的 id 保持不变。"""
+    loc = {"section": list(b.section), **extra}
+    if b.page is not None:
+        loc["page"] = b.page
+    return loc
 
 
 class Worker:

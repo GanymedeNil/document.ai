@@ -34,3 +34,29 @@ jobs:
           for i in $(seq 1 60); do curl -fs http://localhost:9200/_cluster/health && exit 0; sleep 2; done
           docker logs opensearch; exit 1
       - run: python -m pytest -q
+
+  # Docling 依赖较重（PyTorch 与版面模型），单独一个任务：只跑解析相关的测试
+  docling:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      EAER_TEST_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.10"
+      - run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: docling-models-2.143.1
+      - run: pip install -r requirements-docling.txt
+      - run: python -m pytest -q tests/test_docling.py tests/test_ingestion.py tests/test_api.py

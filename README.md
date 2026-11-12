@@ -13,7 +13,7 @@
 | 生命周期 | `eaer/lifecycle/service.py`：新增版本、待确认值、发布、作废日推导、更正、归档、取消归档、权限变更、删除待审核版本 | AC-4-4（数据库部分）、AC-6-3 的一部分、AC-7-4 |
 | 回溯查询 | `eaer/lifecycle/asof.py`：按系统时间取当时记录的有效期、关系和可见版本 | AC-4-5 |
 | 文件存储 | `eaer/storage.py`：存储接口与本地实现，集群版换 S3 兼容存储 | — |
-| 入库第 1–3、6 阶段 | `eaer/ingestion/`：接收与去重、文本解析、分类与时间抽取、表格深度解析、索引任务；后台任务可重试、可续跑 | AC-6-2、AC-6-8、AC-6-9（合成语料）、AC-7-5、AC-7-7（合成语料） |
+| 入库第 1–3、6 阶段 | `eaer/ingestion/`：接收与去重、文本解析（原生 Word/HTML，Docling 负责 PDF、扫描件、PPTX、XLSX、图片）、分类与时间抽取、表格深度解析、索引任务；后台任务可重试、可续跑 | AC-6-2、AC-6-8、AC-6-9（合成语料）、AC-7-5、AC-7-7（合成语料） |
 | 审核 | `eaer/review/service.py`：任务列表、逐份或批量决定、更正、删除 | AC-6-5 |
 | 对外接口 | `eaer/api/`：上传、审核任务、审核决定、归档、取消归档；参考令牌身份校验 | AC-11-1 的部分用例、AC-11-2 |
 | 检索 | `eaer/retrieval/`：引擎接口（OpenSearch 实现与内存参考实现）、对账、混合检索与数据库核对、回溯检索 | AC-5-1、AC-5-2、AC-5-3 的切换逻辑、AC-5-5、AC-6-7 |
@@ -29,7 +29,7 @@
 
 ```
 docker compose -f docker-compose.dev.yml up -d
-pip install -r requirements.txt
+pip install -r requirements.txt            # 或 requirements-docling.txt：另含 Docling，解析 PDF、扫描件、PPTX、XLSX、图片
 export EAER_TEST_ADMIN_URL=postgresql://postgres:postgres@localhost:5432/postgres
 export EAER_TEST_OPENSEARCH_URL=http://localhost:9200     # 不设置则跳过 OpenSearch 集成测试
 python -m pytest -q
@@ -79,7 +79,7 @@ alembic downgrade base    # 回滚
 
 ## 尚未实现
 
-- **Docling 解析器。** 它依赖 PyTorch 和需要从外网下载的版面模型，本仓库的开发环境装不上；按 `eaer/ingestion/parsers.py` 的 `Parser` 接口接入，PDF、扫描件、PPTX、XLSX 由它处理。目前 Word 和 HTML 用原生解析器。
+- **Docling 的真实样本核对（AC-6-1）。** Docling 2.143.1 已接入（PDF、扫描件、PPTX、XLSX、图片，Word 与 HTML 仍用原生解析器），只在测试生成的样例上验证过。版面与表格模型首次使用时从 Hugging Face 下载；私有化环境先运行 `docling-tools models download`，再用 `EAER_DOCLING_ARTIFACTS` 指向模型目录。
 - **OpenSearch 的别名切换与 CI。** `tests/test_opensearch_live.py` 已于 2026-11-12 在本地 OpenSearch 3.9.0 上通过：60 组随机过滤条件下返回结果与内存实现一致，写入、更新、按版本删除和两路检索正常。尚未覆盖的是重建期间持续查询的别名切换测试（AC-5-3）和中文分词插件；CI 已配置但还没有运行过。
 - **真实的 Fast 基线。** 需要线上模型的接入配置（生成、Embedding、重排）。目前检索评测用的是向量化测试替身 `HashingEmbedder`，它的结果只说明评测流程和过滤逻辑正确，不代表产品效果。
 - **图表深度解析。** 需要视觉模型；目前表格已解析，图表类事实在评测中单列为“需视觉模型”。

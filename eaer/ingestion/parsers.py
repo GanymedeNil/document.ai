@@ -1,6 +1,6 @@
 """文档解析器接口与原生实现（开发文档 6.1、6.2 第 2 阶段）。
 
-生产环境的首选解析器是 Docling（PDF、扫描件、PPTX、XLSX 等），作为本接口的另一个实现接入；
+生产环境的首选解析器是 Docling（PDF、扫描件、PPTX、XLSX、图片），见 docling_parser.py；
 这里的 Word 与 HTML 原生解析器不依赖模型，用于测试，也作为这两种格式的轻量实现。
 解析结果按文档顺序给出块：标题、段落、表格、图片；页码对 Word 和 HTML 不适用。
 """
@@ -172,6 +172,15 @@ class HtmlParser:
 
 
 DEFAULT_PARSERS: list[Parser] = [DocxParser(), HtmlParser()]
+
+
+def _register_docling() -> None:
+    # 未安装 Docling 时它不认领任何格式，PDF 等在上传时即被拒绝
+    from eaer.ingestion.docling_parser import DoclingParser
+    DEFAULT_PARSERS.append(DoclingParser())
+
+
+_register_docling()
 
 
 def parser_for(filename: str, parsers: list[Parser] | None = None) -> Parser:

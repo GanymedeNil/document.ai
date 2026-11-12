@@ -68,7 +68,7 @@ def test_upload_and_duplicate(api):
 
 def test_bad_requests(api):
     client, _, _ = api
-    assert_error(upload(client, name="scan.pdf"), 400, "invalid_request")
+    assert_error(upload(client, name="plan.dwg"), 400, "invalid_request")     # 不支持的格式
     assert_error(client.post("/v1/documents", headers=H("tok-editor"), files={"file": ("a.html", b"<p>x</p>")}),
                  400, "invalid_request")       # 缺少 principals
     assert_error(client.post("/v1/review/decisions", headers=H("tok-reviewer"), json={"decisions": []}),

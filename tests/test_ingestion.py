@@ -120,6 +120,18 @@ def test_duplicate_upload_returns_existing_version(env):
 
 def test_unsupported_format_is_rejected_at_receive(env):
     with pytest.raises(UnsupportedFormat):
+        env.ing.receive("t1", b"AC1032", "plan.dwg", acl_policy_id=env.acl)
+    assert env.conn.execute("SELECT count(*) AS n FROM document_version").fetchone()["n"] == 0
+
+
+def test_pdf_rejected_at_receive_when_docling_is_not_installed(env, monkeypatch):
+    from eaer.ingestion.docling_parser import DoclingParser
+    from eaer.ingestion.parsers import DEFAULT_PARSERS
+
+    for p in DEFAULT_PARSERS:
+        if isinstance(p, DoclingParser):
+            monkeypatch.setattr(p, "_available", False)
+    with pytest.raises(UnsupportedFormat, match=r"\.pdf"):
         env.ing.receive("t1", b"%PDF-1.7", "scan.pdf", acl_policy_id=env.acl)
     assert env.conn.execute("SELECT count(*) AS n FROM document_version").fetchone()["n"] == 0
 
