@@ -1,8 +1,9 @@
-"""对外接口：上传、审核、归档、取消归档（开发文档 11.1、11.2）。
+"""对外接口：上传、审核、归档、取消归档、证据（开发文档 11.1、11.2）。
 
 注意：本模块不能使用 from __future__ import annotations，FastAPI 需要在运行时解析依赖注解。
 
-身份校验走授权接口；这里的参考实现是配置好的令牌表。客户现场换成 SSO 时只换 Authenticator。
+身份校验（Authenticator）的参考实现是配置好的令牌表，客户现场换成 SSO 时只换它。
+文档权限走授权接口（adapters.authorizer.Authorizer，10.1 第 2、5 步）：未配置或不可用时返回 503，拒绝请求。
 错误一律返回 {"code", "message", "request_id"}；无权访问与不存在不区分，都返回 404。
 """
 
@@ -15,10 +16,12 @@ from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, Upload
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
-from eaer.domain.identity import Identity
+from eaer.adapters.authorizer import Authorizer, AuthorizationError, AuthorizerUnavailable, ScopeExpired
+from eaer.domain.identity import Identity, Scope
 from eaer.ingestion.parsers import UnsupportedFormat
 from eaer.ingestion.pipeline import Ingestion
 from eaer.lifecycle.service import InvalidState, Lifecycle, utcnow
@@ -58,7 +61,9 @@ class Decisions(BaseModel):
 
 
 def create_app(database_url: str, store: FileStore, auth: Authenticator,
-               clock: Callable[[], datetime] = utcnow) -> FastAPI:
+               clock: Callable[[], datetime] = utcnow,
+               authorizer: Callable[[psycopg.Connection], Authorizer] | None = None) -> FastAPI:
+    """authorizer：给定数据库连接返回授权接口实例；为 None 时需要文档权限的接口一律 503。"""
     app = FastAPI(title="EAER", version="0.1.0")
 
     @app.middleware("http")
@@ -79,6 +84,12 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
     @app.exception_handler(InvalidState)
     async def _invalid_state(request: Request, e: InvalidState):
         return error(request, 409, "invalid_state", str(e))
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http(request: Request, e: StarletteHTTPException):
+        """框架层的错误（未知路径、方法不允许等）也用统一格式（11.1）。"""
+        code = {404: "not_found", 405: "invalid_request"}.get(e.status_code, "invalid_request")
+        return error(request, e.status_code, code, "资源不存在" if e.status_code == 404 else str(e.detail))
 
     @app.exception_handler(RequestValidationError)
     async def _validation(request: Request, e: RequestValidationError):
@@ -111,6 +122,21 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
     Conn = Annotated[psycopg.Connection, Depends(get_conn)]
     Editor = Annotated[Identity, Depends(require("editor"))]
     Reviewer = Annotated[Identity, Depends(require("reviewer"))]
+
+    def authorize(conn: Conn, ident: Annotated[Identity, Depends(identity)]) -> tuple[Authorizer, Scope]:
+        """10.1 第 2 步：解析授权范围；授权接口不可用时直接拒绝（AC-10-5）。"""
+        if authorizer is None:
+            raise ApiError(503, "authz_unavailable", "授权服务不可用")
+        a = authorizer(conn)
+        try:
+            return a, a.resolve(ident)
+        except AuthorizerUnavailable:
+            raise ApiError(503, "authz_unavailable", "授权服务不可用")
+        except AuthorizationError:
+            raise ApiError(403, "forbidden", "无法确定授权范围")
+
+    Authz = Annotated[tuple[Authorizer, Scope], Depends(authorize)]
+    EVIDENCE_404 = (404, "not_found", "证据不存在")
 
     def own_document(conn, ident: Identity, document_id: str) -> uuid.UUID:
         try:
@@ -174,5 +200,43 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         did = own_document(conn, ident, document_id)
         ids = Lifecycle(conn, clock).unarchive_document(did, ident.user)
         return {"document_id": str(did), "versions": [str(i) for i in ids], "status": "searchable"}
+
+    @app.get("/v1/evidence/{evidence_id}")
+    def evidence(conn: Conn, authz: Authz, evidence_id: str):
+        """取证据原文与定位（11.2）。可搜索且有权：返回原文；已归档且有权：只返回归档提示（6.6）；
+        其余一律 404，不论不存在、无权、待审核还是已删除（10.2、AC-10-6）。"""
+        a, scope = authz
+        try:
+            allowed = a.check(scope, [evidence_id])[0]
+        except AuthorizerUnavailable:
+            raise ApiError(503, "authz_unavailable", "授权服务不可用")
+        except ScopeExpired:
+            raise ApiError(401, "unauthenticated", "授权范围已过期，请重新登录")
+        visible = ("SELECT e.id, e.modality, e.content, e.locator, e.parse_stage, v.id AS version_id, v.version_no, "
+                   "  v.approved_at, v.status, d.id AS document_id, d.title, d.doc_type "
+                   "FROM evidence e JOIN document_version v ON v.id = e.version_id "
+                   "JOIN document d ON d.id = v.document_id JOIN acl_policy p ON p.id = v.acl_policy_id "
+                   "WHERE e.id = %s AND d.tenant_id = %s AND p.principals && %s AND v.status = %s")
+        args = (evidence_id, scope.tenant_id, sorted(scope.principals))
+        if allowed:
+            r = conn.execute(visible, args + ("searchable",)).fetchone()
+            if r is not None:
+                val = conn.execute(
+                    "SELECT valid_from, valid_from_grade, valid_to, valid_to_grade FROM version_validity "
+                    "WHERE version_id = %s AND recorded_at IS NOT NULL AND replaced_at IS NULL",
+                    (r["version_id"],)).fetchone()
+                return jsonable_encoder({
+                    "evidence_id": r["id"], "status": "searchable", "modality": r["modality"],
+                    "content": r["content"], "locator": r["locator"], "parse_stage": r["parse_stage"],
+                    "document": {"id": r["document_id"], "title": r["title"], "doc_type": r["doc_type"]},
+                    "version": {"id": r["version_id"], "version_no": r["version_no"], "approved_at": r["approved_at"]},
+                    "validity": val})
+        r = conn.execute(visible, args + ("archived",)).fetchone()
+        if r is not None:
+            return jsonable_encoder({
+                "evidence_id": r["id"], "status": "archived", "notice": "该资料已归档",
+                "document": {"id": r["document_id"], "title": r["title"]},
+                "version": {"id": r["version_id"], "version_no": r["version_no"]}})
+        raise ApiError(*EVIDENCE_404)
 
     return app

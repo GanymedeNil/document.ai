@@ -15,7 +15,7 @@
 | 文件存储 | `eaer/storage.py`：存储接口与本地实现，集群版换 S3 兼容存储 | — |
 | 入库第 1–3、6 阶段 | `eaer/ingestion/`：接收与去重、文本解析（原生 Word/HTML，Docling 负责 PDF、扫描件、PPTX、XLSX、图片）、分类与时间抽取、表格深度解析、索引任务；后台任务可重试、可续跑 | AC-6-2、AC-6-8、AC-6-9（合成语料）、AC-7-5、AC-7-7（合成语料） |
 | 审核 | `eaer/review/service.py`：任务列表、逐份或批量决定、更正、删除 | AC-6-5 |
-| 对外接口 | `eaer/api/`：上传、审核任务、审核决定、归档、取消归档；参考令牌身份校验 | AC-11-1 的部分用例、AC-11-2 |
+| 对外接口 | `eaer/api/`：上传、审核任务、审核决定、归档、取消归档、证据；参考令牌身份校验，文档权限经授权接口 | AC-11-1 的部分用例、AC-11-2、AC-10-6 |
 | 检索 | `eaer/retrieval/`：引擎接口（OpenSearch 实现与内存参考实现）、对账、混合检索与数据库核对、回溯检索 | AC-5-1、AC-5-2、AC-5-3 的切换逻辑、AC-5-5、AC-6-7 |
 | 对接接口 | `eaer/adapters/`：DataSource、Authorizer、ModelClient 三个接口，本地文件夹与本地账号两个参考实现，一致性套件 `conformance.py` | AC-11-4 |
 | 模块边界 | `tests/test_module_boundaries.py`：静态检查开发文档 3.2 的索引读写、版本状态、模型 SDK 三条规则 | AC-3-1 |
@@ -42,7 +42,7 @@ python -m pytest -q
 ```
 export EAER_DATABASE_URL=postgresql://用户@主机/库名
 export EAER_STORAGE_DIR=/var/lib/eaer/files
-export EAER_TOKENS_FILE=/etc/eaer/tokens.json     # 参考实现的令牌表，格式见 eaer/api/main.py
+export EAER_TOKENS_FILE=/etc/eaer/tokens.json     # 参考实现的令牌表与文档权限角色，格式见 eaer/api/main.py
 alembic upgrade head
 uvicorn eaer.api.main:app --port 8000              # 接口进程
 python -m eaer.ingestion                           # 后台任务进程
