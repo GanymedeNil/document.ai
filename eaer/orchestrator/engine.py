@@ -7,7 +7,7 @@
    - Fast 转入 Deep 的信号：重排后最高分低于阈值；引用检查失败；问题中有部分要点没有证据覆盖。
      转入后按多跳模板，Fast 的检索结果是第一跳，Fast 已用的轮数计入 Deep 的预算；
    - Fast 或 Deep 转入 Verified 的信号：命中强制验证清单；证据之间存在冲突；命中已被取代或已过期的版本；
-     结论依赖图表数值；
+     结论依赖图表数值；引用的证据含疑似给模型的指令文字（10.3，由语义检查判断它是否真是事实陈述）；
    - Deep 不可用（deep_enabled 关闭，或模型没有结构化输出、上下文不够长）时，记录信号并说明，由 Fast 回答（12.1）；
 5. Verified（8.3、9.2–9.4）：确定性检查 → 语义检查 → 不通过的结论以结论内容定向补检索一轮 → 再验证；
    Deep 比较不同版本时，各版本按自己的日期核对与补检索；
@@ -37,6 +37,7 @@ from psycopg.types.json import Jsonb
 from eaer.adapters.model import Message, ModelClient
 from eaer.adapters.online import collect_calls, summarize
 from eaer.domain.identity import Scope
+from eaer.domain.injection import suspicious
 from eaer.orchestrator import codec
 from eaer.orchestrator.deep import DeepOutcome, DeepRunner
 from eaer.orchestrator.fast import ABSTAIN, ClaimOut, Draft, Steps, evidence_block, target_of
@@ -284,7 +285,7 @@ class Engine:
         hits, meta, draft = codec.hits_in(st["hits"]), dict(st["meta"]), codec.draft_in(st["draft"])
         claims = codec.claims_in(st["claims"])
         vt = codec.targets_in(st.get("version_targets"))
-        forced, signals = self._verified_signals(self.scope, question, tb, claims, draft, meta)
+        forced, signals = self._verified_signals(self.scope, question, tb, claims, draft, meta, hits)
         mode_path, escalations, notices = list(st["mode_path"]), list(st["escalations"]), list(st["notices"])
         rounds = st["rounds"]
         alerts = [f"安全告警：授权核对未通过，已移除证据 {i}" for c in claims for i in c.removed]
@@ -348,7 +349,7 @@ class Engine:
         return out
 
     def _verified_signals(self, scope, question, tb: TimeBasis, claims: list[ClaimOut], draft: Draft | None,
-                          meta: dict) -> tuple[list[str], list[str]]:
+                          meta: dict, hits=()) -> tuple[list[str], list[str]]:
         # “所用证据”按全部结论引用的证据算，包括没通过引用检查的：它们正需要 Verified 的补检索（8.1）
         used = [Cited(x.document_id, meta[x.version_id]["doc_type"]) for c in claims for x in c.citations]
         forced = must_verify(self.conn, scope.tenant_id, question=question, time_params=tb.has_point, cited=used)
@@ -362,6 +363,9 @@ class Engine:
             signals.append("命中已被取代或已过期的版本")
         if any(x.locator.get("figure") is not None for c in cited_ok for x in c.citations):
             signals.append("结论依赖图表数值")
+        content = {h.evidence_id: h.content for h in hits}
+        if any(suspicious(content.get(x.evidence_id, "")) for c in claims for x in c.citations):
+            signals.append("引用的证据含疑似指令文字")
         return forced, signals
 
     def _repair(self, scope, question, claims: list[ClaimOut], hits, meta, target: Target, today, tb: TimeBasis,

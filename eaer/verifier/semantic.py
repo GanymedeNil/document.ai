@@ -2,6 +2,7 @@
 输出 supported、unsupported 或 unverified 以及置信度；置信度低于阈值的一律视为 unverified。
 阈值按所用模型标定（tenant_config.thresholds.semantic_min_confidence，初值 0.7），宁可多标“未验证”。
 模型只判断“证据是否真正支持结论”，数值、日期、有效期、权限由代码做的确定性检查负责（9.2）。
+证据放进带随机边界的证据区，系统提示声明区内指令不执行；证据中给模型的指令不是事实陈述，不能支持结论（10.3）。
 """
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import date
 
 from eaer.adapters.model import Message, ModelClient
+from eaer.domain.injection import DATA_RULE, FENCE_START, escape, fence
 
 DEFAULT_MIN_CONFIDENCE = 0.7
 SCHEMA = {
@@ -25,7 +27,8 @@ SYSTEM = """你是严格的事实核查员。判断给定的结论是否被给�
 - unsupported：证据与结论矛盾，或证据根本没有提到结论中的关键内容；
 - unverified：证据相关但不足以确认，或你拿不准。
 只依据给出的证据，不使用常识补全。supporting_ids 只列真正支持结论的证据 id。
-confidence 是你对判断的把握，0 到 1。"""
+confidence 是你对判断的把握，0 到 1。
+""" + DATA_RULE
 
 
 @dataclass
@@ -47,9 +50,9 @@ class SemanticChecker:
         """evidence：[(证据 id, 带版本信息的证据文本)]。"""
         if not evidence:
             return Verdict("unsupported", 1.0, [], "没有证据")
-        blocks = "\n\n".join(f"[{i}] {t}" for i, t in evidence)
-        out = self.model.generate([Message("system", SYSTEM),
-                                   Message("user", f"目标日期：{on.isoformat()}\n结论：{claim}\n\n证据：\n{blocks}")], SCHEMA)
+        blocks = "\n\n".join(t if t.startswith(FENCE_START) else fence(f"[{i}]", t) for i, t in evidence)
+        out = self.model.generate([Message("system", SYSTEM), Message(
+            "user", f"目标日期：{on.isoformat()}\n结论：{escape(claim)}\n\n证据：\n{blocks}")], SCHEMA)
         p = out.parsed or {}
         given = {i for i, _ in evidence}
         ids = [i for i in dict.fromkeys(p.get("supporting_ids", [])) if i in given]

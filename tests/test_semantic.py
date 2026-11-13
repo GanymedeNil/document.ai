@@ -46,4 +46,4 @@ def test_no_evidence_is_unsupported_without_calling_the_model():
 def test_prompt_contains_claim_evidence_and_target_date():
     m = Fixed({"verdict": "supported", "confidence": 0.9, "supporting_ids": ["ev_a"]})
     SemanticChecker(m).judge("一线城市住宿上限为每晚650元。", EV, date(2026, 6, 1))
-    assert "目标日期：2026-06-01" in m.prompts[0] and "[ev_a] 一线城市" in m.prompts[0]
+    assert "目标日期：2026-06-01" in m.prompts[0] and "[ev_a]\n一线城市" in m.prompts[0]

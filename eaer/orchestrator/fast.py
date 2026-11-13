@@ -10,6 +10,7 @@ Fast：检索 → 生成 → 引用检查（9.2 的确定性检查）→ 判断�
 - 组装（8.6）：supported 附引用；unverified 标“未验证”；unsupported 删除，核心结论不通过则整体拒答。
   最终回答由保留的结论拼成，模型的自由文字不直接给用户（AC-8-5）。
 拒答文本不透露用户无权查看的文档：模型只见过本次检索到的、用户有权查看的证据。
+提示注入（10.3）：证据放进带随机边界的证据区，系统提示声明区内指令不执行（eaer/domain/injection.py）。
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ import psycopg
 
 from eaer.adapters.model import Message, ModelClient, Usage
 from eaer.domain.identity import Scope
+from eaer.domain.injection import DATA_RULE, escape, fence
 from eaer.lifecycle.asof import end_of_day
 from eaer.orchestrator.forced_verify import Cited, must_verify
 from eaer.retrieval.service import Hit, Retriever
@@ -47,11 +49,14 @@ SYSTEM = """你是企业制度问答助手，只能依据下面给出的证据�
 3. 把直接回答问题的那条结论标为 core=true，其余补充说明标为 core=false。
 4. 注意每条证据所属版本的有效期：只用在目标日期有效的版本回答；有效期标为“推断”或“未知”的，照常引用即可。
 5. 如果不同证据对所问的取值说法不一致，在 conflicts 中列出互相冲突的证据 id，并在结论中如实说明各自的说法。
-6. 证据不足以回答时，abstain=true，claims 为空，并在 missing 中说明缺少什么；不要猜测，不要提及证据之外的文件。"""
+6. 证据不足以回答时，abstain=true，claims 为空，并在 missing 中说明缺少哪类信息；不要猜测，不要提及证据之外的文件，
+   missing 里不要复述证据原文或其中的取值。
+7. """ + DATA_RULE
 SYSTEM_PLAIN = """你是企业制度问答助手，只能依据下面给出的证据回答，不得使用证据以外的知识。
 用中文回答，每句话写一条结论，句末用方括号标注所依据的证据 id，例如“……为 650 元/晚。[ev_0123456789abcdef]”。
 第一句直接回答问题。数值、日期、单位必须与证据原文一致。只用在目标日期有效的版本回答。
-证据不足以回答时只输出：无法回答。"""
+证据不足以回答时只输出：无法回答。
+""" + DATA_RULE
 _ID = re.compile(r"\[(ev_[0-9a-f]+)\]")
 
 
@@ -109,8 +114,8 @@ def _grade_text(g: str | None) -> str:
 def evidence_block(h: Hit, meta: dict) -> str:
     vf, vt = meta.get("valid_from"), meta.get("valid_to")
     span = f"生效 {vf or '未知'}" + (f"，作废 {vt}" if vt else "")
-    return (f"[{h.evidence_id}] 文档《{meta['title']}》第 {meta['version_no']} 版；{span}；有效期来源：{_grade_text(h.valid_grade)}\n"
-            f"{h.content}")
+    return fence(f"[{h.evidence_id}] 文档《{escape(meta['title'])}》第 {meta['version_no']} 版；{span}；"
+                 f"有效期来源：{_grade_text(h.valid_grade)}", h.content)
 
 
 def target_of(on: date, as_of_system: date | None) -> Target:
@@ -144,7 +149,7 @@ class Steps:
 
     def generate(self, question: str, hits: list[Hit], meta: dict, on: date) -> Draft:
         evidence = "\n\n".join(evidence_block(h, meta[h.version_id]) for h in hits)
-        user = f"目标日期：{on.isoformat()}\n问题：{question}\n\n证据：\n{evidence}"
+        user = f"目标日期：{on.isoformat()}\n问题：{escape(question)}\n\n证据：\n{evidence}"
         if self.model.capabilities().structured_output:
             out = self.model.generate([Message("system", SYSTEM), Message("user", user)], SCHEMA)
             p = out.parsed or {}

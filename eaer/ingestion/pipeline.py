@@ -17,6 +17,7 @@ from typing import Callable
 import psycopg
 from psycopg.types.json import Jsonb
 
+from eaer.domain.injection import suspicious
 from eaer.ingestion.extract import classify, extract
 from eaer.ingestion.parsers import DEFAULT_PARSERS, Parser, parser_for
 from eaer.lifecycle.service import Lifecycle, utcnow
@@ -92,6 +93,8 @@ class Ingestion:
     # ---------- 第 3 阶段：分类与抽取 ----------
 
     def classify_extract(self, version_id: uuid.UUID) -> None:
+        """第 3 阶段：分类与抽取，结果写入审核建议。另把疑似给模型的指令文字（10.3）列在建议的 injection 中，
+        提醒审核人：这类文字不会被执行，但审核人可以据此退回或清理文档。"""
         v = self.conn.execute(
             "SELECT v.*, d.title, d.doc_type, d.tenant_id FROM document_version v JOIN document d ON d.id = v.document_id "
             "WHERE v.id = %s", (version_id,)).fetchone()
@@ -121,7 +124,13 @@ class Ingestion:
             self.conn.execute(
                 "UPDATE review_task SET suggestions = %s WHERE version_id = %s AND status = 'open'",
                 (Jsonb({"doc_type": doc_type, "doc_type_rule": rule, "extraction": ex.to_json(),
-                        "unmatched_relations": unmatched}), version_id))
+                        "unmatched_relations": unmatched, "injection": self._injection(v["title"], paras)}), version_id))
+
+    @staticmethod
+    def _injection(title: str, paras: list[tuple[dict, str]]) -> list[dict]:
+        out = [{"field": "title", "kinds": k, "text": title[:80]} for k in [suspicious(title)] if k]
+        return out + [{"field": "paragraph", "locator": loc, "kinds": k, "text": c[:80]}
+                      for loc, c in paras for k in [suspicious(c)] if k]
 
     # ---------- 第 6 阶段：深度解析（表格） ----------
 
