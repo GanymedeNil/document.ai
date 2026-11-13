@@ -215,3 +215,17 @@ def test_query_task_lease_must_match_status(qt):
         conn.execute("UPDATE query_task SET status = 'queued' WHERE id = %(run)s", ids)
     conn.execute("UPDATE query_task SET status = 'queued', locked_until = NULL, locked_by = NULL WHERE id = %(run)s", ids)
     conn.execute("UPDATE query_log SET status = 'cancelled' WHERE id = %(run)s", ids)       # 运行中 → 已取消：允许
+
+
+# ---------- AC-12-3（数据库部分）：准入记录只追加 ----------
+
+@pytest.mark.parametrize("sql", ["UPDATE model_admission SET verified_ok = true",
+                                 "UPDATE model_admission SET report = '{}'",
+                                 "DELETE FROM model_admission"])
+def test_model_admission_is_append_only(conn, sql):
+    conn.execute("INSERT INTO model_admission (id, tenant_id, model_id, verified_ok, deep_ok, report, created_at) "
+                 "VALUES (gen_random_uuid(), 't1', 'm', false, false, '{\"x\": 1}', now())")
+    with pytest.raises(errors.RaiseException, match="invariant: 准入记录只能追加"):
+        conn.execute(sql)
+    row = conn.execute("SELECT verified_ok, report FROM model_admission").fetchone()
+    assert row == {"verified_ok": False, "report": {"x": 1}}

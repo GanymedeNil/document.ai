@@ -134,23 +134,34 @@ TIME_SCHEMA = {"type": "object", "required": ["as_of_valid"],
 
 class Engine:
     def __init__(self, conn: psycopg.Connection, retriever: Retriever, model: ModelClient, authorizer, *,
-                 store=None, thresholds: dict | None = None, budgets: dict | None = None, deep_enabled: bool = True):
+                 store=None, thresholds: dict | None = None, budgets: dict | None = None, deep_enabled: bool = True,
+                 verified_enabled: bool = True, closed_reasons: dict[str, str] | None = None):
         self.conn, self.retriever, self.model, self.authorizer = conn, retriever, model, authorizer
         self.steps = Steps(conn, retriever, model, authorizer, store=store)
         self.thresholds = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
         self.budgets = {**DEFAULT_BUDGETS, **(budgets or {})}
         self.deep_enabled = deep_enabled       # 准入检查（12.3）不达标时关闭
+        self.verified_enabled = verified_enabled
+        self.closed_reasons = closed_reasons or {}     # 关闭的原因，写进回答的说明（如“尚未通过准入检查”）
         self.scope: Scope | None = None        # 本次运行的授权范围：由调用方传入，不进入状态与检查点
 
     def deep_unavailable(self) -> str | None:
         """Deep 不可用的原因；可用时返回 None（12.1：需要稳定的结构化输出与足够的上下文长度）。"""
         if not self.deep_enabled:
-            return "Deep 尚未开放"
+            return self.closed_reasons.get("deep", "Deep 尚未开放")
         caps = self.model.capabilities()
         if not caps.structured_output:
             return "所用模型不支持结构化输出，Deep 不可用"
         if caps.context_tokens < int(self.thresholds["deep_min_context_tokens"]):
             return f"所用模型上下文长度 {caps.context_tokens} 不足，Deep 不可用"
+        return None
+
+    def verified_unavailable(self) -> str | None:
+        """Verified 不可用的原因；可用时返回 None（12.1：需要结构化输出；12.3：须通过准入检查）。"""
+        if not self.model.capabilities().structured_output:
+            return "所用模型不支持结构化输出"
+        if not self.verified_enabled:
+            return self.closed_reasons.get("verified", "Verified 尚未开放")
         return None
 
     def _deep(self) -> DeepRunner:
@@ -291,8 +302,9 @@ class Engine:
         rounds = st["rounds"]
         alerts = [f"安全告警：授权核对未通过，已移除证据 {i}" for c in claims for i in c.removed]
         need = mode_path[-1] == "verified" or bool(signals)
-        if need and not self.model.capabilities().structured_output:
-            notices.append("验证模式不可用（所用模型不支持结构化输出），时效性和强制验证类结论标为“未验证”")
+        verified_off = self.verified_unavailable() if need else None
+        if verified_off:
+            notices.append(f"验证模式不可用（{verified_off}），时效性和强制验证类结论标为“未验证”")
             for c in claims:
                 if c.status == "supported":
                     c.status = "unverified"

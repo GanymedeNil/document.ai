@@ -12,10 +12,13 @@ TABLES = {"tenant_config", "acl_policy", "document", "document_version", "versio
 CHECKPOINT_TABLES = {"checkpoint_migrations", "checkpoints", "checkpoint_blobs", "checkpoint_writes"}
 TABLES_0005 = {"query_task"} | CHECKPOINT_TABLES
 TABLES_0006 = {"query_cache"}
+TABLES_0007 = {"model_admission"}
 TRIGGERS = {"version_delete_guard", "version_update_guard", "validity_guard", "relation_guard",
             "lifecycle_event_append_only", "forced_verify_append_only"}
 TRIGGERS_0005 = {"query_log_guard", "query_task_guard"}
 TRIGGERS_0006 = {"cache_on_version", "cache_on_validity", "cache_on_relation", "cache_on_acl_policy", "cache_on_tenant_config"}
+TRIGGERS_0007 = {"model_admission_append_only", "cache_on_model_admission"}
+ALL = (TABLES | TABLES_0005 | TABLES_0006 | TABLES_0007, TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006 | TRIGGERS_0007)
 
 
 def _state(url):
@@ -26,7 +29,7 @@ def _state(url):
 
 
 def test_upgrade_downgrade_upgrade(empty_db_url):
-    full = (TABLES | TABLES_0005 | TABLES_0006, TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006)
+    full = ALL
     migrate(empty_db_url)
     assert _state(empty_db_url) == full
     downgrade(empty_db_url)
@@ -36,8 +39,10 @@ def test_upgrade_downgrade_upgrade(empty_db_url):
 
 
 def test_each_revision_downgrades_one_step(empty_db_url):
-    """逐个版本回滚：0006 回滚去掉回答缓存；0005 去掉查询任务与检查点表；0004 只去掉强制验证清单的触发器。"""
+    """逐个版本回滚：0007 去掉准入记录；0006 去掉回答缓存；0005 去掉查询任务与检查点表；0004 只去掉强制验证清单的触发器。"""
     migrate(empty_db_url)
+    downgrade(empty_db_url, "0006")
+    assert _state(empty_db_url) == (TABLES | TABLES_0005 | TABLES_0006, TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006)
     downgrade(empty_db_url, "0005")
     assert _state(empty_db_url) == (TABLES | TABLES_0005, TRIGGERS | TRIGGERS_0005)
     downgrade(empty_db_url, "0004")
@@ -45,7 +50,7 @@ def test_each_revision_downgrades_one_step(empty_db_url):
     downgrade(empty_db_url, "0003")
     assert _state(empty_db_url) == (TABLES, TRIGGERS - {"forced_verify_append_only"})
     migrate(empty_db_url)
-    assert _state(empty_db_url) == (TABLES | TABLES_0005 | TABLES_0006, TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006)
+    assert _state(empty_db_url) == ALL
 
 
 def _checkpoint_schema(url):

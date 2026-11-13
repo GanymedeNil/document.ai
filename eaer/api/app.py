@@ -266,7 +266,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         # 回答缓存（10.1 第 7 步）：键含租户、授权范围哈希与索引构建编号；命中后仍按当前授权范围核对所引证据
         ck = cache.key(ident.tenant_id, scope, build_id, body.question, today=asked.date(), as_of_valid=body.as_of_valid,
                        as_of_system=body.as_of_system, mode_hint=body.mode_hint, model=model_id,
-                       deep_enabled=eng.deep_enabled)
+                       deep_enabled=eng.deep_enabled, verified_enabled=eng.verified_enabled)
         hit = cache.get(conn, ck, tenant_id=ident.tenant_id, scope=scope, authorizer=authorizer_, now=asked,
                         session_id=str(sid)) if ttl > 0 else None
         prepared = None

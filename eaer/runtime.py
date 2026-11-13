@@ -3,7 +3,10 @@
 后台任务进程要接着执行转入后台、或执行者中断的提问（8.5），所以它与接口进程需要同样的查询配置：
 EAER_OPENSEARCH_URL、EAER_INDEX_ALIAS、EAER_TEXT_ANALYZER、模型服务（EAER_GEN_*、EAER_EMBED_*、EAER_RERANK_*），
 以及授权实现（参考实现读 EAER_TOKENS_FILE 中的文档权限角色）。缺任何一项都启动报错（12.1）；
-不开放提问时设置 EAER_DISABLE_QUERY=1。EAER_DEEP_ENABLED=0 关闭 Deep（准入检查未通过时，12.3）。
+不开放提问时设置 EAER_DISABLE_QUERY=1。EAER_DEEP_ENABLED=0 关闭 Deep。
+准入（12.3）：Verified 与 Deep 只对通过准入检查的生成模型开启（按租户取最近一次准入结论，见 eaer/orchestrator/admission.py；
+准入检查用 python -m eaer.evalrun.admission 运行）。没有准入记录的模型两者都关闭并在回答中说明；
+EAER_ADMISSION=off 跳过准入（只用于本地开发）。
 """
 from __future__ import annotations
 
@@ -59,13 +62,17 @@ def engine_factory(env: dict[str, str], accounts: dict[str, dict], store) -> Cal
     seg = segmenter_for(env.get("EAER_TEXT_ANALYZER", "smartcn"))
     embedder = model.embedder()
     deep_enabled = env.get("EAER_DEEP_ENABLED", "1") != "0"
+    admission_required = env.get("EAER_ADMISSION", "required") != "off"
 
     def make(conn, tenant_id):
+        from eaer.orchestrator.admission import gate
+
         row = conn.execute("SELECT thresholds, budgets FROM tenant_config WHERE tenant_id = %s", (tenant_id,)).fetchone()
+        g = gate(conn, tenant_id, model.gen.model, required=admission_required)
         retriever = Retriever(conn, OpenSearchIndex(client, alias=alias, segmenter=seg), embedder, model)
         return Engine(conn, retriever, model, LocalAuthorizer(conn, accounts), store=store,
                       thresholds=row["thresholds"] if row else None, budgets=row["budgets"] if row else None,
-                      deep_enabled=deep_enabled)
+                      deep_enabled=deep_enabled and g.deep, verified_enabled=g.verified, closed_reasons=g.reasons)
     return make
 
 

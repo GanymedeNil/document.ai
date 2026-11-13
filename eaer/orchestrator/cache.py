@@ -2,7 +2,7 @@
 
 同一租户、同一授权范围、同一索引构建下，同一天对同一问题（时间参数、模式提示相同）的提问直接复用已完成的回答。
 - 键：租户、授权范围哈希（principals 排序后取哈希）、索引构建编号（别名此刻指向的具体索引，重建切换后键自然变化）、
-  规范化的问题、提问日、时间参数、模式提示、模型与 Deep 开关。权限不同的用户永远落在不同的键上；
+  规范化的问题、提问日、时间参数、模式提示、模型与 Deep、Verified 开关。权限不同的用户永远落在不同的键上；
 - 失效：版本状态、权限、已发布的有效期与关系、权限策略、租户配置一有变化，数据库触发器就清除该租户的全部缓存
   （迁移 0006）；另有有效期（budgets.cache_ttl_seconds，初值 600 秒，0 表示不缓存）；
 - 命中后返回前仍按当前授权范围核对所引证据（授权接口 check），有一条不通过就作废这条缓存、重新回答——
@@ -30,9 +30,10 @@ def scope_hash(scope: Scope) -> str:
 
 
 def key(tenant_id: str, scope: Scope, build_id: str, question: str, *, today: date, as_of_valid: date | None,
-        as_of_system: date | None, mode_hint: str | None, model: str, deep_enabled: bool) -> str:
+        as_of_system: date | None, mode_hint: str | None, model: str, deep_enabled: bool,
+        verified_enabled: bool = True) -> str:
     parts = [tenant_id, scope_hash(scope), build_id, " ".join(question.split()), today.isoformat(),
-             codec.iso(as_of_valid), codec.iso(as_of_system), mode_hint, model, deep_enabled]
+             codec.iso(as_of_valid), codec.iso(as_of_system), mode_hint, model, deep_enabled, verified_enabled]
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 
