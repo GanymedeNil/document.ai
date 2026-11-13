@@ -14,6 +14,7 @@
 配置来自部署环境变量（13.2“模型服务地址与密钥”，部署时必填）：
   EAER_GEN_BASE_URL / EAER_GEN_API_KEY / EAER_GEN_MODEL     生成服务；EAER_GEN_THINKING=disabled 关闭推理过程
   EAER_GEN_CONTEXT_TOKENS / EAER_GEN_VISION=1                上下文长度、是否支持图像输入
+  EAER_GEN_TEMPERATURE                                       采样温度；问答与评测建议 0，便于复现（AC-14-5）
   EAER_EMBED_BASE_URL / EAER_EMBED_API_KEY / EAER_EMBED_MODEL / EAER_EMBED_DIMS
   EAER_EMBED_QUERY_INSTRUCTION                               查询向量化的指令前缀（Qwen3-Embedding 需要）
   EAER_RERANK_BASE_URL / EAER_RERANK_API_KEY / EAER_RERANK_MODEL
@@ -116,8 +117,12 @@ class OnlineModelClient:
             return Endpoint(e[f"{prefix}_BASE_URL"].rstrip("/"), e[f"{prefix}_API_KEY"], e[f"{prefix}_MODEL"],
                             timeout, retries, extra or {})
 
-        thinking = e.get("EAER_GEN_THINKING")
-        return cls(ep("EAER_GEN", {"thinking": {"type": thinking}} if thinking else None),
+        gen_extra: dict[str, Any] = {}
+        if e.get("EAER_GEN_THINKING"):
+            gen_extra["thinking"] = {"type": e["EAER_GEN_THINKING"]}
+        if e.get("EAER_GEN_TEMPERATURE"):
+            gen_extra["temperature"] = float(e["EAER_GEN_TEMPERATURE"])
+        return cls(ep("EAER_GEN", gen_extra or None),
                    ep("EAER_EMBED"), ep("EAER_RERANK"),
                    embedding_dims=int(e.get("EAER_EMBED_DIMS", "0")),
                    context_tokens=int(e.get("EAER_GEN_CONTEXT_TOKENS", "128000")),

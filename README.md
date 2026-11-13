@@ -43,10 +43,18 @@ python -m pytest -q
 export EAER_DATABASE_URL=postgresql://用户@主机/库名
 export EAER_STORAGE_DIR=/var/lib/eaer/files
 export EAER_TOKENS_FILE=/etc/eaer/tokens.json     # 参考实现的令牌表与文档权限角色，格式见 eaer/api/main.py
+export EAER_OPENSEARCH_URL=http://localhost:9200
+# 模型服务：生成、Embedding、重排分别配置，变量见 eaer/adapters/online.py；本地开发写在 .env（不纳入版本控制）
 alembic upgrade head
+python -m modelserver --port 8100 --env-file .env  # 本地 Embedding 与重排服务（Qwen3，可选；也可用线上服务）
+python -m eaer.ingestion rebuild --build-id b1     # 首次部署：建索引并挂上别名
 uvicorn eaer.api.main:app --port 8000              # 接口进程
-python -m eaer.ingestion                           # 后台任务进程
+python -m eaer.ingestion                           # 后台任务进程（含索引任务；缺配置即报错）
+python -m eaer.ingestion drop-retired              # 定时运行：删除超过 24 小时的旧索引
 ```
+
+当前模型组合（2026-11-13）：生成 DeepSeek `deepseek-flash`（关闭推理、温度 0）；Embedding 与重排为本地部署的
+Qwen3-Embedding-0.6B、Qwen3-Reranker-0.6B（`modelserver/`）。文档内容会发送到线上生成服务，部署说明中须向客户明示（12.2）。
 
 ## 迁移
 

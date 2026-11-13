@@ -170,9 +170,10 @@ def test_unconfigured_capabilities_and_fast_requirements():
 def test_from_env():
     env = {"EAER_GEN_BASE_URL": "https://api.deepseek.com/", "EAER_GEN_API_KEY": KEY, "EAER_GEN_MODEL": "deepseek-flash",
            "EAER_GEN_THINKING": "disabled", "EAER_GEN_CONTEXT_TOKENS": "1048576", "EAER_GEN_VISION": "1",
-           "EAER_MODEL_TIMEOUT": "20"}
+           "EAER_MODEL_TIMEOUT": "20", "EAER_GEN_TEMPERATURE": "0"}
     c = OnlineModelClient.from_env(env)
-    assert c.gen.base_url == "https://api.deepseek.com" and c.gen.timeout == 20 and c.gen.extra == {"thinking": {"type": "disabled"}}
+    assert c.gen.base_url == "https://api.deepseek.com" and c.gen.timeout == 20
+    assert c.gen.extra == {"thinking": {"type": "disabled"}, "temperature": 0.0}
     assert c.capabilities().context_tokens == 1048576 and c.capabilities().vision and c.emb is None
     with pytest.raises(ValueError, match="EAER_EMBED_MODEL"):
         OnlineModelClient.from_env({**env, "EAER_EMBED_BASE_URL": "https://x", "EAER_EMBED_API_KEY": "k"})

@@ -9,8 +9,8 @@
         --admin-url postgresql://postgres:postgres@localhost:5432/postgres \
         --opensearch http://localhost:9200 [--analyzers standard,cjk,smartcn,icu_analyzer,jieba] [--format docx|html]
 
-注意：向量化用的是测试替身 HashingEmbedder 时，“关键词 + 向量”一栏只说明流程能跑通，
-不能作为选型结论；接入真实 Embedding 模型后重跑，再按 AC-5-4 选定分词与模型的组合。
+设置了 EAER_EMBED_* 时向量化用配置的 Embedding 服务（查询带指令前缀），否则用测试替身 HashingEmbedder——
+那时“关键词 + 向量”一栏只说明流程能跑通，不能作为选型结论。按 AC-5-4 选定分词与模型组合需要更大的评测集。
 """
 from __future__ import annotations
 
@@ -173,8 +173,13 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory() as tmp, scratch_databases(args.admin_url) as new_db:
         work = Path(tmp)
         manifest = Renderer(fs).render(work / "corpus", args.format)
+        embedder = None
+        if os.environ.get("EAER_EMBED_BASE_URL"):                # 配置了 Embedding 服务就用它，否则用测试替身
+            from eaer.adapters.online import OnlineModelClient
+            embedder = OnlineModelClient.from_env().embedder()
         rows = compare(fs, work / "corpus", manifest, client=connect(args.opensearch), new_db=new_db,
-                       analyzers=tuple(a.strip() for a in args.analyzers.split(",") if a.strip()), work_dir=work)
+                       analyzers=tuple(a.strip() for a in args.analyzers.split(",") if a.strip()), work_dir=work,
+                       embedder=embedder)
     print(table(rows))
     return 0
 

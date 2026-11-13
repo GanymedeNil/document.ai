@@ -9,9 +9,10 @@
 
     EAER_ENV=eval python -m eaer.evalrun.fast 事实表.xlsx --admin-url postgresql://… [--format docx|html]
 
-生成服务按 EAER_GEN_* 环境变量连接（见 eaer/adapters/online.py）。注意：Router、Deep、Verified 尚未实现，
-期望由 Deep 或 Verified 回答的问题这里也只用 Fast；Embedding 与重排服务未配置时，检索的向量一路用测试替身
-HashingEmbedder、不重排，结果只说明流程，不能作为产品基线（CLAUDE.md“测试替身的数字不是产品结论”）。
+模型服务按 EAER_GEN_* / EAER_EMBED_* / EAER_RERANK_* 环境变量连接（见 eaer/adapters/online.py）。
+注意：Router、Deep、Verified 尚未实现，期望由 Deep 或 Verified 回答的问题这里也只用 Fast；Embedding 与重排
+服务未配置时，检索的向量一路用测试替身 HashingEmbedder、不重排，结果只说明流程，不能作为产品基线
+（CLAUDE.md“测试替身的数字不是产品结论”）。索引用内存参考实现，关键词一路是它的单字加二字切分。
 """
 from __future__ import annotations
 
@@ -81,7 +82,7 @@ def score(fs: FactSet, calc: Calculator, q, a: FastAnswer | None, error: str = "
 
 
 def run_fast(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelClient, store, index: SearchIndex,
-             embedder: Embedder) -> list[FastResult]:
+             embedder: Embedder, reranker=None) -> list[FastResult]:
     calc = Calculator(fs)
 
     def ask(conn, fs, q, retriever, ids, tenant_id):
@@ -95,7 +96,8 @@ def run_fast(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelCli
             return score(fs, calc, q, None, f"{type(e).__name__}: {e}")
         return score(fs, calc, q, a)
 
-    return run(conn, fs, corpus, manifest, store=store, index=index, embedder=embedder, ask=ask).results
+    return run(conn, fs, corpus, manifest, store=store, index=index, embedder=embedder, ask=ask,
+               reranker=reranker).results
 
 
 def report(results: list[FastResult], *, model: str, embedder: str) -> str:
@@ -133,11 +135,8 @@ def main(argv: list[str] | None = None) -> int:
     if "生成" in missing:
         print("未配置生成服务（EAER_GEN_*）", file=sys.stderr)
         return 2
-    if model.emb is not None:
-        from eaer.adapters.model import ModelEmbedder
-        embedder: Embedder = ModelEmbedder(model, os.environ.get("EAER_EMBED_MODEL", "embedding"))
-    else:
-        embedder = HashingEmbedder()
+    embedder: Embedder = model.embedder() if model.emb is not None else HashingEmbedder()
+    reranker = model if model.rr is not None else None
     fs = load(args.xlsx)
     with tempfile.TemporaryDirectory() as tmp, scratch_databases(args.admin_url) as new_db:
         import psycopg
@@ -147,9 +146,10 @@ def main(argv: list[str] | None = None) -> int:
         manifest = Renderer(fs).render(work / "corpus", args.format)
         conn = psycopg.connect(new_db(), autocommit=True, row_factory=dict_row)
         results = run_fast(conn, fs, work / "corpus", manifest, model=model, store=LocalFileStore(work / "files"),
-                           index=MemoryIndex(), embedder=embedder)
+                           index=MemoryIndex(), embedder=embedder, reranker=reranker)
         conn.close()
-    print(report(results, model=model.gen.model, embedder=embedder.name))
+    print(report(results, model=model.gen.model,
+                 embedder=embedder.name + (f"，重排 {model.rr.model}" if reranker else "，不重排")))
     if missing:
         print(f"\n注意：未配置 {'、'.join(missing)}，结果只说明流程，不能作为产品基线。")
     return 0
