@@ -51,6 +51,9 @@ class FastResult:
     seconds: float
     tokens: int
     error: str = ""
+    mode_path: list[str] | None = None
+    router: str = ""
+    expected_mode: str | None = None
 
 
 def _quantities(text: str):
@@ -81,6 +84,55 @@ def score(fs: FactSet, calc: Calculator, q, a: FastAnswer | None, error: str = "
                       tokens=sum(a.usage.values()) if a.usage else 0)
 
 
+def verify_claim(conn, retriever, model, tenant_id: str, q) -> tuple[str, str]:
+    """“验证器”类查询（如 Q16）：给的是待验证的结论。按 Verified 的做法检索、确定性检查、语义检查，返回 (状态, 原因)。"""
+    from eaer.orchestrator.fast import Steps, evidence_block, target_of
+    from eaer.verifier.semantic import SemanticChecker
+
+    claim = q.question.removeprefix("结论：")
+    scope = Scope(tenant_id, frozenset({q.role}))
+    steps = Steps(conn, retriever, model, LocalAuthorizer(conn, {}))
+    hits = steps.retrieve(scope, claim, today=q.asked_on, as_of_valid=None, as_of_system=None)
+    meta = steps.meta(hits, None)
+    v = SemanticChecker(model).judge(claim, [(h.evidence_id, evidence_block(h, meta[h.version_id])) for h in hits],
+                                     q.asked_on)
+    if not v.supporting_ids:
+        return v.status, v.reason
+    c = steps.check(scope, [{"text": claim, "evidence_ids": v.supporting_ids, "core": True}], hits, meta,
+                    target_of(q.asked_on, None))[0]
+    worst = max([c.status, v.status], key=["supported", "unverified", "unsupported"].index)
+    return worst, "；".join(x["reason"] for x in c.checks.values() if x["reason"]) or v.reason
+
+
+def run_engine(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelClient, store, index: SearchIndex,
+               embedder: Embedder, reranker=None) -> list[FastResult]:
+    """经完整的编排器回答（Router、升级、Verified）；不传时间参数，时间点由编排器从问题中识别（7.5）。"""
+    from eaer.orchestrator.engine import Engine
+    calc = Calculator(fs)
+
+    def ask(conn, fs, q, retriever, ids, tenant_id):
+        if q.type == "验证器":
+            status, reason = verify_claim(conn, retriever, model, tenant_id, q)
+            exp = calc.compute(q)
+            return FastResult(q.id, q.type, q.question, exp.answer, f"{status}：{reason}"[:200],
+                              "correct" if status == "unsupported" else "wrong", False, False, [], 0.0, 0,
+                              expected_mode=q.expected_mode)
+        eng = Engine(conn, retriever, model, LocalAuthorizer(conn, {}), store=store)
+        try:
+            r = eng.ask(Scope(tenant_id, frozenset({q.role})), q.question, today=q.asked_on)
+        except Exception as e:  # noqa: BLE001
+            return score(fs, calc, q, None, f"{type(e).__name__}: {e}")
+        a = FastAnswer(r.answer, r.claims, r.abstained, r.notices, r.forced_verify, r.time_basis, r.mode, r.mode_path,
+                       r.model, {k: v for k, v in r.cost.get("by_kind", {}).get("generate", {}).items()
+                                 if k in ("input_tokens", "output_tokens")}, r.seconds)
+        res = score(fs, calc, q, a)
+        res.mode_path, res.router, res.expected_mode = r.mode_path, r.router.get("decided", ""), q.expected_mode
+        return res
+
+    return run(conn, fs, corpus, manifest, store=store, index=index, embedder=embedder, ask=ask,
+               reranker=reranker).results
+
+
 def run_fast(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelClient, store, index: SearchIndex,
              embedder: Embedder, reranker=None) -> list[FastResult]:
     calc = Calculator(fs)
@@ -105,14 +157,29 @@ def report(results: list[FastResult], *, model: str, embedder: str) -> str:
     good = [r for r in scored if r.outcome in ("correct", "refused_ok")]
     secs = sorted(r.seconds for r in scored if r.outcome != "error")
     p95 = secs[min(len(secs) - 1, int(round(0.95 * (len(secs) - 1))))] if secs else float("nan")
-    lines = [f"Fast 试跑：生成 {model}；向量化 {embedder}；{len(scored)} 个可计分查询",
+    engine = any(r.mode_path is not None for r in results)
+    title = "编排器试跑" if engine else "Fast 试跑"
+    lines = [f"{title}：生成 {model}；向量化 {embedder}；{len(scored)} 个可计分查询",
              f"正确 {len(good)} / {len(scored)}；耗时 P50 {statistics.median(secs):.2f} 秒、P95 {p95:.2f} 秒；"
-             f"token 合计 {sum(r.tokens for r in results)}",
-             "| 查询 | 类型 | 结果 | 未验证标注 | 强制验证 | 耗时 | 回答 |", "| --- | --- | --- | --- | --- | --- | --- |"]
+             f"token 合计 {sum(r.tokens for r in results)}"]
+    if engine:
+        routed = [r for r in results if r.expected_mode and r.mode_path is not None]
+        hit = sum(r.expected_mode.lower() in r.mode_path + [r.router] for r in routed)
+        lines.append(f"模式：预期模式出现在 Router 决定或实际路径中的 {hit} / {len(routed)}"
+                     "（Deep 尚未实现，Router 决定为 Deep 的问题实际由 Fast 回答）")
+        lines += ["| 查询 | 类型 | 结果 | 预期模式 | Router | 路径 | 未验证标注 | 耗时 | 回答 |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    else:
+        lines += ["| 查询 | 类型 | 结果 | 未验证标注 | 强制验证 | 耗时 | 回答 |", "| --- | --- | --- | --- | --- | --- | --- |"]
     for r in results:
-        mark = ("应有，" + ("有" if r.unverified_labelled else "缺")) if r.unverified_expected else ""
-        lines.append(f"| {r.query_id} | {r.type} | {r.outcome} | {mark} | {'、'.join(r.forced_verify)} | "
-                     f"{r.seconds:.2f} | {(r.answer or r.error)[:60]} |")
+        mark = ("应有，" + ("有" if r.unverified_labelled else "缺")) if r.unverified_expected else (
+            "多标" if r.unverified_labelled else "")
+        if engine:
+            lines.append(f"| {r.query_id} | {r.type} | {r.outcome} | {r.expected_mode or ''} | {r.router} | "
+                         f"{'→'.join(r.mode_path or [])} | {mark} | {r.seconds:.2f} | {(r.answer or r.error)[:70]} |")
+        else:
+            lines.append(f"| {r.query_id} | {r.type} | {r.outcome} | {mark} | {'、'.join(r.forced_verify)} | "
+                         f"{r.seconds:.2f} | {(r.answer or r.error)[:60]} |")
     return "\n".join(lines)
 
 
@@ -126,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("xlsx")
     p.add_argument("--admin-url", required=True)
     p.add_argument("--format", choices=["docx", "html"], default="docx")
+    p.add_argument("--engine", action="store_true", help="经完整编排器（Router、升级、Verified）回答")
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
         print("只在评测环境运行（EAER_ENV=eval）", file=sys.stderr)
@@ -145,8 +213,9 @@ def main(argv: list[str] | None = None) -> int:
         work = Path(tmp)
         manifest = Renderer(fs).render(work / "corpus", args.format)
         conn = psycopg.connect(new_db(), autocommit=True, row_factory=dict_row)
-        results = run_fast(conn, fs, work / "corpus", manifest, model=model, store=LocalFileStore(work / "files"),
-                           index=MemoryIndex(), embedder=embedder, reranker=reranker)
+        runner = run_engine if args.engine else run_fast
+        results = runner(conn, fs, work / "corpus", manifest, model=model, store=LocalFileStore(work / "files"),
+                         index=MemoryIndex(), embedder=embedder, reranker=reranker)
         conn.close()
     print(report(results, model=model.gen.model,
                  embedder=embedder.name + (f"，重排 {model.rr.model}" if reranker else "，不重排")))

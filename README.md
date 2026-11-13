@@ -15,7 +15,8 @@
 | 文件存储 | `eaer/storage.py`：存储接口与本地实现，集群版换 S3 兼容存储 | — |
 | 入库第 1–3、6 阶段 | `eaer/ingestion/`：接收与去重、文本解析（原生 Word/HTML，Docling 负责 PDF、扫描件、PPTX、XLSX、图片）、分类与时间抽取、表格深度解析、索引任务；后台任务可重试、可续跑 | AC-6-2、AC-6-8、AC-6-9（合成语料）、AC-7-5、AC-7-7（合成语料） |
 | 审核 | `eaer/review/service.py`：任务列表、逐份或批量决定、更正、删除 | AC-6-5 |
-| 对外接口 | `eaer/api/`：上传、审核任务、审核决定、归档、取消归档、证据；参考令牌身份校验，文档权限经授权接口 | AC-11-1 的部分用例、AC-11-2、AC-10-6 |
+| 查询执行 | `eaer/orchestrator/`：时间点识别、Router、Fast、Verified（语义检查与定向补检索）、编排与 `query_log`；Deep 未实现 | AC-7-6、AC-8-1、8-2、8-4、8-5、AC-9-2、AC-12-1 |
+| 对外接口 | `eaer/api/`：提问（含流式）、会话、上传、审核任务、审核决定、归档、取消归档、证据；参考令牌身份校验，文档权限经授权接口 | AC-11-1 的部分用例、AC-11-2、AC-10-6 |
 | 检索 | `eaer/retrieval/`：引擎接口（OpenSearch 实现与内存参考实现）、对账、混合检索与数据库核对、回溯检索；每次查询固定一个索引视图。全量重建与旧索引清理在 `eaer/ingestion/indexer.py`（`rebuild`、`drop_retired`） | AC-5-1、AC-5-2、AC-5-3、AC-5-5、AC-6-7 |
 | 对接接口 | `eaer/adapters/`：DataSource、Authorizer、ModelClient 三个接口，本地文件夹与本地账号两个参考实现，一致性套件 `conformance.py` | AC-11-4 |
 | 模块边界 | `tests/test_module_boundaries.py`：静态检查开发文档 3.2 的索引读写、版本状态、模型 SDK 三条规则 | AC-3-1 |

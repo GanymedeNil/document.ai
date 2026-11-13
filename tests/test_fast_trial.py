@@ -35,3 +35,17 @@ def test_trial_runner_scores_and_reports(conn, tmp_path, monkeypatch):
     assert all(o == "wrong" for q, o in by.items() if q not in {"Q09", "Q12", "Q14", "Q16"})
     text = report(results, model="always-abstain", embedder="hashing")
     assert "正确 3 / 15" in text and "| Q16 | 验证器 | not_applicable |" in text
+
+
+def test_engine_runner_records_mode_paths(conn, tmp_path, monkeypatch):
+    from eaer.evalrun.fast import run_engine
+    monkeypatch.setenv("EAER_ENV", "eval")
+    fs = load(write(sample(), tmp_path / "s.xlsx"))
+    manifest = Renderer(fs).render(tmp_path / "corpus", "html")
+    results = run_engine(conn, fs, tmp_path / "corpus", manifest, model=AlwaysAbstain(),
+                         store=LocalFileStore(tmp_path / "files"), index=MemoryIndex(), embedder=HashingEmbedder())
+    by = {r.query_id: r for r in results}
+    assert by["Q02"].router == "verified" and by["Q02"].mode_path == ["verified"]          # 时间点从问题中识别
+    assert by["Q05"].router == "deep" and by["Q15"].mode_path == ["fast"]
+    assert {q for q, r in by.items() if r.outcome == "refused_ok"} == {"Q09", "Q12", "Q14"}
+    assert "编排器试跑" in report(results, model="always-abstain", embedder="hashing")

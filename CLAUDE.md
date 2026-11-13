@@ -63,15 +63,15 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 
 | 状态 | 验收项 |
 | --- | --- |
-| 已通过 | AC-3-1，AC-4-1~4-5，AC-5-1、5-2、5-3、5-5，AC-6-2、6-3、6-4（检索层面）、6-5、6-6（检索层面）、6-7、6-8，AC-7-2（检索层面）、7-4、7-5，AC-9-1，AC-10-1（检索层面）、10-3（检索层面）、10-6，AC-11-2、11-4（ModelClient 线上客户端的生成部分已对 DeepSeek 通过，Embedding 与重排待配置服务）、11-5、11-6，AC-12-5，AC-14-1、14-3 |
+| 已通过 | AC-3-1，AC-4-1~4-5，AC-5-1、5-2、5-3、5-5，AC-6-2、6-3、6-4（检索层面）、6-5、6-6、6-7、6-8，AC-7-2（检索层面）、7-4、7-5、7-6，AC-8-1、8-2、8-4、8-5，AC-9-1、9-2，AC-10-1（检索层面）、10-3（检索层面）、10-5、10-6、10-9，AC-11-2、11-3、11-4（三个接口的参考实现均通过；ModelClient 为 DeepSeek 生成 + 本地 Qwen3 Embedding 与重排）、11-5、11-6，AC-12-1、12-5，AC-14-1、14-3 |
 | 合成语料上通过，待真实数据 | AC-6-9（分类）、AC-7-7（时间抽取）、AC-14-2 的程序检查部分 |
 | 只有逻辑或流程，未在真实环境验证 | AC-5-4（检索评测流程已有，用的是测试替身）、AC-3-3（CI 已配置，未运行） |
-| 部分完成 | AC-9-2（确定性层面：Q16 扰动在真实证据上判为不支持；完整的 Verified 冒烟待模型接入）、AC-10-5（证据接口已在授权不可用时拒绝，提问接口待实现）、AC-11-1（契约测试只覆盖已有接口） |
-| 未开始 | AC-3-2，AC-6-1、6-10，第 8–13 节的其余部分（查询执行、验证层、模型接入、部署运维） |
+| 部分完成 | AC-8-3（8.2 的转 Verified 与拒答信号都有用例；转 Deep 的信号只能记录，Deep 未实现）、AC-11-1（契约测试只覆盖已有接口，尚无 OpenAPI 文件） |
+| 未开始 | AC-3-2，AC-6-1、6-10，AC-8-6（异步：超时转后台、进度、取消、重启恢复），Deep 模式（8.3 的比较、多跳、因果模板），第 10 节的缓存隔离（AC-10-4）、提示注入（AC-10-7）、Trace 清理（AC-10-10），第 12–13 节其余（准入检查 AC-12-3、计量对账、部署运维） |
 
 事实表样例上的检索评测：可计分的 12 个查询命中 11 个；3 个拒答类全部正确；越权 0；对账差异 0。未命中的 Q05 是版本差异类，按设计由 Deep 处理；Q15 图表类需要视觉模型。
 
-Fast 试跑（2026-11-13，`python -m eaer.evalrun.fast`）：生成 DeepSeek `deepseek-flash`（关闭推理、温度 0），Embedding 与重排为本地 Qwen3-0.6B，索引用内存参考实现。15 个可计分查询正确 12 个，连续两次结果相同；耗时 P50 约 2.5–2.8 秒、P95 约 2.9–3.3 秒。未答对的 Q05（版本差异，应由 Deep）、Q10（冲突，应由 Verified 提示）、Q15（图表，需视觉解析）都在预期之内。样本只有 16 个查询，这不是产品基线；Router、Deep、Verified 未实现，期望走它们的问题这里也只走了 Fast。
+编排器试跑（2026-11-13，`python -m eaer.evalrun.fast --engine`，不传时间参数、由编排器从问题中识别）：生成 DeepSeek `deepseek-flash`（关闭推理、温度 0），Embedding 与重排为本地 Qwen3-0.6B，内存索引。16 个查询正确 14 个，连续两次相同；预期模式全部出现在 Router 决定或实际路径中（12/12）；Q16（680 的扰动结论）经检索、确定性检查与语义检查判为不支持。未答对的 Q05 需要 Deep、Q15 需要图表的视觉解析。耗时 P50 约 3.9–4.0 秒、P95 约 6–8.7 秒（Verified 有语义检查与补检索；第一次运行有一个 28 秒的冷启动离群值）。样本只有 16 个查询，这不是产品基线。
 
 分词器对比（用 Qwen3-Embedding-0.6B 重跑）：五种候选在 docx、html 两套语料上召回都是 11/12，MRR 0.79–0.88，同一分词器在两套语料上名次也会互换，样本太小，仍然区分不出来。
 
@@ -81,7 +81,9 @@ Fast 试跑（2026-11-13，`python -m eaer.evalrun.fast`）：生成 DeepSeek `d
 2. **中文分词。** 自定义镜像（smartcn、icu）、应用侧 jieba 候选和对比工具 `python -m eaer.evalrun.analyzers` 已完成（2026-11-12）。事实表样例只有 12 个可计分查询，五种候选召回都是 11/12，MRR 在 0.79–0.88 之间，接入真实 Embedding（Qwen3-0.6B）后依然区分不出来；用户倾向 jieba。扩充评测集后重跑，按 AC-5-4 选定。jieba 0.42.1 自 2020 年未更新，在 Python 3.14 上导入有 SyntaxWarning，正式采用前评估替代实现。
 3. **补齐第 4 周关口中不依赖外部资源的项。** 已于 2026-11-12 完成：AC-3-1（`tests/test_module_boundaries.py`）、AC-6-3（`tests/test_state_machine.py`）、AC-6-4（`tests/test_pending_not_searchable.py`，检索层面）、AC-11-4（`eaer/adapters/conformance.py`）。
 4. **接入 Docling。** 已于 2026-11-12 完成：`eaer/ingestion/docling_parser.py`，覆盖 PDF、扫描件（RapidOCR）、PPTX、XLSX、图片，证据定位带页码；依赖单独锁定在 `requirements-docling.txt`。只在合成样例上验证过，AC-6-1 要求的“每种格式 20 份真实样本”人工核对尚未做。
-5. **模型接口与 Fast 模式。** 线上通用客户端（`eaer/adapters/online.py`）与 Fast 核心流程（`eaer/orchestrator/fast.py`）已完成（2026-11-13），生成用 DeepSeek。还缺：Embedding 与重排服务（等用户选定，不要自行假设服务商或密钥）；Router、Verified、Deep；提问接口 `POST /v1/query` 与 `query_log`（强制验证类问题必须经 Verified，接口要和 Router、Verified 一起开放）；真实的 Fast 基线。后台任务进程 `python -m eaer.ingestion` 已接上索引任务（2026-11-13）：需要 `EAER_OPENSEARCH_URL` 与 Embedding 服务，缺少即启动报错（`--no-index` 只做解析）；先用 `python -m eaer.ingestion rebuild --build-id …` 建索引，`drop-retired` 要定时运行。
+5. **模型接口、Fast、Router 与 Verified。** 已完成（2026-11-13）：线上通用客户端、本地 Qwen3 模型服务、Fast、Router（8.1）、Verified（语义检查、定向补检索）、编排器（`eaer/orchestrator/engine.py`）、提问与会话接口、`query_log`。后台任务进程已接上索引任务：需要 `EAER_OPENSEARCH_URL` 与 Embedding 服务，缺少即启动报错（`--no-index` 只做解析）；先用 `python -m eaer.ingestion rebuild --build-id …` 建索引，`drop-retired` 要定时运行。
+6. **Deep 模式。** 8.3 的比较、多跳、因果三个计划模板（Q05 这类版本差异问题靠它）；之后补 AC-8-3 中转 Deep 的用例。
+7. **其余未开始的项。** 异步（AC-8-6）、缓存隔离（AC-10-4）、提示注入（AC-10-7）、准入检查（AC-12-3）、OpenAPI 文件与契约测试（AC-11-1）、扩充评测集后选定分词与模型（AC-5-4）。
 
 ## 需要用户决定或提供的事项
 
