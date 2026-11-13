@@ -1,4 +1,4 @@
-"""对外接口：上传、审核、归档、取消归档、证据、强制验证清单（开发文档 11.1、11.2）。
+"""对外接口：提问、会话、上传、审核、归档、取消归档、证据、强制验证清单（开发文档 11.1、11.2）。
 
 注意：本模块不能使用 from __future__ import annotations，FastAPI 需要在运行时解析依赖注解。
 
@@ -7,15 +7,16 @@
 错误一律返回 {"code", "message", "request_id"}；无权访问与不存在不区分，都返回 404。
 """
 
+import json
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any, Callable, Iterator, Literal, Protocol
 
 import psycopg
 from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
@@ -61,6 +62,15 @@ class Decisions(BaseModel):
     decisions: list[Decision] = Field(min_length=1, max_length=MAX_DECISIONS)
 
 
+class QueryRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    session_id: uuid.UUID | None = None
+    as_of_valid: date | None = None
+    as_of_system: date | None = None
+    mode_hint: Literal["fast", "deep", "verified"] | None = None
+    stream: bool = False
+
+
 class ForcedVerifyRule(BaseModel):
     kind: Literal["keyword", "document", "doc_type", "all"]
     value: str | None = None
@@ -69,8 +79,10 @@ class ForcedVerifyRule(BaseModel):
 
 def create_app(database_url: str, store: FileStore, auth: Authenticator,
                clock: Callable[[], datetime] = utcnow,
-               authorizer: Callable[[psycopg.Connection], Authorizer] | None = None) -> FastAPI:
-    """authorizer：给定数据库连接返回授权接口实例；为 None 时需要文档权限的接口一律 503。"""
+               authorizer: Callable[[psycopg.Connection], Authorizer] | None = None,
+               engine: Callable[[psycopg.Connection, str], Any] | None = None) -> FastAPI:
+    """authorizer：给定数据库连接返回授权接口实例；为 None 时需要文档权限的接口一律 503。
+    engine：给定数据库连接与租户返回查询编排器（orchestrator.engine.Engine）；为 None 时提问接口 503。"""
     app = FastAPI(title="EAER", version="0.1.0")
 
     @app.middleware("http")
@@ -209,6 +221,72 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         did = own_document(conn, ident, document_id)
         ids = Lifecycle(conn, clock).unarchive_document(did, ident.user)
         return {"document_id": str(did), "versions": [str(i) for i in ids], "status": "searchable"}
+
+    # ---------- 提问与会话（8、11.2） ----------
+
+    def _own_session(conn, ident: Identity, sid: uuid.UUID) -> bool:
+        """会话只属于发起它的用户；别人的会话与不存在的会话不区分（404）。"""
+        rows = conn.execute("SELECT DISTINCT tenant_id, user_id FROM query_log WHERE session_id = %s", (sid,)).fetchall()
+        return all(r["tenant_id"] == ident.tenant_id and r["user_id"] == ident.user for r in rows)
+
+    @app.post("/v1/query")
+    def query(conn: Conn, ident: Anyone, authz: Authz, body: QueryRequest):
+        from eaer.adapters.online import ModelCallError
+        from eaer.orchestrator.engine import QueryResult, log_query
+
+        if engine is None:
+            raise ApiError(503, "query_unavailable", "提问服务未配置模型或检索服务")
+        if body.session_id is not None and not _own_session(conn, ident, body.session_id):
+            raise ApiError(404, "not_found", "会话不存在")
+        _, scope = authz
+        eng = engine(conn, ident.tenant_id)
+        sid = str(body.session_id or uuid.uuid4())
+        asked = clock()
+        try:
+            result = eng.ask(scope, body.question, today=asked.date(), as_of_valid=body.as_of_valid,
+                             as_of_system=body.as_of_system, mode_hint=body.mode_hint, session_id=sid)
+        except AuthorizerUnavailable:
+            raise ApiError(503, "authz_unavailable", "授权服务不可用")
+        except ModelCallError as e:
+            failed = QueryResult(sid, "failed", "fast", ["fast"], {}, {}, None, [], False, [], [], [], 0,
+                                 getattr(getattr(eng.model, "gen", None), "model", "unknown"), eng._build_id())
+            log_query(conn, failed, scope=scope, user_id=ident.user, question=body.question, asked_at=asked)
+            raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
+        log_query(conn, result, scope=scope, user_id=ident.user, question=body.question, asked_at=asked)
+        resp = jsonable_encoder(result.response())
+        if not body.stream:
+            return resp
+
+        def events():
+            def ev(name, data):
+                return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+            for m in result.mode_path:
+                yield ev("mode", {"mode": m})
+            for n in result.notices:
+                yield ev("notice", {"text": n})
+            text = result.answer or ""
+            for i in range(0, len(text), 40):
+                yield ev("delta", {"text": text[i:i + 40]})
+            for c in resp["claims"]:
+                yield ev("claim", c)
+            yield ev("done", resp)
+        return StreamingResponse(events(), media_type="text/event-stream")
+
+    @app.get("/v1/sessions/{session_id}")
+    def session(conn: Conn, ident: Anyone, session_id: str):
+        try:
+            sid = uuid.UUID(session_id)
+        except ValueError:
+            raise ApiError(404, "not_found", "会话不存在")
+        rows = conn.execute(
+            "SELECT asked_at, question, time_basis, mode, mode_path, status, answer, claims, abstained FROM query_log "
+            "WHERE session_id = %s AND tenant_id = %s AND user_id = %s ORDER BY asked_at", (sid, ident.tenant_id, ident.user)
+        ).fetchall()
+        if not rows or not _own_session(conn, ident, sid):
+            raise ApiError(404, "not_found", "会话不存在")
+        items = [{**r, "claims": [{k: c[k] for k in ("text", "status", "core", "citations")}
+                                  for c in r["claims"] if c["status"] != "unsupported"]} for r in rows]
+        return jsonable_encoder({"session_id": str(sid), "items": items})
 
     # 强制验证清单：只有读取与追加，不提供删除或修改的路径（AC-11-5）
     @app.get("/v1/config/forced-verify")
