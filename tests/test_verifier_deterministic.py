@@ -332,3 +332,17 @@ def test_q16_perturbed_claim_is_unsupported_on_real_evidence(conn, tmp_path, mon
     assert bad.outcome == "unsupported" and bad.checks["value_match"].reason == "证据中没有：680"
     good = checker.check(q16.replace("680", "650"), basis, retrieved=retrieved, target=Target(asked))
     assert good.outcome == "pass", good.checks
+
+
+# ---------------------------------------------------------------- 目标日期的复述（Fast 试跑中发现）
+
+@pytest.mark.parametrize("claim, ev, targets, want", [
+    ("2026年7月2日实际生效的一线城市住宿上限是650元/晚", ["一线城市｜标准：650元/晚"], (D("2026-07-02"),), "pass"),
+    ("截至 2026 年 7 月 2 日，系统中记录的上限为 600元/晚", ["一线城市｜标准：600元/晚"], (D("2026-07-02"),), "pass"),
+    ("2026年7月的上限是650元", ["上限650元"], (D("2026-07-02"),), "pass"),                     # 只到月，同一个月
+    ("2026年7月2日的上限是650元，自2026年8月1日起执行", ["上限650元"], (D("2026-07-02"),), "unsupported"),  # 别的日期仍须有出处
+    ("2026年7月2日的上限是650元", ["上限650元"], (), "unsupported"),                            # 没有目标日期时照常核对
+    ("2026年7月2日的上限是680元", ["上限650元"], (D("2026-07-02"),), "unsupported"),            # 数值不受影响
+])
+def test_value_match_exempts_only_the_query_target_dates(claim, ev, targets, want):
+    assert value_match(claim, ev, targets).outcome == want

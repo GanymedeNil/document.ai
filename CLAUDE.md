@@ -70,13 +70,15 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 
 事实表样例上的检索评测：可计分的 12 个查询命中 11 个；3 个拒答类全部正确；越权 0；对账差异 0。未命中的 Q05 是版本差异类，按设计由 Deep 处理；Q15 图表类需要视觉模型。
 
+Fast 试跑（2026-11-13，`python -m eaer.evalrun.fast`，生成用 DeepSeek `deepseek-flash` 关闭推理；向量化仍是测试替身、未重排，只说明流程，不是产品基线）：15 个可计分查询正确 13 个，耗时 P50 1.09 秒、P95 1.41 秒。未答对的 Q05（版本差异，应由 Deep 回答）、Q15（图表，需视觉解析）都在预期之内。Router、Deep、Verified 未实现，所以期望走 Verified 的问题这里也只走了 Fast。
+
 ## 下一步（按优先级）
 
 1. **在真实环境跑通全部测试。** 已于 2026-11-12 完成（148 个通过）。以后如果真实引擎的行为与内存实现不一致，以等价性测试 `test_dsl_and_python_filters_agree` 的思路排查。
 2. **中文分词。** 自定义镜像（smartcn、icu）、应用侧 jieba 候选和对比工具 `python -m eaer.evalrun.analyzers` 已完成（2026-11-12）。事实表样例只有 12 个可计分查询，五种候选召回都是 11/12，MRR 在 0.79–0.88 之间，区分不出来；用户倾向 jieba。接入真实 Embedding 并扩充评测集后重跑，按 AC-5-4 选定。jieba 0.42.1 自 2020 年未更新，在 Python 3.14 上导入有 SyntaxWarning，正式采用前评估替代实现。
 3. **补齐第 4 周关口中不依赖外部资源的项。** 已于 2026-11-12 完成：AC-3-1（`tests/test_module_boundaries.py`）、AC-6-3（`tests/test_state_machine.py`）、AC-6-4（`tests/test_pending_not_searchable.py`，检索层面）、AC-11-4（`eaer/adapters/conformance.py`）。
 4. **接入 Docling。** 已于 2026-11-12 完成：`eaer/ingestion/docling_parser.py`，覆盖 PDF、扫描件（RapidOCR）、PPTX、XLSX、图片，证据定位带页码；依赖单独锁定在 `requirements-docling.txt`。只在合成样例上验证过，AC-6-1 要求的“每种格式 20 份真实样本”人工核对尚未做。
-5. **模型接口与 Fast 模式。** 实现 `ModelClient`（生成、Embedding、重排），然后是 Fast 模式的生成与引用检查，跑真实的 Fast 基线。需要用户提供线上模型的接入配置，不要自行假设服务商或密钥。注意：后台任务进程 `python -m eaer.ingestion` 目前没有接索引任务（`Worker` 未传 `Indexer`，publish_index 与 index_update 不会执行），接入 `ModelClient.embed` 时一并接上，不能用测试替身 `HashingEmbedder`。
+5. **模型接口与 Fast 模式。** 线上通用客户端（`eaer/adapters/online.py`）与 Fast 核心流程（`eaer/orchestrator/fast.py`）已完成（2026-11-13），生成用 DeepSeek。还缺：Embedding 与重排服务（等用户选定，不要自行假设服务商或密钥）；Router、Verified、Deep；提问接口 `POST /v1/query` 与 `query_log`（强制验证类问题必须经 Verified，接口要和 Router、Verified 一起开放）；真实的 Fast 基线。注意：后台任务进程 `python -m eaer.ingestion` 目前没有接索引任务（`Worker` 未传 `Indexer`，publish_index 与 index_update 不会执行），接入 `ModelClient.embed` 时一并接上，不能用测试替身 `HashingEmbedder`。
 
 ## 需要用户决定或提供的事项
 

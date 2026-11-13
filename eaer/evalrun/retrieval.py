@@ -110,7 +110,8 @@ class _Clock:
 
 def run(conn: psycopg.Connection, fs: FactSet, corpus: Path, manifest: dict, *, store: FileStore,
         index: SearchIndex, embedder: Embedder, tenant_id: str = "eval", top_m: int = 10,
-        build_id: str = "eval") -> Report:
+        build_id: str = "eval", ask=None) -> Report:
+    """ask：在提问日回答每个查询的函数，签名同 _ask；默认按检索结果计分，Fast 试跑传入自己的回答函数。"""
     if os.environ.get("EAER_ENV") != "eval":
         raise PermissionError("评测运行器只在评测环境启用（EAER_ENV=eval）")
     clock = _Clock()
@@ -149,7 +150,7 @@ def run(conn: psycopg.Connection, fs: FactSet, corpus: Path, manifest: dict, *, 
         elif kind == "event":
             _apply_event(lc, fs, obj, ids, doc_ids)
         else:
-            results.append(_ask(conn, fs, obj, retriever, ids, tenant_id))
+            results.append((ask or _ask)(conn, fs, obj, retriever, ids, tenant_id))
         worker.run_until_idle()
     diffs = reconcile(conn, index, tenant_id)
     return Report(results, sum(len(v) for v in diffs.values()), embedder.name, top_m)

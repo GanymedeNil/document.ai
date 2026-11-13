@@ -113,7 +113,9 @@ def _date_found(d: tuple[int, int | None, int | None], pool) -> bool:
     return any(e[0] == y and (m is None or e[1] == m) and (day is None or e[2] == day) for e in pool)
 
 
-def value_match(claim: str, evidence_texts: list[str]) -> Check:
+def value_match(claim: str, evidence_texts: list[str], target_dates: tuple[date, ...] = ()) -> Check:
+    """target_dates：本次查询的目标日期（生效时间点、回溯时间点）。结论复述这些日期是在说明时间依据，
+    不需要出现在证据里——所引版本在目标日期是否有效由 time_valid 核对；其余日期仍须在证据中找到。"""
     want = extract(claim)
     if not want.quantities and not want.dates:
         return Check("pass", "结论不含数值或日期")
@@ -123,9 +125,10 @@ def value_match(claim: str, evidence_texts: list[str]) -> Check:
         f = extract(t)
         have_q |= f.quantities
         have_d |= f.dates
+    targets = {(t.year, t.month, t.day) for t in target_dates}
     missing = [f"{_fmt(v)}{'%' if k == 'pct' else ''}" for v, k in sorted(want.quantities) if (v, k) not in have_q]
     missing += ["-".join(str(x) for x in d if x is not None) for d in sorted(want.dates, key=str)
-                if not _date_found(d, have_d)]
+                if not _date_found(d, have_d) and not _date_found(d, targets)]
     return Check("unsupported", f"证据中没有：{'、'.join(missing)}") if missing else PASS
 
 
@@ -258,7 +261,9 @@ class DeterministicChecker:
             locator_exists(rows.get(i), raw_exists=(self.store.exists(rows[i]["raw_object_uri"])
                                                      if self.store is not None and i in rows else None))
             for i in keep])
-        checks["value_match"] = value_match(claim, [rows[i]["content"] for i in keep if i in rows])
+        targets = () if target is None else tuple(
+            {target.on} | ({target.system_t.date()} if target.system_t is not None else set()))
+        checks["value_match"] = value_match(claim, [rows[i]["content"] for i in keep if i in rows], targets)
         checks["time_valid"] = self._time(rows, keep, target)
         return Result(worst(list(checks.values())).outcome, checks, keep, removed, alerts)
 
