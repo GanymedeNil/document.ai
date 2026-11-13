@@ -4,6 +4,8 @@
     python -m factset export 事实表.xlsx -o 评测集.jsonl  校验通过后导出评测集
     python -m factset render 事实表.xlsx -o 文档目录 [--format docx|html]  按事实表生成文档
     python -m factset verify-docs 事实表.xlsx 文档目录    检查生成或改写后的文档
+    python -m factset synth -o 合成集.xlsx [--seed 2026] [--scale 1.0]   生成合成评测集（14.2、14.3）
+    python -m factset sample 事实表.xlsx -o 抽检单.xlsx [--rate 0.05]     按类别分层抽取人工抽检单（14.2 第 6 步）
 """
 from __future__ import annotations
 
@@ -41,7 +43,28 @@ def main(argv: list[str] | None = None) -> int:
     vd = sub.add_parser("verify-docs", help="检查文档是否包含全部事实、日期写法是否符合规则")
     vd.add_argument("xlsx")
     vd.add_argument("directory")
+    sy = sub.add_parser("synth", help="生成合成评测集事实表（标准答案已计算并回填）")
+    sy.add_argument("-o", "--output", required=True)
+    sy.add_argument("--seed", type=int, default=2026)
+    sy.add_argument("--scale", type=float, default=1.0, help="样本量比例，1.0 为开发文档 14.3 的样本量")
+    sa = sub.add_parser("sample", help="按类别分层抽取人工抽检单")
+    sa.add_argument("xlsx")
+    sa.add_argument("-o", "--output", required=True)
+    sa.add_argument("--rate", type=float, default=0.05)
     args = p.parse_args(argv)
+
+    if args.cmd == "synth":
+        from .synth import GENERATOR_VERSION, generate
+        from .write import write
+        write(generate(args.seed, args.scale), args.output)
+        fs = load(args.output)
+        issues = validate(fs)
+        calc = Calculator(fs)
+        bad = sum(bool(compare(q, calc.compute(q))) for q in fs.queries)
+        print(f"已生成 {args.output}（生成器版本 {GENERATOR_VERSION}，种子 {args.seed}，比例 {args.scale}）："
+              f"{len(fs.documents)} 份文档、{len(fs.versions)} 个版本、{len(fs.facts)} 条事实、{len(fs.events)} 个事件、"
+              f"{len(fs.queries)} 个查询；校验问题 {len(issues)} 个，答案不一致 {bad} 个")
+        return 1 if issues or bad else 0
 
     try:
         fs = load(args.xlsx)
@@ -71,6 +94,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if errors else 0
 
     calc = Calculator(fs)
+    if args.cmd == "sample":
+        from .spotcheck import spot_check
+        n = spot_check(fs, calc, Path(args.output), args.rate)
+        print(f"已抽取 {n} 条到 {args.output}，请人工逐条核对“核对结果”一列")
+        return 0
     results = [(q, calc.compute(q)) for q in fs.queries]
 
     if args.cmd == "check":

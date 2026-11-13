@@ -65,8 +65,15 @@ def _changed(v):
     return f"{v}（另）"
 
 
-def verifier_items(fs) -> list[VerifierItem]:
+def verifier_items(fs, max_facts: int = 40) -> list[VerifierItem]:
+    """每个事实生成一组正反例；事实很多时按编号哈希取 max_facts 个（大评测集上准入不必逐条问模型）。"""
     facts = sorted(fs.facts.values(), key=lambda f: f.id)
+    if len(facts) > max_facts:
+        keep = set(sorted((f.id for f in facts), key=lambda i: hashlib.sha1(i.encode()).hexdigest())[:max_facts])
+        others = facts
+        facts = [f for f in facts if f.id in keep]
+    else:
+        others = facts
     out: list[VerifierItem] = []
     for i, f in enumerate(facts):
         v = fs.versions[f.version_id]
@@ -81,13 +88,13 @@ def verifier_items(fs) -> list[VerifierItem]:
         add("复述", f"{f.key}为{val}。", True)
         add("转述", f"根据《{d.title}》，{f.key}是{val}。", True)
         add("改数值", f"{f.key}为{_num(_changed(f.value))}{unit}。", False)
-        other = next((g for g in facts[i + 1:] + facts[:i] if g.key != f.key), None)
+        other = next((g for g in facts[i + 1:] + facts[:i] + others if g.key != f.key), None)
         if other is not None:
             add("换主体", f"{other.key}为{val}。", False)
         if unit in UNIT_SWAP:
             add("改单位", f"{f.key}为{_num(f.value)}{UNIT_SWAP[unit]}。", False)
         add("改结论", f"{f.key}没有统一标准，由各部门自行决定。", False)
-        sibling = next((g for g in facts if g.key == f.key and g.version_id != f.version_id and g.value != f.value
+        sibling = next((g for g in others if g.key == f.key and g.version_id != f.version_id and g.value != f.value
                         and fs.versions[g.version_id].document_id == v.document_id), None)
         if sibling is not None:
             add("换版本", f"《{d.title}》第 {v.version_no} 版规定{f.key}为{_num(sibling.value)}{sibling.unit or ''}。", False)
@@ -173,7 +180,7 @@ class DeepItem:
     role: str
 
 
-def deep_items(fs, max_pairs: int = 4) -> list[DeepItem]:
+def deep_items(fs, max_pairs: int = 4, max_items: int = 20) -> list[DeepItem]:
     """只用正文与表格里的事实：图表里的取值要视觉模型解析（12.1），不该算作 Deep 的错。"""
     facts = [f for f in fs.facts.values() if f.carrier != "图表"]
     versions = defaultdict(list)
@@ -215,6 +222,8 @@ def deep_items(fs, max_pairs: int = 4) -> list[DeepItem]:
         r = role(d1, d2)
         if r:
             out.append(DeepItem("多对象", f"{k1}和{k2}分别是多少？", (val(f1), val(f2)), r))
+    if len(out) > max_items:                     # 大评测集上按问题哈希取 max_items 题，各类型都留一些
+        out = sorted(out, key=lambda d: hashlib.sha1(d.question.encode()).hexdigest())[:max_items]
     return out
 
 
@@ -388,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tenant", help="写入哪些租户（逗号分隔），与 --database-url 一起用")
     p.add_argument("--out", help="能力矩阵写到这个文件（Markdown）")
     p.add_argument("--format", choices=["docx", "html"], default="docx")
+    p.add_argument("--per-type", type=int, default=10, help="能力矩阵中事实表查询每类最多取几条（默认 10）")
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
         print("只在评测环境运行（EAER_ENV=eval）", file=sys.stderr)
@@ -401,7 +411,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     embedder = model.embedder() if model.emb is not None else HashingEmbedder()
     reranker = model if model.rr is not None else None
-    fs = load(args.xlsx)
+    from factset.subset import subset
+    fs = subset(load(args.xlsx), split="测试" if any(q.split for q in load(args.xlsx).queries) else None,
+                per_type=args.per_type)
     with tempfile.TemporaryDirectory() as tmp, scratch_databases(args.admin_url) as new_db:
         import psycopg
         from psycopg.rows import dict_row

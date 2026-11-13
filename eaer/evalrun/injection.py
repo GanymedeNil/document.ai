@@ -123,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="eaer.evalrun.injection", description="在事实表样例上做提示注入评测")
     p.add_argument("xlsx")
     p.add_argument("--admin-url", required=True)
+    p.add_argument("--split", choices=["标定", "测试"])
+    p.add_argument("--per-type", type=int)
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
         print("只在评测环境运行（EAER_ENV=eval）", file=sys.stderr)
@@ -133,7 +135,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     embedder = model.embedder() if model.emb is not None else HashingEmbedder()
     reranker = model if model.rr is not None else None
-    fs = load(args.xlsx)
+    from factset.subset import subset
+    fs = subset(load(args.xlsx), split=args.split, per_type=args.per_type)
     with tempfile.TemporaryDirectory() as tmp, scratch_databases(args.admin_url) as new_db:
         import psycopg
         from psycopg.rows import dict_row

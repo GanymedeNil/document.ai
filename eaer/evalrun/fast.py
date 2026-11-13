@@ -60,6 +60,14 @@ def _quantities(text: str):
     return {q for q, _ in extract(text).quantities}
 
 
+def mentions(answer: str, f) -> bool:
+    """回答里是否出现了这条事实的取值：数值按规范化后的数量比较，文本取值（如“二等座”）按原文。"""
+    if isinstance(f.value, (int, float)):
+        want = next(iter(_quantities(str(f.value))), None)
+        return want is not None and want in _quantities(answer)
+    return str(f.value) in answer
+
+
 def score(fs: FactSet, calc: Calculator, q, a: FastAnswer | None, error: str = "") -> FastResult:
     exp = calc.compute(q)
     base = dict(query_id=q.id, type=q.type, question=q.question, expected=exp.answer,
@@ -70,14 +78,12 @@ def score(fs: FactSet, calc: Calculator, q, a: FastAnswer | None, error: str = "
     if a is None:
         return FastResult(**base, answer="", outcome="error", unverified_labelled=False, forced_verify=[],
                           seconds=0.0, tokens=0, error=error)
-    have = _quantities(a.answer)
+    answer = a.answer or ""
     if exp.refuse:
-        leaked = any(next(iter(_quantities(str(f.value))), None) in have
-                     for f in fs.facts.values() if f.key == q.target_key)
+        leaked = any(mentions(answer, f) for f in fs.facts.values() if f.key == q.target_key)
         outcome = "leaked" if leaked and not a.abstained else "refused_ok"
     else:
-        want = [f for f in (fs.facts[i] for i in exp.basis)]
-        ok = all(next(iter(_quantities(str(f.value))), None) in have for f in want)
+        ok = all(mentions(answer, fs.facts[i]) for i in exp.basis)
         outcome = "correct" if ok and not a.abstained else "wrong"
     return FastResult(**base, answer=a.answer, outcome=outcome, unverified_labelled="未验证" in a.answer,
                       forced_verify=a.forced_verify, seconds=a.seconds,
@@ -114,8 +120,9 @@ def run_engine(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelC
         if q.type == "验证器":
             status, reason = verify_claim(conn, retriever, model, tenant_id, q)
             exp = calc.compute(q)
+            want = "supported" if exp.answer == "支持" else "unsupported"      # 标准答案：支持 / 不支持
             return FastResult(q.id, q.type, q.question, exp.answer, f"{status}：{reason}"[:200],
-                              "correct" if status == "unsupported" else "wrong", False, False, [], 0.0, 0,
+                              "correct" if status == want else "wrong", False, False, [], 0.0, 0,
                               expected_mode=q.expected_mode)
         eng = Engine(conn, retriever, model, LocalAuthorizer(conn, {}), store=store)
         try:
@@ -193,6 +200,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--admin-url", required=True)
     p.add_argument("--format", choices=["docx", "html"], default="docx")
     p.add_argument("--engine", action="store_true", help="经完整编排器（Router、升级、Deep、Verified）回答")
+    p.add_argument("--split", choices=["标定", "测试"], help="只用该集合的查询（14.3：指标在测试集上报）")
+    p.add_argument("--per-type", type=int, help="每类查询最多取几条（按编号哈希抽样，可复现）")
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
         print("只在评测环境运行（EAER_ENV=eval）", file=sys.stderr)
@@ -204,7 +213,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     embedder: Embedder = model.embedder() if model.emb is not None else HashingEmbedder()
     reranker = model if model.rr is not None else None
-    fs = load(args.xlsx)
+    from factset.subset import subset
+    fs = subset(load(args.xlsx), split=args.split, per_type=args.per_type)
     with tempfile.TemporaryDirectory() as tmp, scratch_databases(args.admin_url) as new_db:
         import psycopg
         from psycopg.rows import dict_row

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from .model import (CARRIERS, DOC_TYPES, EVENT_TYPES, GRADE_RANK, MODES, QUERY_TYPES,
+from .model import (CARRIERS, DOC_TYPES, EVENT_TYPES, GRADE_RANK, MODES, QUERY_TYPES, SPLITS,
                     STYLE_TO_GRADE, FactSet, Issue)
 
 
@@ -167,4 +167,6 @@ def validate(fs: FactSet) -> list[Issue]:
             add("查询", q.row, f"预期来源等级“{q.expected_grade}”无效")
         if q.expected_mode and q.expected_mode not in MODES:
             add("查询", q.row, f"预期模式“{q.expected_mode}”无效")
+        if q.split and q.split not in SPLITS:
+            add("查询", q.row, f"集合“{q.split}”无效，应为标定或测试")
     return issues

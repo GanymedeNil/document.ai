@@ -82,7 +82,7 @@ class Calculator:
             if len({f.value for f in tops}) > 1:
                 # 同等可信的候选互相矛盾：全部列出，不代为选择
                 return Expected(q.id, False, basis, grades[top.id], tuple(fmt(f) for f in ranked),
-                                "存在冲突：" + "；".join(fmt(f) for f in ranked),
+                                "存在冲突：" + "；".join(fmt(f) for f in ranked) + "，并标注“未验证”",
                                 unverified=True, conflict=True, reason="同等可信的候选取值不一致")
         grade = grades[top.id]
         doc = self.fs.documents[self._version(top).document_id]
@@ -124,8 +124,9 @@ class Calculator:
             pairs = [p for p in pairs if self.tl.validity(self._version(p[1]), known_at)[0] == q.as_of_valid] or pairs
         old, new = max(pairs, key=lambda p: self._version(p[1]).version_no)
         grade = weakest(self.tl.grade(self._version(old), known_at), self.tl.grade(self._version(new), known_at))
+        unverified = grade not in (None, "explicit")
         return Expected(q.id, False, tuple(sorted((old.id, new.id))), grade, (fmt(old), fmt(new)),
-                        f"由 {fmt(old)} 调整为 {fmt(new)}", unverified=grade not in (None, "explicit"))
+                        f"由 {fmt(old)} 调整为 {fmt(new)}" + ("，并标注“未验证”" if unverified else ""), unverified=unverified)
 
 
 def compare(q: Query, e: Expected) -> list[str]:

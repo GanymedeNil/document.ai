@@ -161,11 +161,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--opensearch", required=True)
     p.add_argument("--analyzers", default=",".join(DEFAULT_ANALYZERS))
     p.add_argument("--format", choices=["docx", "html"], default="docx")
+    p.add_argument("--split", choices=["标定", "测试"], help="只用该集合的查询（14.3：指标在测试集上报）")
+    p.add_argument("--per-type", type=int, help="每类查询最多取几条（按编号哈希抽样，可复现）")
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
         print("分词器对比只在评测环境运行（EAER_ENV=eval）", file=sys.stderr)
         return 2
-    fs = load(args.xlsx)
+    from factset.subset import subset
+    fs = subset(load(args.xlsx), split=args.split, per_type=args.per_type)
     issues = validate(fs)
     if issues:
         print(f"事实表校验未通过：{issues[:3]}", file=sys.stderr)

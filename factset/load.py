@@ -32,7 +32,7 @@ COLUMNS: dict[str, dict[str, str]] = {
              "*提问角色": "role", "*提问日": "asked_on", "*生效时间点": "as_of_valid",
              "*回溯时间点": "as_of_system", "*依据事实": "basis",
              "*预期来源等级": "expected_grade", "预期模式": "expected_mode",
-             "说明": "note", "*目标事实键": "target_key"},
+             "说明": "note", "*目标事实键": "target_key", "集合": "split"},
 }
 
 
@@ -181,7 +181,7 @@ def load(path: str | Path) -> FactSet:
                                       _text(r["role"]), _date(r["asked_on"]), _date(r["as_of_valid"]),
                                       _date(r["as_of_system"]), _list(r["basis"]),
                                       _text(r["expected_grade"]), _text(r.get("expected_mode")),
-                                      _text(r["target_key"]), _text(r.get("note"))),
+                                      _text(r["target_key"]), _text(r.get("note")), _text(r.get("split"))),
               fs.queries, _text(r["id"]))
     wb.close()
     # 事件按发生日排序，同一天按表中顺序

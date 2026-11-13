@@ -19,6 +19,7 @@ EVENT_TYPES = {"归档", "取消归档", "有效期更正", "权限变更"}
 QUERY_TYPES = {"当前生效", "历史时点", "回溯", "版本差异", "冲突", "归档",
                "权限边界", "无答案", "图表", "验证器"}
 MODES = {"Fast", "Deep", "Verified"}
+SPLITS = {"标定", "测试"}
 
 
 def weakest(*grades: str | None) -> str | None:
@@ -111,6 +112,7 @@ class Query:
     expected_mode: str | None
     target_key: str
     note: str | None
+    split: str | None = None           # 标定 / 测试（开发文档 14.3）；手填的事实表可以不填
 
 
 @dataclass
