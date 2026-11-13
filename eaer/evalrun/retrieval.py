@@ -5,7 +5,8 @@
 
 计分：
 - 命中：每条依据事实都至少有一条证据出现在前 top_m 条中（严格，多条依据缺一条即未命中）；
-- 拒答类：前 top_m 条中不得出现目标事实键的任何取值；
+- 拒答类：前 top_m 条中不得出现目标事实所在版本、含该取值的证据（只看目标事实自己的版本：别的规定碰巧有同样的数字
+  不算泄露；无权或已归档的版本在数据库核对时已剔除，若出现会同时计为越权）；
 - 名次：命中查询的名次取各条依据事实最早出现位置中最靠后的一个，用来计算 MRR（未命中记 0），
   召回率相同时用它比较排序质量；
 - 越权：任一返回证据在提问时不可搜索或提问角色无权查看，即计一次，应为 0；
@@ -176,8 +177,9 @@ def _ask(conn, fs: FactSet, q, retriever: Retriever, ids, tenant_id: str) -> Que
     texts = [norm(h.content) for h in hits]
     leaks = _leaks(conn, hits, q.role)
     if q.should_refuse:
-        values = {norm(f"{f.value}{f.unit or ''}") for f in fs.facts.values() if f.key == q.target_key}
-        leaked = any(v in t for v in values for t in texts)
+        own = {str(ids[f.version_id]): norm(f"{f.value}{f.unit or ''}") for f in fs.facts.values()
+               if f.key == q.target_key and f.version_id in ids}
+        leaked = any(h.version_id in own and own[h.version_id] in t for h, t in zip(hits, texts))
         return QueryResult(q.id, q.type, "refusal_leak" if leaked else "refused", leaks=leaks, top=top)
     facts = [fs.facts[i] for i in q.basis]
     if any(f.carrier == "图表" for f in facts):

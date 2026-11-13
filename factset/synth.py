@@ -6,6 +6,8 @@
 - 补充通知：对部分事实键给出不同取值，与主制度构成冲突（来源等级相同时全部列出，不同时 explicit 优先）；
 - 记录类：季度费用分析报告，表格事实可直接回答，图表事实只出现在图片里（需要视觉模型）；
 - 事件：归档与取消归档、权限变更（收紧或放开）、对“仅上传时间”版本补录生效日（有效期更正）。
+生成器版本 2 起，约 40% 的查询用改写问法：把事实键换成口语、近义的说法（ALIASES，不与原词重合），
+说明列记“改写问法”，用来区分分词器与向量模型（AC-5-4；版本 1 的问法都含原词，各分词器召回完全相同）。
 查询按 14.3 的样本量生成：高风险类别（历史时点、回溯、冲突、归档、权限边界）各 300 条，其他类别（当前生效、
 版本差异、无答案、图表、验证器）各 100 条；scale 可按比例缩小，供测试与快速试跑。每条查询的标准答案由
 answer.Calculator 计算后回填，并按类别校验它确实落在该类别要考的情形上（如冲突类必须真有冲突）。
@@ -23,7 +25,7 @@ from datetime import date, timedelta
 from .answer import Calculator
 from .model import Document, Event, Fact, FactSet, Query, Role, Version
 
-GENERATOR_VERSION = "1"
+GENERATOR_VERSION = "2"
 TODAY = date(2026, 11, 30)
 FIRST = date(2023, 1, 1)
 LAST_CHANGE = date(2026, 10, 15)
@@ -297,9 +299,10 @@ class Synth:
         roles = sorted(self.fs.documents[doc_id].roles)
         return "R_STAFF" if "R_STAFF" in roles else roles[0]
 
-    def _query(self, qtype, question, key, role, asked_on=TODAY, as_of_valid=None, as_of_system=None) -> Query:
+    def _query(self, qtype, question, key, role, asked_on=TODAY, as_of_valid=None, as_of_system=None,
+               note=None) -> Query:
         return Query(0, "", qtype, question, "", False, role, asked_on, as_of_valid, as_of_system, (), None, None, key,
-                     None)
+                     note)
 
     def candidates(self, calc: Calculator) -> dict[str, list[Query]]:
         r = self.rng
@@ -320,15 +323,22 @@ class Synth:
                            if self.fs.versions[f.version_id].document_id == self.keys[key].doc_id),
                           key=lambda v: v.version_no)
 
-        def add(qtype, question, k, **kw):
-            out[qtype].append(self._query(qtype, question, k.key, kw.pop("role", None) or role(k), **kw))
+        def add(qtype, template, k, **kw):
+            """template 里的 {k} 换成事实键，约四成换成改写问法（说明列记“改写问法”）。"""
+            alias = ALIASES.get(k.key)
+            if alias and r.random() < 0.4:
+                phrase, note = r.choice(alias), "改写问法"
+            else:
+                phrase, note = k.key, "原词问法"
+            question = template.replace("{k}", phrase)
+            out[qtype].append(self._query(qtype, question, k.key, kw.pop("role", None) or role(k), note=note, **kw))
 
         cur = ["{k}是多少？", "{k}现在是多少？", "目前{k}的标准是多少？", "请问{k}是多少？", "按现行规定，{k}是多少？",
                "现行的{k}是多少？", "{k}按最新规定是多少？", "公司规定的{k}是多少？", "我想了解一下{k}是多少。",
                "{k}的现行标准是什么？"]
         for k in norm_keys:
             for t in cur:
-                add("当前生效", t.format(k=k.key), k)
+                add("当前生效", t, k)
         hist = ["{d}，{k}是多少？", "{d}实际生效的{k}是多少？", "在{d}，{k}按当时生效的规定是多少？", "{d}那天{k}是多少？"]
         for k in norm_keys:
             for v in versions_of(k.key):
@@ -336,7 +346,7 @@ class Synth:
                 for _ in range(6):
                     d = start + timedelta(days=r.randint(-30, 240))
                     if FIRST <= d < TODAY:
-                        add("历史时点", r.choice(hist).format(d=r.choice([_d, _d2])(d), k=k.key), k, as_of_valid=d)
+                        add("历史时点", r.choice(hist).replace("{d}", r.choice([_d, _d2])(d)), k, as_of_valid=d)
         back1 = ["截至{s}，系统中记录的{k}是多少？", "截至{s}，系统里登记的{k}是多少？"]
         back2 = ["按截至{s}的系统记录，{d}的{k}是多少？", "按截至{s}系统中的记录，{d}实际生效的{k}是多少？"]
         for k in norm_keys:
@@ -346,11 +356,11 @@ class Synth:
                     if not FIRST <= sday < TODAY:
                         continue
                     if r.random() < 0.5:
-                        add("回溯", r.choice(back1).format(s=_d(sday), k=k.key), k, as_of_system=sday)
+                        add("回溯", r.choice(back1).replace("{s}", _d(sday)), k, as_of_system=sday)
                     else:
                         d = sday - timedelta(days=r.randint(0, 200))
-                        add("回溯", r.choice(back2).format(s=_d(sday), d=_d(d), k=k.key), k, as_of_valid=d,
-                            as_of_system=sday)
+                        add("回溯", r.choice(back2).replace("{s}", _d(sday)).replace("{d}", _d(d)), k,
+                            as_of_valid=d, as_of_system=sday)
         diff = ["{ym}修订前后，{k}有什么变化？", "《{t}》最近一次修订把{k}从多少改成了多少？",
                 "《{t}》修订后，{k}和修订前相比有什么不同？"]
         for k in norm_keys:
@@ -359,16 +369,16 @@ class Synth:
                 when = vs[-1].valid_from or vs[-1].approved_on
                 for t in diff:
                     for _ in range(2):
-                        add("版本差异", t.format(ym=f"{when.year} 年 {when.month} 月", k=k.key,
-                                                  t=self.fs.documents[k.doc_id].title), k)
+                        add("版本差异", t.replace("{ym}", f"{when.year} 年 {when.month} 月")
+                            .replace("{t}", self.fs.documents[k.doc_id].title), k)
         conf = ["{k}是多少？", "{k}按规定是多少？", "请问{k}的标准是多少？", "{k}现在执行多少？", "目前{k}是多少？"]
         for key in conflict_keys:
             k = self.keys[key]
             for t in conf:
                 for _ in range(2):
-                    add("冲突", t.format(k=key), k)
+                    add("冲突", t, k)
                     d = TODAY - timedelta(days=r.randint(30, 500))
-                    add("冲突", f"{r.choice([_d, _d2])(d)}，{key}是多少？", k, as_of_valid=d)
+                    add("冲突", f"{r.choice([_d, _d2])(d)}，{{k}}是多少？", k, as_of_valid=d)
         arch = ["{k}是多少？", "请问{k}是多少？", "{k}按规定是多少？", "目前{k}的标准是多少？"]
         for e in [e for e in self.fs.events if e.type == "归档"]:
             unarch = next((u.occurred_on for u in self.fs.events if u.type == "取消归档" and u.target == e.target
@@ -380,26 +390,27 @@ class Synth:
                     days += [unarch + timedelta(days=r.randint(0, 20)) for _ in range(3)]
                 for asked in days:
                     for t in arch:
-                        add("归档", t.format(k=k.key), k, asked_on=min(asked, TODAY))
+                        add("归档", t, k, asked_on=min(asked, TODAY))
         perm = ["{k}是多少？", "请问{k}现在是多少？", "{k}按规定是多少？"]
         for k in restricted:
             change = acl_docs.get(k.doc_id)
             for rl in sorted(ALL):
                 for t in perm:
                     if change is None:
-                        add("权限边界", t.format(k=k.key), k, role=rl)
+                        add("权限边界", t, k, role=rl)
                     else:
                         for asked in (change.occurred_on - timedelta(days=r.randint(1, 30)),
                                       change.occurred_on + timedelta(days=r.randint(0, 30))):
-                            add("权限边界", t.format(k=k.key), k, role=rl, asked_on=min(asked, TODAY))
+                            add("权限边界", t, k, role=rl, asked_on=min(asked, TODAY))
         missing = [p + b for p in MISSING_PREFIX for b in MISSING_BASE if (p + b) not in self.keys]
         miss = ["{k}是多少？", "{k}的标准是多少？", "请问{k}怎么规定的？"]
         for key in missing:
-            out["无答案"].append(self._query("无答案", r.choice(miss).format(k=key), key, r.choice(sorted(ALL))))
+            out["无答案"].append(self._query("无答案", r.choice(miss).format(k=key), key, r.choice(sorted(ALL)),
+                                             note="原词问法"))
         chart = ["{k}是多少？", "《{t}》中{k}是多少？", "请问{k}是多少？"]
         for k in [k for k in self.keys.values() if k.carrier == "图表"]:
             for t in chart:
-                add("图表", t.format(k=k.key, t=self.fs.documents[k.doc_id].title), k)
+                add("图表", t.replace("{t}", self.fs.documents[k.doc_id].title), k)
         for k in [k for k in norm_keys if isinstance(k.spec, tuple)]:
             top = calc.compute(self._query("当前生效", "", k.key, role(k)))
             if top.refuse or top.conflict:
@@ -410,7 +421,7 @@ class Synth:
             for claimed in (value, value, value, self.draw(k.spec, avoid=avoid), self.draw(k.spec, avoid=avoid),
                             self.draw(k.spec, avoid=avoid)):
                 v = f"{claimed:,}" if isinstance(claimed, (int, float)) else claimed
-                add("验证器", r.choice(claims).format(k=k.key, v=v, u=k.unit or "").rstrip() + "。", k)
+                add("验证器", r.choice(claims).replace("{v}", str(v)).replace("{u}", k.unit or "").rstrip() + "。", k)
         return out
 
     @staticmethod
@@ -476,3 +487,82 @@ class Synth:
 
 def generate(seed: int = 2026, scale: float = 1.0) -> FactSet:
     return Synth(seed, scale).build()
+
+
+# 改写问法（生成器版本 2）：同一事实键的口语、近义说法，不与事实键共用原词，用来区分分词器与向量模型（AC-5-4）
+ALIASES = {
+    "一线城市住宿上限": ["北上广深出差的酒店报销额度", "一线城市出差每晚可报的住宿费"],
+    "二线城市住宿上限": ["省会城市出差的酒店报销额度", "二线城市出差每晚可报的住宿费"],
+    "三线城市住宿上限": ["地级市出差的酒店报销额度", "三四线城市出差每晚可报的住宿费"],
+    "出差伙食补贴": ["出差期间每天的餐费补助", "出差人员的每日饭补"],
+    "市内交通补贴": ["出差地市区内的每日交通补助", "出差期间当地打车的补助标准"],
+    "部门经理单笔采购审批上限": ["部门负责人一次采购的审批额度", "部门经理能批的单笔采购金额"],
+    "分管副总单笔采购审批上限": ["分管领导单次采购的审批额度", "副总经理能批的单笔采购金额"],
+    "总经理单笔采购审批上限": ["总经理单次采购的审批额度", "一把手能批的单笔采购金额"],
+    "集中采购起点金额": ["必须走集采的金额门槛", "统一集中采购的金额标准"],
+    "年休假基础天数": ["每年带薪年假的天数", "员工一年可休的年假天数"],
+    "婚假天数": ["员工结婚可请的假期天数", "结婚假期的长度"],
+    "陪产假天数": ["男员工的护理假天数", "配偶生育时男方的假期天数"],
+    "病假单次最长天数": ["单次病假的最长期限", "一次可请病假的最多天数"],
+    "工作日加班餐补": ["平日晚上加班的餐费补助", "工作日加班每次的饭补"],
+    "每月加班时长上限": ["每个月加班小时数的上限", "单月最多可加班的时长"],
+    "节假日加班调休比例": ["节日加班换休的折算比例", "法定假日加班的调休比例"],
+    "外部培训年度预算上限": ["每人每年外训费用的额度", "参加外部培训的年度费用上限"],
+    "培训服务期": ["公司出资培训后的服务年限", "培训后需要留任的年限"],
+    "内部讲师课时津贴": ["内训讲师每节课的课酬", "公司内部授课的课时费"],
+    "私车公用补贴": ["开私家车办公事的每公里补助", "私车用于公务的里程补贴"],
+    "公务用车单日里程上限": ["公车每天的行驶里程限额", "公务车一天最多可行驶的里程"],
+    "部门经理通讯补贴": ["部门负责人每月的话费补助", "经理级的手机费补贴"],
+    "普通员工通讯补贴": ["一般员工每月的话费补助", "员工的手机话费补贴"],
+    "销售人员通讯补贴": ["销售岗每月的话费补助", "业务员的手机费补贴"],
+    "人均招待标准": ["宴请客户的人均费用标准", "接待客户每人可花的费用"],
+    "单次招待费上限": ["一次商务宴请的费用封顶", "一场接待的最高费用"],
+    "招待事前审批起点": ["需要事先报批的宴请金额", "招待费提前审批的金额门槛"],
+    "合同法务审核金额起点": ["需要法务审查的合同金额门槛", "合同送法律审核的金额标准"],
+    "合同审批办理时限": ["合同审批流程的办理期限", "签约审批需要的工作日数"],
+    "用印申请办理时限": ["盖章申请的办理期限", "用章审批需要的工作日数"],
+    "公章外借最长天数": ["公章借出的最长期限", "印章外带的最多天数"],
+    "新员工安全培训学时": ["新入职员工安全教育的课时", "新人安全培训的学时要求"],
+    "年度安全再培训学时": ["每年安全复训的课时", "在职员工每年的安全培训学时要求"],
+    "年度考核优秀比例上限": ["年终考评评优的最高占比", "绩效优秀名额的比例上限"],
+    "绩效申诉受理时限": ["考核结果异议的受理期限", "绩效申诉的处理期限"],
+    "试用期工资比例": ["试用期间薪资的发放比例", "试用期按转正工资发放的比例"],
+    "年终奖最高月数": ["年底奖金封顶的月数", "年终奖最多发放的工资月数"],
+    "高管年薪上限": ["高层管理人员的年度薪酬封顶", "公司高管一年收入的上限"],
+    "报销单据提交时限": ["报销材料的提交期限", "发票取得后交报销的期限"],
+    "备用金核销期限": ["备用金冲账的期限", "借支备用金的还款核销期限"],
+    "系统密码更换周期": ["系统登录口令的更新频率", "账号密码需要修改的间隔"],
+    "离职账号注销时限": ["员工离开后账号关闭的期限", "离职人员系统权限的回收期限"],
+    "数据备份保留期限": ["备份数据的保存时长", "数据备份的留存期限"],
+    "单次办公用品领用上限": ["每次领取文具的金额额度", "一次领用办公用品的金额限制"],
+    "固定资产报废年限下限": ["资产报废前的最短使用年限", "固定资产可以报废的最低年限"],
+    "生日福利标准": ["员工生日礼金的标准", "过生日时公司发放的福利金额"],
+    "节日慰问标准": ["过节发放的慰问金", "节日福利每人的金额"],
+    "年度体检标准": ["公司承担的年度体检费用", "员工每年体检的费用额度"],
+    "新入职住房补贴": ["新员工每月的租房补助", "刚入职员工的住房补助"],
+    "住房补贴发放期限": ["租房补助的发放时长", "住房补助可以领取的月数"],
+    "境外派驻补贴": ["驻外人员的每日津贴", "海外外派期间的每日补助"],
+    "外派探亲假天数": ["驻外员工回国探亲的假期", "外派人员的探亲假期"],
+    "内部推荐奖励": ["推荐朋友入职的奖金", "内推成功后的奖励金额"],
+    "试用期最长月数": ["试用期的最长期限", "新员工试用期的最多月数"],
+    "离职提前通知天数": ["辞职需要提前告知的天数", "员工离职申请的提前期"],
+    "离职交接办理时限": ["工作交接的完成期限", "离职交接需要的工作日数"],
+    "会议人均日标准": ["开会每人每天的费用标准", "会议费的人均日额度"],
+    "会议费事前审批起点": ["需要事先报批的会议费金额", "会议费提前审批的金额门槛"],
+    "固定资产入账起点": ["计入固定资产的金额门槛", "资产入账的金额标准"],
+    "资产盘点周期": ["资产清查的间隔", "固定资产盘点的频率"],
+    "国内航班舱位标准": ["国内出差乘飞机的舱位等级", "坐飞机出差可选的舱位"],
+    "高铁座席标准": ["出差乘高铁的座位等级", "坐动车出差可选的席别"],
+    "突发事件上报时限": ["紧急情况的报告期限", "突发状况上报的小时数"],
+    "应急演练频次": ["每年组织应急演习的次数", "应急演练的年度次数"],
+    "会计档案保管年限": ["会计凭证的保存年限", "财务档案的留存年限"],
+    "档案借阅最长天数": ["档案外借的期限", "借阅档案的最多天数"],
+    "研发项目立项审批起点": ["研发立项需要审批的金额门槛", "研发项目走立项审批的金额标准"],
+    "项目结题验收时限": ["研发项目的验收期限", "项目结束后完成验收的月数"],
+    "投诉首次响应时限": ["客户投诉的首次回复期限", "接到投诉后的首次响应时长"],
+    "投诉办结时限": ["客户投诉的结案期限", "投诉处理完毕的工作日数"],
+    "外设接入审批时限": ["U盘等外接设备的审批期限", "外接设备接入申请的办理时长"],
+    "终端补丁更新周期": ["电脑系统补丁的更新频率", "终端安全补丁的更新间隔"],
+    "诉讼案件上报时限": ["涉诉案件的报告期限", "遇到官司后的上报工作日数"],
+    "外聘律师费审批起点": ["聘请外部律师需要审批的费用门槛", "律师费走审批的金额标准"],
+}

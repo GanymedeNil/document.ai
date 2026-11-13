@@ -53,6 +53,10 @@ class LexicalOnly:
     def search_vector(self, vector: list[float], f: Filters, k: int) -> list[tuple[str, float]]:
         return []
 
+    def snapshot(self) -> "LexicalOnly":
+        # 检索服务每次查询先取 snapshot()（AC-5-3）；不包一层，向量一路会绕过本类原样执行
+        return LexicalOnly(self._index.snapshot())
+
 
 @dataclass
 class Row:
@@ -87,11 +91,11 @@ class Row:
 
 def compare(fs: FactSet, corpus: Path, manifest: dict, *, client, new_db: Callable[[], str],
             analyzers: tuple[str, ...] = DEFAULT_ANALYZERS, embedder: Embedder | None = None,
-            work_dir: Path) -> list[Row]:
+            work_dir: Path, modes: tuple[str, ...] = ("lexical", "hybrid")) -> list[Row]:
     embedder = embedder or HashingEmbedder()
     rows: list[Row] = []
     for analyzer in analyzers:
-        for mode in ("lexical", "hybrid"):
+        for mode in modes:
             alias = f"eaer-cmp-{uuid.uuid4().hex[:8]}"
             seg = APP_SEGMENTERS[analyzer]() if analyzer in APP_SEGMENTERS else None
             with fresh_index(client, alias, build_id=analyzer.replace("_", "-"), dims=embedder.dims,
@@ -107,15 +111,38 @@ def compare(fs: FactSet, corpus: Path, manifest: dict, *, client, new_db: Callab
     return rows
 
 
-def table(rows: list[Row]) -> str:
+def table(rows: list[Row], notes: dict[str, str] | None = None) -> str:
+    """notes：查询编号 → 说明列（合成集 v2 起为“原词问法”或“改写问法”），给出时按问法另列召回。"""
     emb = rows[0].report.embedder if rows else ""
     lines = [f"分词器对比（向量化 {emb}，前 {rows[0].report.top_m if rows else 0} 条）",
-             "| 分词器 | 方式 | 命中 / 可计分 | MRR | 拒答正确 | 越权 | 对账差异 | 未命中 |",
-             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+             "| 分词器 | 方式 | 命中 / 可计分 | 召回 | MRR | 拒答正确 | 越权 | 对账差异 | 未命中 |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for r in rows:
+        misses = "、".join(r.misses) if len(r.misses) <= 5 else f"{len(r.misses)} 条"
         lines.append(f"| {r.analyzer} | {'仅关键词' if r.mode == 'lexical' else '关键词 + 向量'} | "
-                     f"{r.hits} / {r.scored} | {r.mrr:.3f} | {r.refused_ok} / {r.refusals} | {r.report.leaks} | "
-                     f"{r.report.reconcile_diffs} | {'、'.join(r.misses) or '—'} |")
+                     f"{r.hits} / {r.scored} | {r.hits / r.scored:.1%} | {r.mrr:.3f} | {r.refused_ok} / {r.refusals} | "
+                     f"{r.report.leaks} | {r.report.reconcile_diffs} | {misses or '—'} |")
+    types = sorted({res.type for r in rows for res in r.report.results})
+    lines += ["", "按类别的召回（命中 / 可计分）", "| 分词器 | 方式 | " + " | ".join(types) + " |",
+              "| --- | --- | " + " | ".join("---" for _ in types) + " |"]
+    for r in rows:
+        cells = []
+        for t in types:
+            res = [x for x in r.report.results if x.type == t and x.outcome in ("hit", "miss")]
+            cells.append(f"{sum(x.outcome == 'hit' for x in res)}/{len(res)}" if res else "—")
+        lines.append(f"| {r.analyzer} | {'仅关键词' if r.mode == 'lexical' else '关键词 + 向量'} | " + " | ".join(cells) + " |")
+    kinds = sorted({v for v in (notes or {}).values() if v})
+    if kinds:
+        lines += ["", "按问法的召回与 MRR", "| 分词器 | 方式 | " + " | ".join(kinds) + " |",
+                  "| --- | --- | " + " | ".join("---" for _ in kinds) + " |"]
+        for r in rows:
+            cells = []
+            for k in kinds:
+                res = [x for x in r.report.results if notes.get(x.query_id) == k and x.outcome in ("hit", "miss")]
+                hit = [x for x in res if x.outcome == "hit"]
+                mrr = sum(1 / x.rank for x in hit if x.rank) / len(res) if res else 0
+                cells.append(f"{len(hit)}/{len(res)}（{len(hit) / len(res):.1%}，MRR {mrr:.3f}）" if res else "—")
+            lines.append(f"| {r.analyzer} | {'仅关键词' if r.mode == 'lexical' else '关键词 + 向量'} | " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 
@@ -162,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--analyzers", default=",".join(DEFAULT_ANALYZERS))
     p.add_argument("--format", choices=["docx", "html"], default="docx")
     p.add_argument("--split", choices=["标定", "测试"], help="只用该集合的查询（14.3：指标在测试集上报）")
+    p.add_argument("--modes", default="lexical,hybrid", help="lexical（仅关键词）、hybrid（关键词 + 向量），逗号分隔")
     p.add_argument("--per-type", type=int, help="每类查询最多取几条（按编号哈希抽样，可复现）")
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
@@ -182,8 +210,8 @@ def main(argv: list[str] | None = None) -> int:
             embedder = OnlineModelClient.from_env().embedder()
         rows = compare(fs, work / "corpus", manifest, client=connect(args.opensearch), new_db=new_db,
                        analyzers=tuple(a.strip() for a in args.analyzers.split(",") if a.strip()), work_dir=work,
-                       embedder=embedder)
-    print(table(rows))
+                       embedder=embedder, modes=tuple(m.strip() for m in args.modes.split(",") if m.strip()))
+    print(table(rows, {q.id: q.note for q in fs.queries}))
     return 0
 
 

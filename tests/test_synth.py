@@ -3,7 +3,8 @@
 - 生成的事实表通过校验，程序答案与回填的预期答案逐条一致；写成 xlsx 再读回完全不变；同一种子结果相同；
 - 样本量：比例 1.0 时高风险类别各 300 条、其他类别各 100 条；每类 30% 为标定集、70% 为测试集；
 - 每条查询确实落在它的类别要考的情形上（冲突类有冲突、无答案类拒答、归档与权限边界类应答与拒答都有……）；
-- 生成的文档（Word、HTML）通过文档检查；冻结的 docs/评测集/合成集-v1.xlsx 与生成器输出一致；
+- 约四成查询用改写问法（不含事实键原词），每类都有；
+- 生成的文档（Word、HTML）通过文档检查；冻结的 docs/评测集/合成集-v2.xlsx 与生成器输出一致；
 - 子集与人工抽检单的抽样确定、按类别分层。
 """
 from __future__ import annotations
@@ -20,7 +21,7 @@ from factset.synth import QUOTA, Synth, generate
 from factset.validate import validate
 from factset.write import write
 
-FROZEN = Path("docs/评测集/合成集-v1.xlsx")
+FROZEN = Path("docs/评测集/合成集-v2.xlsx")
 
 
 @pytest.fixture(scope="module")
@@ -85,12 +86,23 @@ def test_round_trip_and_determinism(full, tmp_path):
         [q.question for q in generate(2027, 1.0).queries] != [q.question for q in full.queries]
 
 
-def test_frozen_v1_matches_the_generator(full):
+def test_paraphrased_questions(full):
+    from factset.synth import ALIASES, TOPICS
+    keys = [k for _, _, ks in TOPICS for k, *_ in ks]
+    assert set(ALIASES) == set(keys)
+    assert not [a for k, al in ALIASES.items() for a in al if k in a]       # 改写问法不含原词
+    para = [q for q in full.queries if q.note == "改写问法"]
+    assert 0.3 * len(full.queries) < len(para) < 0.5 * len(full.queries)
+    assert all(q.target_key not in q.question for q in para)
+    assert {q.type for q in para} >= {"历史时点", "回溯", "冲突", "归档", "权限边界", "当前生效", "版本差异", "验证器"}
+
+
+def test_frozen_set_matches_the_generator(full):
     """冻结的评测集版本不能被生成器的改动悄悄改掉：改了生成器就要升版本、另存新文件。"""
     frozen = load(FROZEN)
     assert validate(frozen) == []
-    assert [(q.id, q.type, q.question, q.expected_answer, q.split) for q in frozen.queries] == \
-        [(q.id, q.type, q.question, q.expected_answer, q.split) for q in full.queries]
+    assert [(q.id, q.type, q.question, q.expected_answer, q.split, q.note) for q in frozen.queries] == \
+        [(q.id, q.type, q.question, q.expected_answer, q.split, q.note) for q in full.queries]
     assert {f.id: (f.key, f.value) for f in frozen.facts.values()} == {f.id: (f.key, f.value) for f in full.facts.values()}
 
 
@@ -132,3 +144,23 @@ def test_scoring_handles_text_values():
 def test_generator_is_seeded_not_global():
     a, b = Synth(1, 0.1), Synth(1, 0.1)
     assert [q.question for q in a.build().queries] == [q.question for q in b.build().queries]
+
+
+def test_lexical_only_wrapper_survives_the_snapshot():
+    """分词器对比的“仅关键词”：检索服务每次先取 snapshot()，包装必须跟着传下去，否则向量一路照样执行
+    （2026-11-12 起的对比中“仅关键词”一栏实际是关键词加向量，见设计变更记录）。"""
+    from datetime import date
+
+    from eaer.evalrun.analyzers import LexicalOnly
+    from eaer.retrieval.index import Filters, MemoryIndex
+
+    class Spy(MemoryIndex):
+        def snapshot(self):
+            return Spy.__new__(Spy)            # 另一个实例，模拟别名解析成具体索引
+
+        def search_vector(self, vector, f, k):
+            return [("ev_x", 1.0)]
+
+    f = Filters("t1", frozenset({"R"}), date(2026, 1, 1), None)
+    snap = LexicalOnly(Spy()).snapshot()
+    assert isinstance(snap, LexicalOnly) and snap.search_vector([0.0], f, 5) == []
