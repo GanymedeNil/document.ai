@@ -22,13 +22,15 @@
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import socket
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
 from eaer.adapters.model import Capabilities, CapabilityNotSupported, Completion, Message, Usage
@@ -67,6 +69,31 @@ class CallRecord:
 
 
 Transport = Callable[[str, dict, dict, float], tuple[int, Any]]
+_COLLECTOR: contextvars.ContextVar[list | None] = contextvars.ContextVar("eaer_model_calls", default=None)
+
+
+@contextmanager
+def collect_calls():
+    """收集这段代码里发生的全部模型调用（含 Embedding、重排），用于汇总一次提问的成本（12.2、query_log.cost）。"""
+    calls: list[CallRecord] = []
+    token = _COLLECTOR.set(calls)
+    try:
+        yield calls
+    finally:
+        _COLLECTOR.reset(token)
+
+
+def summarize(calls: list["CallRecord"]) -> dict:
+    by_kind: dict[str, dict] = {}
+    for c in calls:
+        k = by_kind.setdefault(c.kind, {"calls": 0, "attempts": 0, "input_tokens": 0, "output_tokens": 0, "seconds": 0.0})
+        k["calls"] += 1
+        k["attempts"] += c.attempts
+        k["input_tokens"] += c.input_tokens
+        k["output_tokens"] += c.output_tokens
+        k["seconds"] = round(k["seconds"] + c.seconds, 3)
+    return {"by_kind": by_kind, "failed": sum(not c.ok for c in calls),
+            "models": sorted({c.model for c in calls})}
 
 
 def urllib_transport(url: str, headers: dict, body: dict, timeout: float) -> tuple[int, Any]:
@@ -237,6 +264,9 @@ class OnlineModelClient:
     def _record(self, rec: CallRecord) -> None:
         if self.meter is not None:
             self.meter(rec)
+        calls = _COLLECTOR.get()
+        if calls is not None:
+            calls.append(rec)
 
 
 def _error_text(out: Any) -> str:

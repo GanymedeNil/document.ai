@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from typing import Protocol
 
@@ -64,7 +64,8 @@ class Retriever:
         hits = self._recheck(scope, fused, on, system_t)[: self.top_n]
         if self.reranker is not None and hits:
             scores = self.reranker.rerank(question, [h.content for h in hits])
-            hits = [h for _, h in sorted(zip(scores, hits), key=lambda x: -x[0])]
+            # 重排后 score 改为重排分数（0–1），编排器据此判断“重排后最高分低于阈值”（8.2）
+            hits = [replace(h, score=s) for s, h in sorted(zip(scores, hits), key=lambda x: -x[0])]
         return hits[: self.top_m]
 
     def _recheck(self, scope: Scope, fused: list[tuple[str, float]], on: date, system_t: datetime | None) -> list[Hit]:
