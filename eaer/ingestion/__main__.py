@@ -7,8 +7,8 @@
     python -m eaer.ingestion purge           立即做一次 Trace 清理（后台任务进程每 EAER_PURGE_SECONDS 秒自动做一次，默认 3600）
 
 环境变量：EAER_DATABASE_URL、EAER_STORAGE_DIR（同接口进程）；EAER_POLL_SECONDS（空闲轮询间隔，默认 2）；
-EAER_OPENSEARCH_URL、EAER_INDEX_ALIAS（默认 eaer）、EAER_TEXT_ANALYZER（smartcn / icu_analyzer / jieba 等，
-默认 smartcn）；Embedding 服务 EAER_EMBED_*（见 eaer/adapters/online.py）。
+EAER_OPENSEARCH_URL、EAER_INDEX_ALIAS（默认 eaer）、EAER_TEXT_ANALYZER（standard / cjk / smartcn / icu_analyzer /
+jieba，默认 standard）；Embedding 服务 EAER_EMBED_*（见 eaer/adapters/online.py）。
 处理索引任务时这几项缺一不可：缺少即启动报错，不会让索引任务默默排队（开发文档 12.1“部署时报错”）；
 也不能用测试替身向量化。
 转入后台、或执行者中断的提问（开发文档 8.5）也由本进程接着执行，需要与接口进程相同的查询配置与 EAER_TOKENS_FILE
@@ -41,7 +41,8 @@ def index_parts(env: dict[str, str]):
     model = OnlineModelClient.from_env(env)
     if model.emb is None:
         raise ConfigError("未配置 Embedding 服务（EAER_EMBED_*），无法处理索引任务")
-    analyzer = env.get("EAER_TEXT_ANALYZER", "smartcn")
+    from eaer.retrieval.opensearch import DEFAULT_ANALYZER
+    analyzer = env.get("EAER_TEXT_ANALYZER", DEFAULT_ANALYZER)
     return (connect(env["EAER_OPENSEARCH_URL"]), env.get("EAER_INDEX_ALIAS", "eaer"), analyzer,
             segmenter_for(analyzer), model.embedder())
 

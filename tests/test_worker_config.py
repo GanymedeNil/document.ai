@@ -46,7 +46,7 @@ def test_worker_requires_an_index_with_the_same_text_analysis(conn, tmp_path):
     env = {**EMBED, "EAER_OPENSEARCH_URL": OS_URL, "EAER_INDEX_ALIAS": alias}
     with pytest.raises(ConfigError, match="rebuild"):
         build_worker(conn, LocalFileStore(tmp_path), env)                  # 别名还不存在
-    with fresh_index(connect(OS_URL), alias, build_id="b7", dims=1024, analyzer="smartcn"):
+    with fresh_index(connect(OS_URL), alias, build_id="b7", dims=1024):          # 默认分词方式 standard
         w = build_worker(conn, LocalFileStore(tmp_path), env)
         assert {"publish_index", "index_update"} <= set(w.handlers)
         assert w.handlers["publish_index"].__self__.build_id == "b7"

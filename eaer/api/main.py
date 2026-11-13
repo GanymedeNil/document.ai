@@ -7,7 +7,7 @@
       {"令牌": {"user": "alice", "tenant": "t1", "roles": ["editor"], "principals": ["R_STAFF"]}}
       roles 是接口角色（editor、reviewer）；principals 是文档权限角色，供参考授权实现 LocalAuthorizer 使用，
       可省略（省略的账号无法查看证据）。客户现场分别换成 SSO 与客户的授权实现。
-  提问接口另需：EAER_OPENSEARCH_URL、EAER_INDEX_ALIAS（默认 eaer）、EAER_TEXT_ANALYZER（默认 smartcn），以及
+  提问接口另需：EAER_OPENSEARCH_URL、EAER_INDEX_ALIAS（默认 eaer）、EAER_TEXT_ANALYZER（默认 standard），以及
       生成、Embedding、重排三项模型服务（EAER_GEN_*、EAER_EMBED_*、EAER_RERANK_*，见 eaer/adapters/online.py）。
       缺任何一项都启动报错（开发文档 12.1“Fast 无法运行，部署时报错”）；只想先开放上传与审核时
       设置 EAER_DISABLE_QUERY=1，提问接口返回 503。

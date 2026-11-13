@@ -4,8 +4,10 @@
 新建索引全量重建，完成后切换别名（AC-5-3）。关键词检索与向量检索各发一次查询，在应用侧用 RRF 融合，
 两路都带同一组过滤条件。
 
-中文分词有两种方式：默认由引擎的分词插件处理（smartcn，需 docker/opensearch 镜像）；
-传入 segmenter 时在应用侧切词（如 jieba），text 字段改用内置 whitespace 分词器，见 segment.py。
+中文分词有两种方式：由引擎的分词器处理（默认 standard，内置，中文按字切分；smartcn、icu_analyzer 需
+docker/opensearch 镜像中的插件）；传入 segmenter 时在应用侧切词（如 jieba），text 字段改用内置 whitespace
+分词器，见 segment.py。默认取 standard 是 2026-11-13 用户依据合成集 v2 的对比选定的（AC-5-4）：问法与原文
+用词不同时它的召回最高。
 2026-11-12 起集成测试在真实 OpenSearch 3.9.0 上运行。
 """
 from __future__ import annotations
@@ -18,10 +20,11 @@ from eaer.retrieval.index import Filters, IndexDoc
 from eaer.retrieval.segment import Segmenter
 
 ALIAS = "eaer"
+DEFAULT_ANALYZER = "standard"      # 部署的默认分词方式（EAER_TEXT_ANALYZER 可改；换分词方式须重建索引）
 PRE_SEGMENTED = "whitespace"       # 应用侧已切好词时 text 字段使用的分词器
 
 
-def mapping(dims: int, analyzer: str = "smartcn", segmenter: str | None = None) -> dict:
+def mapping(dims: int, analyzer: str = DEFAULT_ANALYZER, segmenter: str | None = None) -> dict:
     """segmenter 不为空时表示 text 已在应用侧切词，记入 _meta，便于核对索引与应用配置一致。"""
     kw = {"type": "keyword"}
     return {
@@ -64,7 +67,7 @@ class OpenSearchIndex:
 
     # ---------- 索引管理 ----------
 
-    def create(self, build_id: str, dims: int, analyzer: str = "smartcn") -> str:
+    def create(self, build_id: str, dims: int, analyzer: str = DEFAULT_ANALYZER) -> str:
         """应用侧切词时忽略 analyzer，text 字段固定用 whitespace。"""
         name = f"{self.alias}-{build_id}"
         if self.segmenter is not None:
@@ -100,7 +103,7 @@ class OpenSearchIndex:
         return {name: int(v["settings"]["index"]["creation_date"]) for name, v in got.items()}
 
     def text_analysis(self) -> str | None:
-        """别名当前指向的索引在映射 _meta 中记录的分词方式（smartcn、icu_analyzer、jieba-0.42.1 等）。"""
+        """别名当前指向的索引在映射 _meta 中记录的分词方式（standard、smartcn、jieba-0.42.1 等）。"""
         names = sorted(self.current())
         if not names:
             return None

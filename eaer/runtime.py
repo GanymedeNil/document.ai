@@ -59,7 +59,8 @@ def engine_factory(env: dict[str, str], accounts: dict[str, dict], store) -> Cal
         raise ConfigError("提问服务缺少配置：" + "、".join(missing) + "。不开放提问时设置 EAER_DISABLE_QUERY=1")
     client = connect(env["EAER_OPENSEARCH_URL"])
     alias = env.get("EAER_INDEX_ALIAS", "eaer")
-    seg = segmenter_for(env.get("EAER_TEXT_ANALYZER", "smartcn"))
+    from eaer.retrieval.opensearch import DEFAULT_ANALYZER
+    seg = segmenter_for(env.get("EAER_TEXT_ANALYZER", DEFAULT_ANALYZER))
     embedder = model.embedder()
     deep_enabled = env.get("EAER_DEEP_ENABLED", "1") != "0"
     admission_required = env.get("EAER_ADMISSION", "required") != "off"

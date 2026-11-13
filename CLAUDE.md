@@ -14,7 +14,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
    export EAER_TEST_OPENSEARCH_URL=http://localhost:9200
    python -m pytest -q
    ```
-   2026-11-12 首次在真实环境运行（macOS + OrbStack，用 `docker-compose.dev.yml` 启动 PostgreSQL 18.6 与 OpenSearch 3.9.0，Python 3.14.5）：148 个全部通过，没有跳过和警告，没有需要修复的问题。此后 OpenSearch 改用带 smartcn、icu 插件的自定义镜像，AC-5-3 的“重建期间持续查询”已有真实引擎上的用例（`tests/test_rebuild_live.py`）。CI 仍未运行过（仓库还没有远端）。之后跑出的问题请如实告诉用户，修复后记入 `docs/设计变更记录.md`。
+   2026-11-12 首次在真实环境运行（macOS + OrbStack，用 `docker-compose.dev.yml` 启动 PostgreSQL 18.6 与 OpenSearch 3.9.0，Python 3.14.5）：148 个全部通过，没有跳过和警告，没有需要修复的问题。此后 OpenSearch 改用带 smartcn、icu 插件的自定义镜像（默认分词已选定内置的 standard，插件留给对比工具与选用它们的客户），AC-5-3 的“重建期间持续查询”已有真实引擎上的用例（`tests/test_rebuild_live.py`）。CI 仍未运行过（仓库还没有远端）。之后跑出的问题请如实告诉用户，修复后记入 `docs/设计变更记录.md`。
 4. 如果还没有 git 仓库，先 `git init` 并提交一次。
 
 ## 目录
@@ -25,7 +25,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 | `eaer/lifecycle/` | 生命周期服务（唯一能改版本状态的模块）与按系统时间的回溯查询 |
 | `eaer/ingestion/` | 入库第 1–3、6 阶段，解析器接口（原生 Word/HTML 与 Docling），抽取规则，索引任务（`indexer.py`，唯一写索引的地方），后台任务进程（也接着执行转入后台的提问） |
 | `eaer/review/` | 审核服务 |
-| `eaer/retrieval/` | 检索引擎接口、OpenSearch 实现与客户端工厂、内存参考实现、应用侧分词（jieba 候选）、对账、检索服务（含 Deep 用的“取版本” `versions`） |
+| `eaer/retrieval/` | 检索引擎接口、OpenSearch 实现与客户端工厂、内存参考实现、应用侧分词（jieba 候选）；默认分词方式 `DEFAULT_ANALYZER = "standard"`（`opensearch.py`，`EAER_TEXT_ANALYZER` 可改，改了要重建索引）、对账、检索服务（含 Deep 用的“取版本” `versions`） |
 | `eaer/verifier/` | 验证层（第 9 节）：确定性检查 `deterministic.py`（引用核对、authorized、locator_exists、value_match、time_valid，可按版本指定目标时间）与语义检查 `semantic.py` |
 | `eaer/orchestrator/` | 查询执行（第 8 节）：时间点识别 `timeparse.py`、Router `router.py`、Fast 与共用步骤 `fast.py`、Deep 计划模板 `deep.py`、编排与 Verified `engine.py`（LangGraph 图，状态只含 JSON 值，见 `codec.py`）、异步执行 `tasks.py`（同步时限、转后台、进度、取消、租约与检查点恢复、Trace 清理 `purge`）、回答缓存 `cache.py`、准入结论与模式开关 `admission.py`、强制验证清单 `forced_verify.py`（内置规则 + 租户追加的规则，只增不减） |
 | `eaer/api/` | FastAPI 对外接口（提问、会话、取消、上传、审核、归档、取消归档、证据、强制验证清单）；文档权限经 `Authorizer`，未配置或不可用时 503。接口进程与后台任务进程的公共装配在 `eaer/runtime.py` |
@@ -66,7 +66,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 | 已通过 | AC-3-1，AC-4-1~4-5，AC-5-1、5-2、5-3、5-5，AC-6-2、6-3、6-4（检索层面）、6-5、6-6、6-7、6-8，AC-7-2（检索层面）、7-4、7-5、7-6，AC-8-1~8-6，AC-9-1、9-2，AC-10-1（检索层面）、10-3（检索层面）、10-4、10-5、10-6、10-7（越权 0；带偏比例为指标，待基线）、10-9、10-10，AC-11-2、11-3、11-4（三个接口的参考实现均通过；ModelClient 为 DeepSeek 生成 + 本地 Qwen3 Embedding 与重排）、11-5、11-6，AC-12-1、12-3、12-5、12-6（线上模型一档，样例上），AC-14-1、14-3 |
 | 合成语料上通过，待真实数据 | AC-6-9（分类）、AC-7-7（时间抽取）、AC-14-2 的程序检查部分（合成集 v2 全部通过，人工抽检待做） |
 | 只有逻辑或流程，未在真实环境验证 | AC-3-3（CI 已配置，未运行） |
-| 部分完成 | AC-11-1（契约测试只覆盖已有接口，尚无 OpenAPI 文件）、AC-5-4（合成集 v2 上用真实 Embedding 评测完成，分词器与模型待选定） |
+| 部分完成 | AC-11-1（契约测试只覆盖已有接口，尚无 OpenAPI 文件）、AC-5-4（分词器已选定 standard；Embedding 与重排模型的规格待选定） |
 | 未开始 | AC-3-2，AC-6-1、6-10，第 12–13 节其余（计量对账 AC-12-4、部署运维） |
 
 事实表样例上的检索评测：可计分的 12 个查询命中 11 个；3 个拒答类全部正确；越权 0；对账差异 0。未命中的 Q05 是版本差异类，只看检索时取不到旧版本，经编排器由 Deep 的比较模板答对；Q15 图表类需要视觉模型。
@@ -82,7 +82,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 ## 下一步（按优先级）
 
 1. **在真实环境跑通全部测试。** 已于 2026-11-12 完成（148 个通过）。以后如果真实引擎的行为与内存实现不一致，以等价性测试 `test_dsl_and_python_filters_agree` 的思路排查。
-2. **中文分词。** 自定义镜像（smartcn、icu）、应用侧 jieba 候选和对比工具 `python -m eaer.evalrun.analyzers` 已完成（2026-11-12）。合成集 v2 上已能区分（见上文）：改写问法下按字切分的 standard 最好、jieba 与 smartcn 最差；用户原先倾向 jieba，待用户结合这组数据选定（AC-5-4）。按字切分在大语料上可能带来更多噪声与更大的索引，正式采用前用真实语料复核。jieba 0.42.1 自 2020 年未更新，在 Python 3.14 上导入有 SyntaxWarning，正式采用前评估替代实现。
+2. **中文分词。** 自定义镜像（smartcn、icu）、应用侧 jieba 候选和对比工具 `python -m eaer.evalrun.analyzers` 已完成（2026-11-12）。合成集 v2 上已能区分（见上文）：改写问法下按字切分的 standard 最好、jieba 与 smartcn 最差。**2026-11-13 用户选定 standard**，已改为部署默认值（映射、后台任务进程、`rebuild` 命令都默认用它；已有的 smartcn 索引须用 `python -m eaer.ingestion rebuild` 重建）。按字切分在大语料上可能带来更多噪声与更大的索引，接入真实语料后复核召回、精度与索引大小。smartcn、icu、jieba 保留为可选项；jieba 0.42.1 自 2020 年未更新，在 Python 3.14 上导入有 SyntaxWarning，有客户要用时再评估替代实现。
 3. **补齐第 4 周关口中不依赖外部资源的项。** 已于 2026-11-12 完成：AC-3-1（`tests/test_module_boundaries.py`）、AC-6-3（`tests/test_state_machine.py`）、AC-6-4（`tests/test_pending_not_searchable.py`，检索层面）、AC-11-4（`eaer/adapters/conformance.py`）。
 4. **接入 Docling。** 已于 2026-11-12 完成：`eaer/ingestion/docling_parser.py`，覆盖 PDF、扫描件（RapidOCR）、PPTX、XLSX、图片，证据定位带页码；依赖单独锁定在 `requirements-docling.txt`。只在合成样例上验证过，AC-6-1 要求的“每种格式 20 份真实样本”人工核对尚未做。
 5. **模型接口、Fast、Router 与 Verified。** 已完成（2026-11-13）：线上通用客户端、本地 Qwen3 模型服务、Fast、Router（8.1）、Verified（语义检查、定向补检索）、编排器（`eaer/orchestrator/engine.py`）、提问与会话接口、`query_log`。后台任务进程已接上索引任务：需要 `EAER_OPENSEARCH_URL` 与 Embedding 服务，缺少即启动报错（`--no-index` 只做解析）；先用 `python -m eaer.ingestion rebuild --build-id …` 建索引，`drop-retired` 要定时运行。
@@ -92,12 +92,12 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 9. **缓存隔离与 Trace 清理。** 已完成（2026-11-13）：回答缓存（键含租户、授权范围哈希、索引构建编号；数据库触发器在权限、状态、有效期、关系、租户配置变化时清除该租户缓存；命中后仍核对权限）、Trace 清理（已结束任务的检查点与任务行按 trace_retention_days 删除，后台任务进程每小时一次，`python -m eaer.ingestion purge` 手动），`tests/test_cache.py`。OpenTelemetry trace（13.3）未接入。
 10. **准入检查。** 已完成（2026-11-13）：`python -m eaer.evalrun.admission`（验证器评测集由事实表生成、标定与评测分开、误通过率与误拒率门槛；Deep 比较题正确率门槛），结论写入 `model_admission`，部署时据此开关 Verified 与 Deep，没有记录的模型两者关闭（`EAER_ADMISSION=off` 只用于本地开发）。DeepSeek + 本地 Qwen3 在样例上：Verified 误通过 0%、误拒 22%，Deep 10/10，能力矩阵见 `docs/能力矩阵-线上模型.md`。本地跑接口前先用 `--database-url … --tenant …` 写入准入结论。
 11. **扩充评测集。** 已完成（2026-11-13）：`factset/synth.py` 按 14.3 的样本量生成合成集（高风险类别各 300、其他各 100，共 2000 条，30% 标定、70% 测试），v2 约四成查询用改写问法；`docs/评测集/合成集-v2.xlsx` 冻结（测试核对与生成器一致），抽检单 `合成集-v2-抽检单.xlsx`（100 条）待人工核对。评测运行器支持 `--split 测试`、`--per-type N`。
-12. **其余未开始的项。** OpenAPI 文件与契约测试（AC-11-1）、选定分词与模型（AC-5-4）。
+12. **其余未开始的项。** OpenAPI 文件与契约测试（AC-11-1）、选定 Embedding 与重排模型的规格（AC-5-4）。
 
 ## 需要用户决定或提供的事项
 
 - 模型服务（2026-11-13 确定）：生成用 DeepSeek（`deepseek-flash`）；Embedding 与重排由用户选定本地部署 Qwen3（`modelserver/`，先用 0.6B）。是否换 4B/8B 可在合成集 v2 上按 AC-5-4 比较后决定。
-- 中文分词的选定（AC-5-4）：合成集 v2 上 standard（按字）最好、jieba 较差，与用户原先的倾向不同，需要用户定。
+- 中文分词（AC-5-4，2026-11-13 确定）：用户依据合成集 v2 的对比选定 standard（按字切分）。
 - 合成集 v2 的人工抽检（14.2 第 6 步）：`docs/评测集/合成集-v2-抽检单.xlsx` 100 条。
 - 确认“删除待审核版本时保留审核记录”。
 - 集群版私有化环境的 S3 兼容存储产品（第 13 周前）。MinIO 社区版已停止维护，候选为 Garage、SeaweedFS、Ceph RGW。

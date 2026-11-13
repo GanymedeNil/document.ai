@@ -20,7 +20,7 @@ import psycopg
 
 from eaer.retrieval.embed import Embedder
 from eaer.retrieval.index import IndexDoc, SearchIndex
-from eaer.retrieval.opensearch import OpenSearchIndex
+from eaer.retrieval.opensearch import DEFAULT_ANALYZER, OpenSearchIndex
 from eaer.retrieval.segment import Segmenter
 
 RANK = {"explicit": 2, "inferred": 1, "unknown": 0}
@@ -81,7 +81,7 @@ class Indexer:
 
 
 @contextmanager
-def fresh_index(client: Any, alias: str, *, build_id: str, dims: int, analyzer: str = "smartcn",
+def fresh_index(client: Any, alias: str, *, build_id: str, dims: int, analyzer: str = DEFAULT_ANALYZER,
                 segmenter: Segmenter | None = None) -> Iterator[OpenSearchIndex]:
     """新建一个空索引并挂上别名，用完删除。供评测与对比工具使用；生产的全量重建应先写入、再切换别名（5.3）。"""
     ix = OpenSearchIndex(client, alias=alias, segmenter=segmenter)
@@ -93,7 +93,7 @@ def fresh_index(client: Any, alias: str, *, build_id: str, dims: int, analyzer: 
 
 
 def rebuild(conn: psycopg.Connection, client: Any, alias: str, *, build_id: str, embedder: Embedder,
-            analyzer: str = "smartcn", segmenter: Segmenter | None = None,
+            analyzer: str = DEFAULT_ANALYZER, segmenter: Segmenter | None = None,
             before_switch: Callable[[], None] | None = None,
             clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict:
     """全量重建（开发文档 5.3：更换 Embedding 模型或分词器）。

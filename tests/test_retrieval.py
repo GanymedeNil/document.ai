@@ -176,7 +176,7 @@ def test_mapping_has_the_fields_of_section_5_1():
     assert set(props) == {"evidence_id", "version_id", "document_id", "tenant_id", "principals", "doc_type",
                           "modality", "text", "embedding", "approved_at", "valid_from", "valid_to",
                           "valid_grade", "doc_date", "index_build_id"}
-    assert props["embedding"]["dimension"] == 256 and props["text"]["analyzer"] == "smartcn"
+    assert props["embedding"]["dimension"] == 256 and props["text"]["analyzer"] == "standard"     # AC-5-4 选定
 
 
 def test_opensearch_writes_and_alias_switch():
