@@ -203,6 +203,8 @@ class Engine:
                 escalations.append("转入 Verified：" + "、".join(signals))
             rounds += self._verify(scope, question, claims, hits, meta, target, today, tb, vt)
         text, abstained = s.assemble(claims, draft)
+        if deep is not None and deep.unresolved and not abstained:
+            notices.append("以下要点没有找到证据，回答未涉及：" + "；".join(deep.unresolved))
         if not hits and draft is None:
             text = ABSTAIN
         if notices and not abstained:

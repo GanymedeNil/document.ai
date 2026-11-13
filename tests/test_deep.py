@@ -187,15 +187,28 @@ def never_closes():
                                  {"closed": False, "next_query": f"补充规定{next(n)}", "missing": "没有找到所需的标准"})
 
 
+CANNOT = lambda p: {"abstain": True, "missing": "证据中没有三线城市的标准", "claims": []}  # noqa: E731
+
+
 def test_unsatisfiable_multihop_stays_within_the_deep_budget(deep):
-    m = Scripted(compare_draft, deep=never_closes())
+    """预算用尽仍未闭合：照常生成（8.3），仍缺的要点交给生成步骤；核心答不了即拒答（8.2）。"""
+    m = Scripted(CANNOT, deep=never_closes())
     r = deep.make(m).ask(SCOPE, "三线城市住宿标准是多少", today=TODAY, mode_hint="deep")
     assert r.retrieval_rounds == 3 and deep.search_calls["n"] == 3 and r.abstained
-    assert "没有找到所需的标准" in r.answer and "draft" not in m.calls
+    assert "证据中没有三线城市的标准" in r.answer and m.calls.count("draft") == 1
+    assert "以下要点仍没有找到证据：没有找到所需的标准" in m.prompts[-1] and r.plan["unresolved"]
     deep.search_calls["n"] = 0
-    r = deep.make(Scripted(compare_draft, deep=never_closes()), budgets={"deep_rounds": 2}).ask(
+    r = deep.make(Scripted(CANNOT, deep=never_closes()), budgets={"deep_rounds": 2}).ask(
         SCOPE, "三线城市住宿标准是多少", today=TODAY, mode_hint="deep")
     assert r.retrieval_rounds == 2 and deep.search_calls["n"] == 2 and r.abstained
+
+
+def test_unresolved_points_are_reported_when_the_core_is_answered(deep):
+    m = Scripted(lambda p: {"abstain": False, "claims": [claim("一线城市住宿上限为每晚700元。", p, "上限为每晚700元")]},
+                 deep=never_closes())
+    r = deep.make(m).ask(SCOPE, "一线城市住宿上限和三线城市标准", today=TODAY, mode_hint="deep")
+    assert not r.abstained and "700元" in r.answer and r.retrieval_rounds == 3
+    assert any(n.startswith("以下要点没有找到证据") and "没有找到所需的标准" in n for n in r.notices)
 
 
 # ---------- 因果 ----------
@@ -253,12 +266,12 @@ def test_failed_citation_and_missing_points_escalate_to_deep(deep):
 
 
 def test_unsatisfiable_question_through_deep_stays_within_budget(deep):
-    """AC-8-2：Fast 1 轮 + Deep 补到上限 3 轮（含 Fast 的 1 轮），以拒答结束。"""
+    """AC-8-2：Fast 1 轮 + Deep 补到上限 3 轮（含 Fast 的 1 轮）+ Verified 补检索 1 轮，以拒答结束。"""
     wrong = lambda p: {"abstain": False, "claims": [claim("一线城市住宿上限为每晚999元。", p, "上限为每晚700元")]}  # noqa: E731
     m = Scripted(wrong, deep=never_closes())
     r = deep.make(m).ask(SCOPE, "一线城市住宿上限是多少", today=TODAY)
-    assert r.mode_path[:2] == ["fast", "deep"] and r.abstained and "999" not in r.answer
-    assert r.retrieval_rounds == 3 and deep.search_calls["n"] == 3
+    assert r.mode_path == ["fast", "deep", "verified"] and r.abstained and "999" not in r.answer
+    assert r.retrieval_rounds == 4 and deep.search_calls["n"] == 4
 
 
 # ---------- 12.1：Deep 的能力要求 ----------

@@ -15,7 +15,11 @@
 授权范围执行；授权范围不进入模型上下文。每次动作记入 actions（8.4 的 history）。
 预算（8.5）：检索轮数上限 3（budgets.deep_rounds）。一轮是计划中的一步，一步之内可以对每个比较对象各检索一次；
 从 Fast 升级来的，Fast 已用的 1 轮计入。取版本是数据库查询，不计轮数。
-缺口检查后预算用尽仍有缺口的，不再生成，直接拒答并说明缺少什么（8.2）。
+缺口检查后预算用尽仍有缺口（8.2 拒答）分两种：
+- 结构性缺口：比较对象或现象一条证据都没有，无从生成，直接拒答并说明缺少什么；
+- 多跳中模型判断尚未闭合的要点：照常生成（8.3 再规划之后是“生成”），把仍缺的要点告诉生成步骤，
+  证据能支持的部分照常回答、核心答不了则拒答；回答时在 notices 中列出没有找到证据的要点。
+证据之间说法不一致、证据的有效期未知，都不算缺口：前者转 Verified 并如实说明各自说法，后者按“未验证”处理。
 """
 from __future__ import annotations
 
@@ -111,6 +115,7 @@ class DeepOutcome:
     meta: dict
     system_t: datetime | None
     max_evidence: int = 20
+    unresolved: list[str] = field(default_factory=list)   # 多跳预算用尽时仍没有证据的要点（交给生成步骤）
 
     @property
     def hits(self) -> list[Hit]:
@@ -131,6 +136,7 @@ class DeepOutcome:
 
     def trace(self) -> dict:
         return {"template": self.template, "reason": self.reason, "rounds": self.rounds, "gaps": self.gaps,
+                "unresolved": self.unresolved,
                 "groups": [{"label": g.label, "query": g.query, "on": g.on and g.on.isoformat(),
                             "evidence_ids": [h.evidence_id for h in g.hits]} for g in self.groups],
                 "actions": [asdict(a) for a in self.actions]}
@@ -145,6 +151,7 @@ class _Ctx:
     target: Target
     rounds: int
     actions: list[Action] = field(default_factory=list)
+    unresolved: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -271,11 +278,14 @@ class DeepRunner:
         else:
             groups, gaps, header = self._multihop(ctx, seed, seed_missing)
         out = DeepOutcome(tpl, reason, groups, gaps, ctx.rounds, ctx.actions, Draft([], True, None, [], "", Usage(0, 0)),
-                          {}, target.system_t, self.max_evidence)
+                          {}, target.system_t, self.max_evidence, ctx.unresolved)
         out.meta = self.steps.meta(out.hits, target.system_t)
-        if gaps:                                       # 预算用尽仍有缺口：不生成，拒答并说明缺少什么（8.2）
+        if gaps:                                       # 结构性缺口：无从生成，拒答并说明缺少什么（8.2）
             out.draft = Draft([], True, "；".join(gaps), [], self._model_name(), Usage(0, 0))
         else:
+            if ctx.unresolved:
+                header += (("\n" if header else "") + "检索预算已用尽，以下要点仍没有找到证据：" + "；".join(ctx.unresolved) +
+                           "。只回答证据能支持的部分；问题的核心无法由证据回答时 abstain=true，并在 missing 中说明缺少什么。")
             out.draft = self._generate(ctx, tpl, groups, out.meta, header, out.hits)
         return out
 
@@ -317,10 +327,12 @@ class DeepRunner:
             p = self._ask([Message("system", PLAN_SYSTEM), Message("user",
                 f"问题：{ctx.question}\n以下各项还没有找到证据：\n{lines}\n为每一项换一个检索词（同义词、更具体或更概括的说法），"
                 "label 照抄上面的名称。")], REPLAN_SCHEMA)
-            new = {q.get("label"): (q.get("query") or "").strip() for q in p.get("queries", [])}
+            given = [(q.get("label"), (q.get("query") or "").strip()) for q in p.get("queries", [])]
+            new = dict(given)
             changed = False
-            for g in empty:
-                q = new.get(g.label)
+            for i, g in enumerate(empty):
+                # 模型改写了名称时，条数对得上就按顺序对应
+                q = new.get(g.label) or (given[i][1] if len(given) == len(empty) else "")
                 if q and q not in tried[g.label]:
                     g.query = q
                     tried[g.label].append(q)
@@ -395,7 +407,8 @@ class DeepRunner:
             missing = (hop.get("missing") or "").strip() or missing
             nq = (hop.get("next_query") or "").strip()
             if not nq or nq in used or not self._budget(ctx):
-                return groups, [missing or "问题中的部分要点没有找到证据"], ""
+                ctx.unresolved.append(missing or "问题中的部分要点")
+                return groups, [], ""
             ctx.rounds += 1
             label = f"第 {len(groups) + 1} 跳"
             groups.append(Group(label, self._search(ctx, nq, label)[: self.per_group], nq))
@@ -407,7 +420,9 @@ class DeepRunner:
         return self._ask([Message("system", PLAN_SYSTEM), Message("user",
             f"问题：{ctx.question}\n已用检索词：{'、'.join(used)}\n" + (f"上一步说明还缺：{missing}\n" if missing else "") +
             f"已检索到的证据：\n{ev or '（无）'}\n\n如果这些证据已经足以回答问题，closed=true；否则 closed=false，"
-            "并基于已查到的内容（例如查到的名称、编号、文件名）给出下一跳的检索词 next_query，在 missing 中说明还缺什么。")],
+            "并基于已查到的内容（例如查到的名称、编号、文件名）给出下一跳的检索词 next_query，在 missing 中说明还缺什么。\n"
+            "注意：不同证据说法不一致、或某条证据的生效日期未知，都不算缺少——回答时如实说明即可，不要为了判断哪份文件优先"
+            "而继续检索。只有回答问题必需的信息在证据中完全没有出现时，才 closed=false。")],
             HOP_SCHEMA)
 
     # ---------- 因果 ----------
