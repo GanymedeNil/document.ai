@@ -13,56 +13,19 @@
       设置 EAER_DISABLE_QUERY=1，提问接口返回 503。
   EAER_DEEP_ENABLED   默认 1；设为 0 关闭 Deep（准入检查未通过时，开发文档 12.3），需要 Deep 的问题由 Fast 回答并说明。
       模型没有结构化输出或上下文长度低于 thresholds.deep_min_context_tokens 时 Deep 自动关闭（12.1）。
+  EAER_QUERY_THREADS  同时执行的提问数，默认 8。提问超过同步时限（budgets.sync_seconds，默认 30 秒）转为后台任务，
+      由后台任务进程（python -m eaer.ingestion）接着执行，它需要与本进程相同的查询配置（见 eaer/runtime.py）。
 """
-import json
 import os
+import socket
 
-from eaer.adapters.authorizer import LocalAuthorizer
-from eaer.api.app import Identity, TokenAuthenticator, create_app
+from eaer.api.app import TokenAuthenticator, create_app
+from eaer.runtime import authorizer_factory, engine_factory, load_tokens
 from eaer.storage import LocalFileStore
 
-
-def _load(path: str) -> tuple[dict[str, Identity], dict[str, dict]]:
-    with open(path, encoding="utf-8") as f:
-        raw = json.load(f)
-    tokens = {t: Identity(v["user"], v["tenant"], frozenset(v["roles"])) for t, v in raw.items()}
-    accounts = {v["user"]: {"tenant": v["tenant"], "principals": v["principals"]}
-                for v in raw.values() if v.get("principals")}
-    return tokens, accounts
-
-
-def _engine_factory():
-    """按部署环境变量构造查询编排器；缺配置直接报错。"""
-    if os.environ.get("EAER_DISABLE_QUERY") == "1":
-        return None
-    from eaer.adapters.online import OnlineModelClient
-    from eaer.ingestion.__main__ import segmenter_for
-    from eaer.orchestrator.engine import Engine
-    from eaer.retrieval.opensearch import OpenSearchIndex, connect
-    from eaer.retrieval.service import Retriever
-
-    model = OnlineModelClient.from_env()
-    missing = model.missing_for_fast()
-    if missing or not os.environ.get("EAER_OPENSEARCH_URL"):
-        raise RuntimeError("提问接口缺少配置：" + "、".join(missing + ([] if os.environ.get("EAER_OPENSEARCH_URL")
-                                                                     else ["EAER_OPENSEARCH_URL"]))
-                           + "。只开放上传与审核时设置 EAER_DISABLE_QUERY=1")
-    client = connect(os.environ["EAER_OPENSEARCH_URL"])
-    alias = os.environ.get("EAER_INDEX_ALIAS", "eaer")
-    seg = segmenter_for(os.environ.get("EAER_TEXT_ANALYZER", "smartcn"))
-    embedder = model.embedder()
-    deep_enabled = os.environ.get("EAER_DEEP_ENABLED", "1") != "0"     # 准入检查（12.3）未通过时设为 0
-
-    def make(conn, tenant_id):
-        row = conn.execute("SELECT thresholds, budgets FROM tenant_config WHERE tenant_id = %s", (tenant_id,)).fetchone()
-        retriever = Retriever(conn, OpenSearchIndex(client, alias=alias, segmenter=seg), embedder, model)
-        return Engine(conn, retriever, model, LocalAuthorizer(conn, _accounts), store=_store,
-                      thresholds=row["thresholds"] if row else None, budgets=row["budgets"] if row else None,
-                      deep_enabled=deep_enabled)
-    return make
-
-
-_tokens, _accounts = _load(os.environ["EAER_TOKENS_FILE"])
+_tokens, _accounts = load_tokens(os.environ["EAER_TOKENS_FILE"])
 _store = LocalFileStore(os.environ["EAER_STORAGE_DIR"])
 app = create_app(os.environ["EAER_DATABASE_URL"], _store, TokenAuthenticator(_tokens),
-                 authorizer=lambda conn: LocalAuthorizer(conn, _accounts), engine=_engine_factory())
+                 authorizer=authorizer_factory(_accounts), engine=engine_factory(dict(os.environ), _accounts, _store),
+                 query_threads=int(os.environ.get("EAER_QUERY_THREADS", "8")),
+                 owner=f"{socket.gethostname()}:{os.getpid()}")

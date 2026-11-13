@@ -52,3 +52,18 @@ def test_worker_requires_an_index_with_the_same_text_analysis(conn, tmp_path):
         assert w.handlers["publish_index"].__self__.build_id == "b7"
         with pytest.raises(ConfigError, match="分词方式"):
             build_worker(conn, LocalFileStore(tmp_path), {**env, "EAER_TEXT_ANALYZER": "jieba"})
+
+
+# ---------- 后台执行提问（8.5）：与接口进程相同的查询配置 ----------
+
+def test_query_runner_config(tmp_path):
+    from eaer.runtime import query_runner
+
+    base = {"EAER_DATABASE_URL": "postgresql://x/y"}
+    assert query_runner({**base, "EAER_DISABLE_QUERY": "1"}, LocalFileStore(tmp_path)) is None
+    with pytest.raises(ConfigError, match="EAER_TOKENS_FILE"):
+        query_runner(base, LocalFileStore(tmp_path))
+    tokens = tmp_path / "tokens.json"
+    tokens.write_text('{"t": {"user": "a", "tenant": "t1", "roles": [], "principals": ["R"]}}', encoding="utf-8")
+    with pytest.raises(ConfigError, match="提问服务缺少配置"):
+        query_runner({**base, "EAER_TOKENS_FILE": str(tokens)}, LocalFileStore(tmp_path))

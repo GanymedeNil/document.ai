@@ -8,7 +8,9 @@
 """
 
 import json
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from typing import Annotated, Any, Callable, Iterator, Literal, Protocol
 
@@ -80,10 +82,17 @@ class ForcedVerifyRule(BaseModel):
 def create_app(database_url: str, store: FileStore, auth: Authenticator,
                clock: Callable[[], datetime] = utcnow,
                authorizer: Callable[[psycopg.Connection], Authorizer] | None = None,
-               engine: Callable[[psycopg.Connection, str], Any] | None = None) -> FastAPI:
+               engine: Callable[[psycopg.Connection, str], Any] | None = None, *,
+               query_threads: int = 8, owner: str | None = None) -> FastAPI:
     """authorizer：给定数据库连接返回授权接口实例；为 None 时需要文档权限的接口一律 503。
-    engine：给定数据库连接与租户返回查询编排器（orchestrator.engine.Engine）；为 None 时提问接口 503。"""
+    engine：给定数据库连接与租户返回查询编排器（orchestrator.engine.Engine）；为 None 时提问接口 503。
+    query_threads：同时执行的提问数（每个提问在请求线程之外执行，以便超过同步时限时转入后台，8.5）。"""
+    from eaer.orchestrator.tasks import TaskRunner
+
     app = FastAPI(title="EAER", version="0.1.0")
+    runner = TaskRunner(database_url, engine, authorizer, clock=clock,
+                        owner=owner and f"api:{owner}") if engine is not None else None
+    pool = ThreadPoolExecutor(max_workers=query_threads, thread_name_prefix="eaer-query") if engine is not None else None
 
     @app.middleware("http")
     async def request_id(request: Request, call_next):
@@ -229,9 +238,18 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         rows = conn.execute("SELECT DISTINCT tenant_id, user_id FROM query_log WHERE session_id = %s", (sid,)).fetchall()
         return all(r["tenant_id"] == ident.tenant_id and r["user_id"] == ident.user for r in rows)
 
+    def _sid(session_id: str) -> uuid.UUID:
+        try:
+            return uuid.UUID(session_id)
+        except ValueError:
+            raise ApiError(404, "not_found", "会话不存在")
+
     @app.post("/v1/query")
     def query(conn: Conn, ident: Anyone, authz: Authz, body: QueryRequest):
+        """提问（11.2）。在请求线程之外执行，等待同步时限（budgets.sync_seconds）；超时返回 status=running，
+        其余字段为空，任务在当前步骤结束后交给后台任务进程，客户端轮询会话接口（8.5）。"""
         from eaer.adapters.online import ModelCallError
+        from eaer.orchestrator import tasks
         from eaer.orchestrator.engine import QueryResult, log_query
 
         if engine is None:
@@ -240,26 +258,50 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
             raise ApiError(404, "not_found", "会话不存在")
         _, scope = authz
         eng = engine(conn, ident.tenant_id)
-        sid = str(body.session_id or uuid.uuid4())
-        asked = clock()
+        eng.scope = scope
+        sid, qid, asked = body.session_id or uuid.uuid4(), uuid.uuid4(), clock()
+        model_id = getattr(getattr(eng.model, "gen", None), "model", None) or "unknown"
         try:
-            result = eng.ask(scope, body.question, today=asked.date(), as_of_valid=body.as_of_valid,
-                             as_of_system=body.as_of_system, mode_hint=body.mode_hint, session_id=sid)
+            prepared = eng.prepare(body.question, today=asked.date(), as_of_valid=body.as_of_valid,
+                                   as_of_system=body.as_of_system, mode_hint=body.mode_hint)
+        except ModelCallError as e:
+            failed = QueryResult(str(sid), "failed", "fast", ["fast"], {}, {}, None, [], False, [], [], [], 0,
+                                 model_id, eng._build_id())
+            log_query(conn, failed, scope=scope, user_id=ident.user, question=body.question, asked_at=asked,
+                      query_id=qid)
+            raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
+        tasks.create(conn, query_id=qid, session_id=sid, ident=ident, scope=scope, question=body.question,
+                     asked_at=asked, prepared=prepared, model_id=model_id, index_build_id=eng._build_id(),
+                     owner=runner.owner)
+        handoff = threading.Event()
+        future = pool.submit(runner.run, qid, scope=scope, handoff=handoff)
+        try:
+            outcome, result = future.result(timeout=float(eng.budgets["sync_seconds"]))
+        except TimeoutError:
+            handoff.set()                       # 当前步骤结束后交给后台任务进程
+            outcome, result = "running", None
         except AuthorizerUnavailable:
             raise ApiError(503, "authz_unavailable", "授权服务不可用")
         except ModelCallError as e:
-            failed = QueryResult(sid, "failed", "fast", ["fast"], {}, {}, None, [], False, [], [], [], 0,
-                                 getattr(getattr(eng.model, "gen", None), "model", "unknown"), eng._build_id())
-            log_query(conn, failed, scope=scope, user_id=ident.user, question=body.question, asked_at=asked)
             raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
-        log_query(conn, result, scope=scope, user_id=ident.user, question=body.question, asked_at=asked)
-        resp = jsonable_encoder(result.response())
+        if outcome == "completed":
+            resp = jsonable_encoder(result.response())
+        else:                                    # running（含已交给后台）或 cancelled：其余字段为空（11.2）
+            resp = {"session_id": str(sid), "status": "cancelled" if outcome == "cancelled" else "running",
+                    "mode": None, "mode_path": [], "time_basis": None, "answer": None, "claims": [],
+                    "abstained": None, "notices": []}
         if not body.stream:
             return resp
 
         def events():
             def ev(name, data):
                 return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+            if result is None:
+                yield ev("mode", {"mode": prepared["mode_path"][-1]})
+                if resp["status"] == "running":
+                    yield ev("notice", {"text": "超过同步时限，已转为后台执行，请通过会话接口查看进度"})
+                yield ev("done", resp)
+                return
             for m in result.mode_path:
                 yield ev("mode", {"mode": m})
             for n in result.notices:
@@ -274,19 +316,40 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
 
     @app.get("/v1/sessions/{session_id}")
     def session(conn: Conn, ident: Anyone, session_id: str):
-        try:
-            sid = uuid.UUID(session_id)
-        except ValueError:
-            raise ApiError(404, "not_found", "会话不存在")
+        """会话历史、引用记录与进行中查询的进度（11.2）。"""
+        sid = _sid(session_id)
         rows = conn.execute(
-            "SELECT asked_at, question, time_basis, mode, mode_path, status, answer, claims, abstained FROM query_log "
-            "WHERE session_id = %s AND tenant_id = %s AND user_id = %s ORDER BY asked_at", (sid, ident.tenant_id, ident.user)
-        ).fetchall()
+            "SELECT l.id, l.asked_at, l.question, l.time_basis, l.mode, l.mode_path, l.status, l.answer, l.claims, "
+            "l.abstained, t.progress, t.background FROM query_log l LEFT JOIN query_task t ON t.id = l.id "
+            "WHERE l.session_id = %s AND l.tenant_id = %s AND l.user_id = %s ORDER BY l.asked_at",
+            (sid, ident.tenant_id, ident.user)).fetchall()
         if not rows or not _own_session(conn, ident, sid):
             raise ApiError(404, "not_found", "会话不存在")
-        items = [{**r, "claims": [{k: c[k] for k in ("text", "status", "core", "citations")}
-                                  for c in r["claims"] if c["status"] != "unsupported"]} for r in rows]
+        items = []
+        for r in rows:
+            item = {"query_id": str(r["id"]), **{k: r[k] for k in ("asked_at", "question", "time_basis", "mode",
+                                                                     "mode_path", "status", "answer", "abstained")},
+                    "background": bool(r["background"]),
+                    "claims": [{k: c[k] for k in ("text", "status", "core", "citations")}
+                               for c in r["claims"] if c["status"] != "unsupported"]}
+            if r["status"] == "running":
+                item["progress"] = r["progress"]
+            items.append(item)
         return jsonable_encoder({"session_id": str(sid), "items": items})
+
+    @app.post("/v1/sessions/{session_id}/cancel")
+    def cancel_session(conn: Conn, ident: Anyone, session_id: str):
+        """取消会话中进行中的查询（11.2）：排队中的立即取消；执行中的在当前步骤结束后停止（cancelling）。"""
+        from eaer.orchestrator import tasks
+
+        sid = _sid(session_id)
+        if not conn.execute("SELECT 1 FROM query_log WHERE session_id = %s", (sid,)).fetchone() \
+                or not _own_session(conn, ident, sid):
+            raise ApiError(404, "not_found", "会话不存在")
+        items = tasks.cancel(conn, sid, tenant_id=ident.tenant_id, user_id=ident.user, now=clock())
+        if not items:
+            raise ApiError(409, "not_running", "会话中没有进行中的查询")
+        return {"session_id": str(sid), "items": items}
 
     # 强制验证清单：只有读取与追加，不提供删除或修改的路径（AC-11-5）
     @app.get("/v1/config/forced-verify")

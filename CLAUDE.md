@@ -21,14 +21,14 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 
 | 路径 | 内容 |
 | --- | --- |
-| `eaer/db/migrations/` | Alembic 迁移，原生 SQL。12 张表；不变量由触发器、检查约束、部分唯一索引保证 |
+| `eaer/db/migrations/` | Alembic 迁移，原生 SQL。12 张业务表，另有查询任务表 `query_task` 与 LangGraph 的 4 张检查点表（0005，按库的表结构建、不在运行时建表）；不变量由触发器、检查约束、部分唯一索引保证 |
 | `eaer/lifecycle/` | 生命周期服务（唯一能改版本状态的模块）与按系统时间的回溯查询 |
-| `eaer/ingestion/` | 入库第 1–3、6 阶段，解析器接口（原生 Word/HTML 与 Docling），抽取规则，索引任务（`indexer.py`，唯一写索引的地方），后台任务进程 |
+| `eaer/ingestion/` | 入库第 1–3、6 阶段，解析器接口（原生 Word/HTML 与 Docling），抽取规则，索引任务（`indexer.py`，唯一写索引的地方），后台任务进程（也接着执行转入后台的提问） |
 | `eaer/review/` | 审核服务 |
 | `eaer/retrieval/` | 检索引擎接口、OpenSearch 实现与客户端工厂、内存参考实现、应用侧分词（jieba 候选）、对账、检索服务（含 Deep 用的“取版本” `versions`） |
 | `eaer/verifier/` | 验证层（第 9 节）：确定性检查 `deterministic.py`（引用核对、authorized、locator_exists、value_match、time_valid，可按版本指定目标时间）与语义检查 `semantic.py` |
-| `eaer/orchestrator/` | 查询执行（第 8 节）：时间点识别 `timeparse.py`、Router `router.py`、Fast 与共用步骤 `fast.py`、Deep 计划模板 `deep.py`、编排与 Verified `engine.py`、强制验证清单 `forced_verify.py`（内置规则 + 租户追加的规则，只增不减） |
-| `eaer/api/` | FastAPI 对外接口（上传、审核、归档、取消归档、证据、强制验证清单）；文档权限经 `Authorizer`，未配置或不可用时 503 |
+| `eaer/orchestrator/` | 查询执行（第 8 节）：时间点识别 `timeparse.py`、Router `router.py`、Fast 与共用步骤 `fast.py`、Deep 计划模板 `deep.py`、编排与 Verified `engine.py`（LangGraph 图，状态只含 JSON 值，见 `codec.py`）、异步执行 `tasks.py`（同步时限、转后台、进度、取消、租约与检查点恢复）、强制验证清单 `forced_verify.py`（内置规则 + 租户追加的规则，只增不减） |
+| `eaer/api/` | FastAPI 对外接口（提问、会话、取消、上传、审核、归档、取消归档、证据、强制验证清单）；文档权限经 `Authorizer`，未配置或不可用时 503。接口进程与后台任务进程的公共装配在 `eaer/runtime.py` |
 | `eaer/adapters/` | 对接接口（11.3）：数据源（参考实现本地文件夹 + `_acl.yaml`）、授权（参考实现本地账号）、模型（接口、测试替身，以及线上通用客户端 `online.py`：生成、Embedding、重排分别配置，配置见该文件的文档字符串；本地开发的密钥放在未纳入版本控制的 `.env`）；`conformance.py` 是客户实现交付前必跑的一致性套件 |
 | `eaer/domain/` | 证据 id 规则、身份与授权范围（`Identity`、`Scope`） |
 | `eaer/evalload/`、`eaer/evalrun/` | 评测专用的历史日期装载入口与检索评测运行器，只在 `EAER_ENV=eval` 时可用 |
@@ -63,11 +63,11 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 
 | 状态 | 验收项 |
 | --- | --- |
-| 已通过 | AC-3-1，AC-4-1~4-5，AC-5-1、5-2、5-3、5-5，AC-6-2、6-3、6-4（检索层面）、6-5、6-6、6-7、6-8，AC-7-2（检索层面）、7-4、7-5、7-6，AC-8-1~8-5，AC-9-1、9-2，AC-10-1（检索层面）、10-3（检索层面）、10-5、10-6、10-9，AC-11-2、11-3、11-4（三个接口的参考实现均通过；ModelClient 为 DeepSeek 生成 + 本地 Qwen3 Embedding 与重排）、11-5、11-6，AC-12-1、12-5，AC-14-1、14-3 |
+| 已通过 | AC-3-1，AC-4-1~4-5，AC-5-1、5-2、5-3、5-5，AC-6-2、6-3、6-4（检索层面）、6-5、6-6、6-7、6-8，AC-7-2（检索层面）、7-4、7-5、7-6，AC-8-1~8-6，AC-9-1、9-2，AC-10-1（检索层面）、10-3（检索层面）、10-5、10-6、10-9，AC-11-2、11-3、11-4（三个接口的参考实现均通过；ModelClient 为 DeepSeek 生成 + 本地 Qwen3 Embedding 与重排）、11-5、11-6，AC-12-1、12-5，AC-14-1、14-3 |
 | 合成语料上通过，待真实数据 | AC-6-9（分类）、AC-7-7（时间抽取）、AC-14-2 的程序检查部分 |
 | 只有逻辑或流程，未在真实环境验证 | AC-5-4（检索评测流程已有，用的是测试替身）、AC-3-3（CI 已配置，未运行） |
 | 部分完成 | AC-11-1（契约测试只覆盖已有接口，尚无 OpenAPI 文件） |
-| 未开始 | AC-3-2，AC-6-1、6-10，AC-8-6（异步：超时转后台、进度、取消、重启恢复；Deep 与 Verified 的 30 秒同步时限依赖它），第 10 节的缓存隔离（AC-10-4）、提示注入（AC-10-7）、Trace 清理（AC-10-10），第 12–13 节其余（准入检查 AC-12-3、计量对账、部署运维） |
+| 未开始 | AC-3-2，AC-6-1、6-10，第 10 节的缓存隔离（AC-10-4）、提示注入（AC-10-7）、Trace 清理（AC-10-10），第 12–13 节其余（准入检查 AC-12-3、计量对账、部署运维） |
 
 事实表样例上的检索评测：可计分的 12 个查询命中 11 个；3 个拒答类全部正确；越权 0；对账差异 0。未命中的 Q05 是版本差异类，只看检索时取不到旧版本，经编排器由 Deep 的比较模板答对；Q15 图表类需要视觉模型。
 
@@ -82,8 +82,9 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 3. **补齐第 4 周关口中不依赖外部资源的项。** 已于 2026-11-12 完成：AC-3-1（`tests/test_module_boundaries.py`）、AC-6-3（`tests/test_state_machine.py`）、AC-6-4（`tests/test_pending_not_searchable.py`，检索层面）、AC-11-4（`eaer/adapters/conformance.py`）。
 4. **接入 Docling。** 已于 2026-11-12 完成：`eaer/ingestion/docling_parser.py`，覆盖 PDF、扫描件（RapidOCR）、PPTX、XLSX、图片，证据定位带页码；依赖单独锁定在 `requirements-docling.txt`。只在合成样例上验证过，AC-6-1 要求的“每种格式 20 份真实样本”人工核对尚未做。
 5. **模型接口、Fast、Router 与 Verified。** 已完成（2026-11-13）：线上通用客户端、本地 Qwen3 模型服务、Fast、Router（8.1）、Verified（语义检查、定向补检索）、编排器（`eaer/orchestrator/engine.py`）、提问与会话接口、`query_log`。后台任务进程已接上索引任务：需要 `EAER_OPENSEARCH_URL` 与 Embedding 服务，缺少即启动报错（`--no-index` 只做解析）；先用 `python -m eaer.ingestion rebuild --build-id …` 建索引，`drop-retired` 要定时运行。
-6. **Deep 模式。** 已完成（2026-11-13）：`eaer/orchestrator/deep.py` 的比较（版本、时间点、一般对象）、多跳、因果三个计划模板，Fast 的三个信号转入 Deep，检索服务的“取版本”，确定性检查按版本的目标时间，`tests/test_deep.py`。默认开启，`EAER_DEEP_ENABLED=0` 关闭；30 秒同步时限转后台待异步（AC-8-6）实现。
-7. **其余未开始的项。** 异步（AC-8-6）、缓存隔离（AC-10-4）、提示注入（AC-10-7）、准入检查（AC-12-3）、OpenAPI 文件与契约测试（AC-11-1）、扩充评测集后选定分词与模型（AC-5-4）。
+6. **Deep 模式。** 已完成（2026-11-13）：`eaer/orchestrator/deep.py` 的比较（版本、时间点、一般对象）、多跳、因果三个计划模板，Fast 的三个信号转入 Deep，检索服务的“取版本”，确定性检查按版本的目标时间，`tests/test_deep.py`。默认开启，`EAER_DEEP_ENABLED=0` 关闭。
+7. **异步执行。** 已完成（2026-11-13）：编排器改为 LangGraph 图（prepare 之后 first → escalate → verify → assemble），检查点写入 PostgreSQL（迁移 0005）；`eaer/orchestrator/tasks.py` 的同步时限（`budgets.sync_seconds`，初值 30 秒）、转后台、进度、取消、租约与中断恢复；后台任务进程接着执行，需要与接口进程相同的查询配置与 `EAER_TOKENS_FILE`；`tests/test_async.py`。检查点含证据原文，清理随 Trace 保留期（AC-10-10）一起做。
+8. **其余未开始的项。** 缓存隔离（AC-10-4）、提示注入（AC-10-7）、准入检查（AC-12-3）、OpenAPI 文件与契约测试（AC-11-1）、扩充评测集后选定分词与模型（AC-5-4）。
 
 ## 需要用户决定或提供的事项
 

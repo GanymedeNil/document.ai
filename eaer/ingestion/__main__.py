@@ -1,7 +1,7 @@
 """后台任务进程与索引运维入口。
 
-    python -m eaer.ingestion                 后台任务进程：解析、分类与抽取、深度解析、索引任务
-    python -m eaer.ingestion --no-index      只做解析与抽取，不处理索引任务（索引任务留在队列里）
+    python -m eaer.ingestion                 后台任务进程：解析、分类与抽取、深度解析、索引任务，以及转入后台的提问
+    python -m eaer.ingestion --no-index      只做解析与抽取，不处理索引任务与提问（留在队列里）
     python -m eaer.ingestion rebuild --build-id b2   全量重建索引并切换别名（开发文档 5.3）
     python -m eaer.ingestion drop-retired    删除别名不再指向、且超过 24 小时的旧索引（应定时运行）
 
@@ -10,6 +10,8 @@ EAER_OPENSEARCH_URL、EAER_INDEX_ALIAS（默认 eaer）、EAER_TEXT_ANALYZER（s
 默认 smartcn）；Embedding 服务 EAER_EMBED_*（见 eaer/adapters/online.py）。
 处理索引任务时这几项缺一不可：缺少即启动报错，不会让索引任务默默排队（开发文档 12.1“部署时报错”）；
 也不能用测试替身向量化。
+转入后台、或执行者中断的提问（开发文档 8.5）也由本进程接着执行，需要与接口进程相同的查询配置与 EAER_TOKENS_FILE
+（见 eaer/runtime.py）；不开放提问时设置 EAER_DISABLE_QUERY=1。
 """
 from __future__ import annotations
 
@@ -22,18 +24,10 @@ import psycopg
 from psycopg.rows import dict_row
 
 from eaer.ingestion.pipeline import Ingestion, Worker
+from eaer.runtime import ConfigError, query_runner, segmenter_for
 from eaer.storage import LocalFileStore
 
-
-class ConfigError(Exception):
-    pass
-
-
-def segmenter_for(analyzer: str):
-    if analyzer == "jieba":
-        from eaer.retrieval.segment import JiebaSegmenter
-        return JiebaSegmenter(os.environ.get("EAER_JIEBA_USER_DICT") or None)
-    return None
+__all__ = ["ConfigError", "build_worker", "index_parts", "main", "segmenter_for"]
 
 
 def index_parts(env: dict[str, str]):
@@ -97,13 +91,16 @@ def main(argv: list[str] | None = None) -> int:
             print(rebuild(conn, client, alias, build_id=args.build_id, embedder=embedder, analyzer=analyzer,
                           segmenter=seg))
             return 0
-        worker = build_worker(conn, LocalFileStore(env["EAER_STORAGE_DIR"]), env, with_index=not args.no_index)
+        store = LocalFileStore(env["EAER_STORAGE_DIR"])
+        worker = build_worker(conn, store, env, with_index=not args.no_index)
+        runner = None if args.no_index else query_runner(env, store)
     except ConfigError as e:
         print(f"配置错误：{e}", file=sys.stderr)
         return 2
     poll = float(env.get("EAER_POLL_SECONDS", "2"))
     while True:
-        if worker.run_until_idle(limit=1000) == 0:
+        done = worker.run_until_idle(limit=1000) + (runner.run_pending(limit=10) if runner else 0)
+        if done == 0:
             time.sleep(poll)
 
 

@@ -303,8 +303,28 @@ class Engine:
                 "mode_path": mode_path, "escalations": escalations, "notices": notices, "rounds": rounds,
                 "alerts": alerts}
 
+    def _recheck(self, claims: list[ClaimOut]) -> list[str]:
+        """返回前再核对一次所引证据的权限与状态（10.1）：转入后台的提问可能在几分钟后才组装，期间权限可能被撤销、
+        文档可能被归档。核对不通过的证据移除；结论一条证据都不剩时改为 unsupported。返回告警。"""
+        ids = list(dict.fromkeys(x.evidence_id for c in claims if c.status != "unsupported" for x in c.citations))
+        if not ids:
+            return []
+        allowed = dict(zip(ids, self.authorizer.check(self.scope, ids)))
+        alerts = []
+        for c in claims:
+            gone = [x.evidence_id for x in c.citations if c.status != "unsupported" and not allowed[x.evidence_id]]
+            if not gone:
+                continue
+            c.citations = [x for x in c.citations if allowed[x.evidence_id]]
+            c.removed = c.removed + gone
+            alerts += [f"返回前核对未通过（权限或状态已变化），已移除证据 {i}" for i in gone]
+            if not c.citations:
+                c.status = "unsupported"
+        return alerts
+
     def _assemble(self, st: QueryState) -> dict:
         claims, draft = codec.claims_in(st["claims"]), codec.draft_in(st["draft"])
+        alerts = st.get("alerts", []) + self._recheck(claims)
         text, abstained = Steps.assemble(claims, draft)
         notices = list(st["notices"])
         if st.get("unresolved") and not abstained:
@@ -314,7 +334,8 @@ class Engine:
         if notices and not abstained:
             echo = [n for n in notices if n.startswith("按")]
             text = "；".join(echo) + ("。" if echo else "") + text
-        return {"answer": text, "abstained": abstained, "notices": notices}
+        return {"answer": text, "abstained": abstained, "notices": notices, "claims": codec.claims_out(claims),
+                "alerts": alerts}
 
     def _deep_signals(self, hits, claims: list[ClaimOut], draft: Draft | None) -> list[str]:
         out = []

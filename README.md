@@ -15,7 +15,7 @@
 | 文件存储 | `eaer/storage.py`：存储接口与本地实现，集群版换 S3 兼容存储 | — |
 | 入库第 1–3、6 阶段 | `eaer/ingestion/`：接收与去重、文本解析（原生 Word/HTML，Docling 负责 PDF、扫描件、PPTX、XLSX、图片）、分类与时间抽取、表格深度解析、索引任务；后台任务可重试、可续跑 | AC-6-2、AC-6-8、AC-6-9（合成语料）、AC-7-5、AC-7-7（合成语料） |
 | 审核 | `eaer/review/service.py`：任务列表、逐份或批量决定、更正、删除 | AC-6-5 |
-| 查询执行 | `eaer/orchestrator/`：时间点识别、Router、Fast、Deep（比较、多跳、因果三个计划模板）、Verified（语义检查与定向补检索）、编排与 `query_log` | AC-7-6、AC-8-1~8-5、AC-9-2、AC-12-1 |
+| 查询执行 | `eaer/orchestrator/`：时间点识别、Router、Fast、Deep（比较、多跳、因果三个计划模板）、Verified（语义检查与定向补检索）、LangGraph 编排与检查点、异步执行（超时转后台、进度、取消、中断恢复）、`query_log` | AC-7-6、AC-8-1~8-6、AC-9-2、AC-12-1 |
 | 对外接口 | `eaer/api/`：提问（含流式）、会话、上传、审核任务、审核决定、归档、取消归档、证据；参考令牌身份校验，文档权限经授权接口 | AC-11-1 的部分用例、AC-11-2、AC-10-6 |
 | 检索 | `eaer/retrieval/`：引擎接口（OpenSearch 实现与内存参考实现）、对账、混合检索与数据库核对、回溯检索；每次查询固定一个索引视图。全量重建与旧索引清理在 `eaer/ingestion/indexer.py`（`rebuild`、`drop_retired`） | AC-5-1、AC-5-2、AC-5-3、AC-5-5、AC-6-7 |
 | 对接接口 | `eaer/adapters/`：DataSource、Authorizer、ModelClient 三个接口，本地文件夹与本地账号两个参考实现，一致性套件 `conformance.py` | AC-11-4 |
@@ -50,7 +50,7 @@ alembic upgrade head
 python -m modelserver --port 8100 --env-file .env  # 本地 Embedding 与重排服务（Qwen3，可选；也可用线上服务）
 python -m eaer.ingestion rebuild --build-id b1     # 首次部署：建索引并挂上别名
 uvicorn eaer.api.main:app --port 8000              # 接口进程
-python -m eaer.ingestion                           # 后台任务进程（含索引任务；缺配置即报错）
+python -m eaer.ingestion                           # 后台任务进程（含索引任务与转入后台的提问；缺配置即报错）
 python -m eaer.ingestion drop-retired              # 定时运行：删除超过 24 小时的旧索引
 ```
 
@@ -92,5 +92,5 @@ alembic downgrade base    # 回滚
 - **CI 与旧索引的定期清理。** OpenSearch 集成测试（过滤等价、写入与删除、检索评测回放、重建期间持续查询的别名切换）已在本地 OpenSearch 3.9.0 上通过；CI 已配置但还没有运行过。旧索引按 5.3 保留 24 小时，`drop_retired` 需要由部署方定时调用（第 13 节部署尚未实现）。
 - **真实的基线。** 编排器已在线上生成模型与本地 Qwen3 上试跑（16 个查询答对 15 个），但样本太小，不是产品基线；需要扩充评测集（AC-5-4、AC-8-9）。
 - **图表深度解析。** 需要视觉模型；目前表格已解析，图表类事实在评测中单列为“需视觉模型”。
-- **异步执行。** Deep 与 Verified 的 30 秒同步时限、超时转后台、进度查询、取消与重启恢复（AC-8-6）。
+- **检查点与 Trace 的清理。** 会话检查点含证据原文，按租户的 Trace 保留期清理（AC-10-10）尚未实现。
 - **分类的模型兜底。** 规则判断不了时目前留给审核人确认。
