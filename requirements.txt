@@ -14,6 +14,14 @@ python-docx==1.2.0
 matplotlib==3.11.2
 pytest==9.2.0
 httpx2==2.16.0
+# OpenAPI 文件（eaer/api/openapi.yaml）：接口进程读取它，契约测试按它的 JSON Schema 校验请求与响应（AC-11-1）；
+# jsonschema 的传递依赖一并锁定，版本与 requirements-docling.txt 相同
+PyYAML==6.0.3
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.9.1
+attrs==26.1.0
 # 查询状态机与会话检查点（开发文档 8.4、8.5）；其下更新频繁的传递依赖一并锁定，避免装到发布不满 14 天的版本
 langgraph==1.2.18
 langgraph-checkpoint==4.3.1

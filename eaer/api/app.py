@@ -1,5 +1,8 @@
 """对外接口：提问、会话、上传、审核、归档、取消归档、证据、强制验证清单（开发文档 11.1、11.2）。
 
+接口的唯一定义是同目录的 openapi.yaml，/openapi.json 与 /docs 展示的就是它；实现与它的一致性由契约测试
+tests/test_contract.py 检查（AC-11-1）。改接口时先改 openapi.yaml。
+
 注意：本模块不能使用 from __future__ import annotations，FastAPI 需要在运行时解析依赖注解。
 
 身份校验（Authenticator）的参考实现是配置好的令牌表，客户现场换成 SSO 时只换它。
@@ -7,14 +10,17 @@
 错误一律返回 {"code", "message", "request_id"}；无权访问与不存在不区分，都返回 404。
 """
 
+import functools
 import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
+from pathlib import Path
 from typing import Annotated, Any, Callable, Iterator, Literal, Protocol
 
 import psycopg
+import yaml
 from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -33,6 +39,14 @@ from eaer.review.service import Review
 from eaer.storage import FileStore
 
 MAX_DECISIONS = 1000
+OPENAPI_FILE = Path(__file__).with_name("openapi.yaml")
+
+
+@functools.cache
+def openapi_spec() -> dict:
+    """对外接口的定义（openapi.yaml）。"""
+    with OPENAPI_FILE.open(encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 
 class Authenticator(Protocol):
@@ -54,10 +68,33 @@ class ApiError(Exception):
         self.status, self.code, self.message = status, code, message
 
 
+Grade = Literal["explicit", "inferred", "unknown"]
+
+
+class DatedValue(BaseModel):
+    value: date
+    grade: Grade = "explicit"
+
+
+class RelationInput(BaseModel):
+    relation: Literal["supersedes", "conflicts", "references"] = "supersedes"
+    to_document_id: uuid.UUID
+    to_version_no: int = Field(ge=1)
+
+
+class Corrections(BaseModel):
+    """审核人的更正（6.3）。字段不给与给 null 含义不同（null 表示清除），转交审核服务时只带出现过的字段。
+    doc_type 不能为 null：类型类注解里不含 None，默认值不经校验，所以“不给”可以、显式 null 被拒绝。"""
+    doc_type: Literal["normative", "record"] = None
+    valid_from: DatedValue | None = None
+    valid_to: DatedValue | None = None
+    relations: list[RelationInput] | None = None
+
+
 class Decision(BaseModel):
     task_id: str
     decision: Literal["approve", "delete"]
-    corrections: dict[str, Any] | None = None
+    corrections: Corrections | None = None
 
 
 class Decisions(BaseModel):
@@ -89,7 +126,9 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
     query_threads：同时执行的提问数（每个提问在请求线程之外执行，以便超过同步时限时转入后台，8.5）。"""
     from eaer.orchestrator.tasks import TaskRunner
 
-    app = FastAPI(title="EAER", version="0.1.0")
+    spec = openapi_spec()
+    app = FastAPI(title=spec["info"]["title"], version=spec["info"]["version"])
+    app.openapi = openapi_spec                # /openapi.json 与 /docs 展示 openapi.yaml，而不是由代码推出的定义
     runner = TaskRunner(database_url, engine, authorizer, clock=clock,
                         owner=owner and f"api:{owner}") if engine is not None else None
     pool = ThreadPoolExecutor(max_workers=query_threads, thread_name_prefix="eaer-query") if engine is not None else None
@@ -216,7 +255,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
     @app.post("/v1/review/decisions")
     def review_decisions(conn: Conn, ident: Reviewer, body: Decisions):
         results = Review(conn, Lifecycle(conn, clock), store).decide(
-            ident.tenant_id, [d.model_dump() for d in body.decisions], ident.user)
+            ident.tenant_id, [d.model_dump(mode="json", exclude_unset=True) for d in body.decisions], ident.user)
         return {"results": results}
 
     @app.post("/v1/documents/{document_id}/archive")

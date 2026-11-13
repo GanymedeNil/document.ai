@@ -18,6 +18,7 @@ anyio==4.15.1
     #   starlette
 attrs==26.1.0
     # via
+    #   -r requirements.txt
     #   jsonschema
     #   referencing
 beautifulsoup4==4.15.0
@@ -148,9 +149,13 @@ jsonpointer==3.6
 jsonref==1.1.0
     # via docling-core
 jsonschema==4.26.0
-    # via docling-core
+    # via
+    #   -r requirements.txt
+    #   docling-core
 jsonschema-specifications==2025.9.1
-    # via jsonschema
+    # via
+    #   -r requirements.txt
+    #   jsonschema
 kiwisolver==1.5.1
     # via matplotlib
 langchain-core==1.7.3
@@ -399,6 +404,7 @@ pywin32==312 ; sys_platform == 'win32'
     #   mpire
 pyyaml==6.0.3
     # via
+    #   -r requirements.txt
     #   accelerate
     #   docling-core
     #   huggingface-hub
@@ -410,6 +416,7 @@ rapidocr==3.10.0
     # via docling-slim
 referencing==0.37.0
     # via
+    #   -r requirements.txt
     #   jsonschema
     #   jsonschema-specifications
 regex==2026.9.29
@@ -430,6 +437,7 @@ rich==15.0.0
     #   typer
 rpds-py==2026.9.1
     # via
+    #   -r requirements.txt
     #   jsonschema
     #   referencing
 rtree==1.4.1

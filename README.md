@@ -16,7 +16,7 @@
 | 入库第 1–3、6 阶段 | `eaer/ingestion/`：接收与去重、文本解析（原生 Word/HTML，Docling 负责 PDF、扫描件、PPTX、XLSX、图片）、分类与时间抽取、表格深度解析、索引任务；后台任务可重试、可续跑 | AC-6-2、AC-6-8、AC-6-9（合成语料）、AC-7-5、AC-7-7（合成语料） |
 | 审核 | `eaer/review/service.py`：任务列表、逐份或批量决定、更正、删除 | AC-6-5 |
 | 查询执行 | `eaer/orchestrator/`：时间点识别、Router、Fast、Deep（比较、多跳、因果三个计划模板）、Verified（语义检查与定向补检索）、LangGraph 编排与检查点、异步执行（超时转后台、进度、取消、中断恢复）、回答缓存（按租户与授权范围隔离）、Trace 清理、`query_log` | AC-7-6、AC-8-1~8-6、AC-9-2、AC-10-4、AC-10-10、AC-12-1 |
-| 对外接口 | `eaer/api/`：提问（含流式）、会话、上传、审核任务、审核决定、归档、取消归档、证据；参考令牌身份校验，文档权限经授权接口 | AC-11-1 的部分用例、AC-11-2、AC-10-6 |
+| 对外接口 | `eaer/api/`：提问（含流式）、会话、取消、上传、审核任务、审核决定、归档、取消归档、证据、强制验证清单；接口定义 `eaer/api/openapi.yaml`（OpenAPI 3.1，接口进程的 `/openapi.json`、`/docs`）；参考令牌身份校验，文档权限经授权接口 | AC-11-1（契约测试 `tests/test_contract.py`）、AC-11-2、AC-10-6 |
 | 检索 | `eaer/retrieval/`：引擎接口（OpenSearch 实现与内存参考实现）、对账、混合检索与数据库核对、回溯检索；每次查询固定一个索引视图。全量重建与旧索引清理在 `eaer/ingestion/indexer.py`（`rebuild`、`drop_retired`） | AC-5-1、AC-5-2、AC-5-3、AC-5-5、AC-6-7 |
 | 对接接口 | `eaer/adapters/`：DataSource、Authorizer、ModelClient 三个接口，本地文件夹与本地账号两个参考实现，一致性套件 `conformance.py` | AC-11-4 |
 | 准入检查 | `eaer/evalrun/admission.py`：验证器误通过率与误拒率、Deep 正确率、能力矩阵；`eaer/orchestrator/admission.py`：按准入结论开关 Verified 与 Deep | AC-12-3、AC-12-6 |

@@ -28,7 +28,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 | `eaer/retrieval/` | 检索引擎接口、OpenSearch 实现与客户端工厂、内存参考实现、应用侧分词（jieba 候选）；默认分词方式 `DEFAULT_ANALYZER = "standard"`（`opensearch.py`，`EAER_TEXT_ANALYZER` 可改，改了要重建索引）、对账、检索服务（含 Deep 用的“取版本” `versions`） |
 | `eaer/verifier/` | 验证层（第 9 节）：确定性检查 `deterministic.py`（引用核对、authorized、locator_exists、value_match、time_valid，可按版本指定目标时间）与语义检查 `semantic.py` |
 | `eaer/orchestrator/` | 查询执行（第 8 节）：时间点识别 `timeparse.py`、Router `router.py`、Fast 与共用步骤 `fast.py`、Deep 计划模板 `deep.py`、编排与 Verified `engine.py`（LangGraph 图，状态只含 JSON 值，见 `codec.py`）、异步执行 `tasks.py`（同步时限、转后台、进度、取消、租约与检查点恢复、Trace 清理 `purge`）、回答缓存 `cache.py`、准入结论与模式开关 `admission.py`、强制验证清单 `forced_verify.py`（内置规则 + 租户追加的规则，只增不减） |
-| `eaer/api/` | FastAPI 对外接口（提问、会话、取消、上传、审核、归档、取消归档、证据、强制验证清单）；文档权限经 `Authorizer`，未配置或不可用时 503。接口进程与后台任务进程的公共装配在 `eaer/runtime.py` |
+| `eaer/api/` | FastAPI 对外接口（提问、会话、取消、上传、审核、归档、取消归档、证据、强制验证清单）；接口的唯一定义是 `openapi.yaml`（OpenAPI 3.1，`/openapi.json` 展示的就是它，改接口先改它，契约测试 `tests/test_contract.py`）；文档权限经 `Authorizer`，未配置或不可用时 503。接口进程与后台任务进程的公共装配在 `eaer/runtime.py` |
 | `eaer/adapters/` | 对接接口（11.3）：数据源（参考实现本地文件夹 + `_acl.yaml`）、授权（参考实现本地账号）、模型（接口、测试替身，以及线上通用客户端 `online.py`：生成、Embedding、重排分别配置，配置见该文件的文档字符串；本地开发的密钥放在未纳入版本控制的 `.env`）；`conformance.py` 是客户实现交付前必跑的一致性套件 |
 | `eaer/domain/` | 证据 id 规则、身份与授权范围（`Identity`、`Scope`）、提示注入防护（`injection.py`：证据区隔离与指令型文字识别） |
 | `eaer/evalload/`、`eaer/evalrun/` | 评测专用的历史日期装载入口与评测运行器（检索、Fast 与编排器试跑、分词对比、提示注入、准入检查与能力矩阵 `admission.py`），只在 `EAER_ENV=eval` 时可用 |
@@ -63,10 +63,10 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 
 | 状态 | 验收项 |
 | --- | --- |
-| 已通过 | AC-3-1，AC-4-1~4-5，AC-5-1、5-2、5-3、5-5，AC-6-2、6-3、6-4（检索层面）、6-5、6-6、6-7、6-8，AC-7-2（检索层面）、7-4、7-5、7-6，AC-8-1~8-6，AC-9-1、9-2，AC-10-1（检索层面）、10-3（检索层面）、10-4、10-5、10-6、10-7（越权 0；带偏比例为指标，待基线）、10-9、10-10，AC-11-2、11-3、11-4（三个接口的参考实现均通过；ModelClient 为 DeepSeek 生成 + 本地 Qwen3 Embedding 与重排）、11-5、11-6，AC-12-1、12-3、12-5、12-6（线上模型一档，样例上），AC-14-1、14-3 |
+| 已通过 | AC-3-1，AC-4-1~4-5，AC-5-1、5-2、5-3、5-5，AC-6-2、6-3、6-4（检索层面）、6-5、6-6、6-7、6-8，AC-7-2（检索层面）、7-4、7-5、7-6，AC-8-1~8-6，AC-9-1、9-2，AC-10-1（检索层面）、10-3（检索层面）、10-4、10-5、10-6、10-7（越权 0；带偏比例为指标，待基线）、10-9、10-10，AC-11-1（契约测试：11 个操作的每个声明状态码）、11-2、11-3、11-4（三个接口的参考实现均通过；ModelClient 为 DeepSeek 生成 + 本地 Qwen3 Embedding 与重排）、11-5、11-6，AC-12-1、12-3、12-5、12-6（线上模型一档，样例上），AC-14-1、14-3 |
 | 合成语料上通过，待真实数据 | AC-6-9（分类）、AC-7-7（时间抽取）、AC-14-2 的程序检查部分（合成集 v2 全部通过，人工抽检待做） |
 | 只有逻辑或流程，未在真实环境验证 | AC-3-3（CI 已配置，未运行） |
-| 部分完成 | AC-11-1（契约测试只覆盖已有接口，尚无 OpenAPI 文件）、AC-5-4（分词器已选定 standard；Embedding 与重排模型的规格待选定） |
+| 部分完成 | AC-5-4（分词器已选定 standard；Embedding 与重排模型的规格待选定） |
 | 未开始 | AC-3-2，AC-6-1、6-10，第 12–13 节其余（计量对账 AC-12-4、部署运维） |
 
 事实表样例上的检索评测：可计分的 12 个查询命中 11 个；3 个拒答类全部正确；越权 0；对账差异 0。未命中的 Q05 是版本差异类，只看检索时取不到旧版本，经编排器由 Deep 的比较模板答对；Q15 图表类需要视觉模型。
@@ -92,7 +92,8 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 9. **缓存隔离与 Trace 清理。** 已完成（2026-11-13）：回答缓存（键含租户、授权范围哈希、索引构建编号；数据库触发器在权限、状态、有效期、关系、租户配置变化时清除该租户缓存；命中后仍核对权限）、Trace 清理（已结束任务的检查点与任务行按 trace_retention_days 删除，后台任务进程每小时一次，`python -m eaer.ingestion purge` 手动），`tests/test_cache.py`。OpenTelemetry trace（13.3）未接入。
 10. **准入检查。** 已完成（2026-11-13）：`python -m eaer.evalrun.admission`（验证器评测集由事实表生成、标定与评测分开、误通过率与误拒率门槛；Deep 比较题正确率门槛），结论写入 `model_admission`，部署时据此开关 Verified 与 Deep，没有记录的模型两者关闭（`EAER_ADMISSION=off` 只用于本地开发）。DeepSeek + 本地 Qwen3 在样例上：Verified 误通过 0%、误拒 22%，Deep 10/10，能力矩阵见 `docs/能力矩阵-线上模型.md`。本地跑接口前先用 `--database-url … --tenant …` 写入准入结论。
 11. **扩充评测集。** 已完成（2026-11-13）：`factset/synth.py` 按 14.3 的样本量生成合成集（高风险类别各 300、其他各 100，共 2000 条，30% 标定、70% 测试），v2 约四成查询用改写问法；`docs/评测集/合成集-v2.xlsx` 冻结（测试核对与生成器一致），抽检单 `合成集-v2-抽检单.xlsx`（100 条）待人工核对。评测运行器支持 `--split 测试`、`--per-type N`。
-12. **其余未开始的项。** OpenAPI 文件与契约测试（AC-11-1）、选定 Embedding 与重排模型的规格（AC-5-4）。
+12. **OpenAPI 文件与契约测试（AC-11-1）。** 已完成（2026-11-13）：`eaer/api/openapi.yaml`、`tests/contract.py`（按文件校验请求与响应的检查器）、`tests/test_contract.py`。审核决定的 `corrections` 改为按格式校验（格式错误整个请求 400）。发现但未处理：`GET /v1/review/tasks?status=deleted` 永远为空——删除后审核任务的 version_id 置空，按租户过滤要经版本关联文档，删除的任务因此查不到；修正需要给 review_task 加 tenant_id（新迁移）。429 频率限制未实现。
+13. **其余未开始的项。** 选定 Embedding 与重排模型的规格（AC-5-4）、计量对账（AC-12-4）、部署运维、OpenTelemetry trace（13.3）。
 
 ## 需要用户决定或提供的事项
 
