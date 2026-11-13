@@ -36,7 +36,7 @@ from eaer.retrieval.service import Hit, Retriever, VersionInfo
 from eaer.verifier.deterministic import Target
 
 CAUSAL = re.compile(r"为什么|为何|什么原因|原因是|原因|导致|缘故|由于什么")
-COMPARE = re.compile(r"区别|对比|比较|变化|差异|异同|不同|前后|分别|调整了")
+COMPARE = re.compile(r"区别|对比|比较|变化|差异|异同|不同|前后|分别|调整了|改成|改为|调整为|从[^？?]{0,20}[改调]")
 VERSION = re.compile(r"修订|旧版|新版|新旧|历史版本|之前的版本|上一版|现行版")
 VERSION_NO = re.compile(r"第\s*([0-9一二两三四五六七八九十]+)\s*版")
 REVISION_POINT = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月(?:\s*(\d{1,2})\s*[日号])?[^，,。？?]{0,6}?(?:修订|修改|调整|改版|更新)")

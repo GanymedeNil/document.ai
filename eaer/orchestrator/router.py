@@ -15,8 +15,9 @@ from dataclasses import dataclass
 from eaer.orchestrator.timeparse import TimeBasis
 
 RANK = {"fast": 0, "deep": 1, "verified": 2}
-VERSION = re.compile(r"截至|截止|当时|修订前|修订后|修订前后|旧版|新版|历史版本|之前的版本|第\s*[0-9一二三四五六七八九十]+\s*版")
-COMPARE = re.compile(r"区别|对比|比较|变化|差异|异同|不同|为什么|原因|分别|前后|哪些[^？?]{0,20}的")
+VERSION = re.compile(r"截至|截止|当时|修订|旧版|新版|历史版本|之前的版本|第\s*[0-9一二三四五六七八九十]+\s*版")
+COMPARE = re.compile(r"区别|对比|比较|变化|差异|异同|不同|为什么|原因|分别|前后|改成|改为|调整为|从[^？?]{0,20}[改调]"
+                     r"|哪些[^？?]{0,20}的")
 
 
 @dataclass(frozen=True)

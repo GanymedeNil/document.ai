@@ -358,3 +358,13 @@ def test_version_spec_and_pick_versions():
     assert pick_versions(vs, VersionSpec("numbers", numbers=(1, 4)), TODAY) is None
     assert pick_versions(vs[:1], VersionSpec("latest"), TODAY) is None
     assert topic("2026 年 7 月修订前后，一线城市住宿上限有什么变化？") == "一线城市住宿上限"
+
+
+def test_from_to_wording_is_a_version_comparison():
+    """“最近一次修订把 X 从多少改成了多少”：Router 进 Deep，Deep 选比较模板、按版本比较（合成集 v2 试跑中发现的漏判）。"""
+    from eaer.orchestrator.deep import choose_template
+    from eaer.orchestrator.router import decide
+
+    q = "《员工休假管理办法》最近一次修订把陪产假天数从多少改成了多少？"
+    assert decide(q, parse(q)).mode == "deep" and choose_template(q)[0] == "compare"
+    assert version_spec(q, parse(q), TODAY) == VersionSpec("latest")

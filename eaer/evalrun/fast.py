@@ -63,7 +63,7 @@ def _quantities(text: str):
 def mentions(answer: str, f) -> bool:
     """回答里是否出现了这条事实的取值：数值按规范化后的数量比较，文本取值（如“二等座”）按原文。"""
     if isinstance(f.value, (int, float)):
-        want = next(iter(_quantities(str(f.value))), None)
+        want = next(iter(_quantities(f"{f.value}{f.unit or ''}")), None)    # 带单位：450 万元是 4,500,000，不是 450
         return want is not None and want in _quantities(answer)
     return str(f.value) in answer
 
@@ -121,8 +121,11 @@ def run_engine(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelC
             status, reason = verify_claim(conn, retriever, model, tenant_id, q)
             exp = calc.compute(q)
             want = "supported" if exp.answer == "支持" else "unsupported"      # 标准答案：支持 / 不支持
+            # 依据的版本只有推断或未知的生效日时，验证器按设计给“未验证”（9.2），也算对
+            ok = status == want or (want == "supported" and status == "unverified"
+                                    and exp.grade not in (None, "explicit"))
             return FastResult(q.id, q.type, q.question, exp.answer, f"{status}：{reason}"[:200],
-                              "correct" if status == want else "wrong", False, False, [], 0.0, 0,
+                              "correct" if ok else "wrong", False, False, [], 0.0, 0,
                               expected_mode=q.expected_mode)
         eng = Engine(conn, retriever, model, LocalAuthorizer(conn, {}), store=store)
         try:
