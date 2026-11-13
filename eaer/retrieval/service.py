@@ -6,11 +6,12 @@
 4. 在数据库中核对每条候选的版本状态、权限和有效期，剔除不通过的——覆盖索引更新的延迟窗口；
    回溯查询在这一步把有效期换成回溯时间点当时记录的值；
 5. 有重排模型时重排，取前 top_m 条。
+另有“取版本”（versions）：列出某文档中用户有权查看的可搜索版本，供 Deep 的版本比较与因果模板使用。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Protocol
 
 import psycopg
@@ -33,6 +34,18 @@ class Hit:
     locator: dict
     score: float
     valid_grade: str | None
+
+
+@dataclass(frozen=True)
+class VersionInfo:
+    """取版本（Deep 的版本比较与因果模板用）：一个用户有权查看的可搜索版本及其有效期。"""
+    version_id: str
+    document_id: str
+    title: str
+    version_no: int
+    valid_from: date | None
+    valid_to: date | None
+    approved_at: datetime | None
 
 
 class Reranker(Protocol):
@@ -67,6 +80,30 @@ class Retriever:
             # 重排后 score 改为重排分数（0–1），编排器据此判断“重排后最高分低于阈值”（8.2）
             hits = [replace(h, score=s) for s, h in sorted(zip(scores, hits), key=lambda x: -x[0])]
         return hits[: self.top_m]
+
+    def versions(self, scope: Scope | None, document_id: str, *, as_of_system: date | None = None) -> list[VersionInfo]:
+        """取版本：某文档中用户有权查看的可搜索版本，按版本号排序。
+
+        与检索同样的规则：必须带授权范围；只列 searchable（待审核与已归档的都不列）；授权范围与版本的
+        权限至少有一个交集；回溯查询只列回溯时间点已审核通过的版本，有效期取当时记录的值。
+        """
+        if scope is None or not scope.tenant_id or not scope.principals:
+            raise MissingScope("取版本必须带授权范围")
+        system_t = end_of_day(as_of_system) if as_of_system else None
+        t_cond = ("val.recorded_at <= %(t)s AND (val.replaced_at IS NULL OR val.replaced_at > %(t)s)" if system_t
+                  else "val.replaced_at IS NULL")
+        rows = self.conn.execute(
+            "SELECT v.id, v.version_no, v.approved_at, d.id AS document_id, d.title, val.valid_from, val.valid_to "
+            "FROM document_version v JOIN document d ON d.id = v.document_id "
+            "JOIN acl_policy p ON p.id = v.acl_policy_id "
+            f"LEFT JOIN version_validity val ON val.version_id = v.id AND val.recorded_at IS NOT NULL AND {t_cond} "
+            "WHERE d.id = %(doc)s::uuid AND d.tenant_id = %(tenant)s AND v.status = 'searchable' "
+            "AND p.principals && %(principals)s::text[] "
+            "AND (%(t)s::timestamptz IS NULL OR v.approved_at <= %(t)s) ORDER BY v.version_no",
+            {"doc": document_id, "tenant": scope.tenant_id, "principals": sorted(scope.principals),
+             "t": system_t}).fetchall()
+        return [VersionInfo(str(r["id"]), str(r["document_id"]), r["title"], r["version_no"], r["valid_from"],
+                            r["valid_to"], r["approved_at"]) for r in rows]
 
     def _recheck(self, scope: Scope, fused: list[tuple[str, float]], on: date, system_t: datetime | None) -> list[Hit]:
         if not fused:

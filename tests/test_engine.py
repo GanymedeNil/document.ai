@@ -2,7 +2,7 @@
 
 - AC-8-1（硬性）命中强制验证清单的问题全部经过 Verified；未命中的不经过；
 - AC-8-2（硬性）无法满足的问题：检索轮数不超上限（Fast 1 + 补检索 1），以拒答结束；
-- AC-8-3 8.2 的每个升级信号各一个用例，mode_path 与 escalations 符合预期；
+- AC-8-3 8.2 的每个升级信号各一个用例，mode_path 与 escalations 符合预期（Fast → Deep 开放时的路径见 test_deep.py）；
 - AC-8-4 mode_hint 只升不降；
 - AC-8-5（硬性）unsupported 结论不出现，unverified 有标注；
 - AC-7-6 时间点回显在回答开头，接口参数优先于解析结果；
@@ -32,21 +32,35 @@ def ids_with(prompt: str, needle: str) -> list[str]:
     return [m.group(1) for m in re.finditer(r"\[(ev_[0-9a-f]+)\][^\n]*\n([^\n]*)", prompt) if needle in m.group(2)]
 
 
-class Scripted:
-    """一个模型兼任生成、语义检查与时间解析，按请求的 schema 区分。"""
+DEEP_KINDS = {"field": "plan_compare", "first_hop": "plan_multihop", "phenomenon": "plan_causal",
+              "closed": "hop", "queries": "replan"}
 
-    def __init__(self, draft, judge=None, structured=True):
-        self.draft, self.structured = draft, structured
+
+def deep_default(kind, prompt):
+    return {"hop": {"closed": True}, "replan": {"queries": []}}.get(kind, {})
+
+
+class Scripted:
+    """一个模型兼任生成、语义检查、时间解析与 Deep 的规划，按请求的 schema 区分。
+    deep(kind, prompt)：kind 为 plan_compare / plan_multihop / plan_causal / hop / replan。"""
+
+    def __init__(self, draft, judge=None, structured=True, deep=None, context_tokens=32000):
+        self.draft, self.structured, self.deep, self.context_tokens = draft, structured, deep or deep_default, context_tokens
         self.judge = judge or (lambda claim, prompt: {"verdict": "supported", "confidence": 0.9,
                                                       "supporting_ids": re.findall(r"\[(ev_[0-9a-f]+)\]", prompt)})
-        self.calls = []
+        self.calls, self.prompts = [], []
 
     def capabilities(self):
-        return Capabilities(self.structured, 32000, False, 0)
+        return Capabilities(self.structured, self.context_tokens, False, 0)
 
     def generate(self, messages, schema):
         prompt = "\n".join(m.content for m in messages)
+        self.prompts.append(prompt)
         props = (schema or {}).get("properties", {})
+        kind = next((k for key, k in DEEP_KINDS.items() if key in props), None)
+        if kind:
+            self.calls.append(kind)
+            return Completion("{}", self.deep(kind, prompt), Usage(30, 10), "scripted")
         if "verdict" in props:
             self.calls.append("judge")
             claim = re.search(r"结论：(.*)", prompt).group(1)
@@ -126,9 +140,10 @@ def test_tenant_rule_forces_verified_and_record_question_without_rules_stays_fas
 def test_unsatisfiable_question_stays_within_budget_and_refuses(eng):
     wrong = lambda p: {"abstain": False, "claims": [claim("一线城市住宿上限为每晚999元。", p, "650元")]}  # noqa: E731
     deny = lambda c, p: {"verdict": "unsupported", "confidence": 0.95, "supporting_ids": []}  # noqa: E731
-    r = eng.make(Scripted(wrong, deny)).ask(SCOPE, "一线城市住宿上限是多少", today=date(2026, 11, 11))
+    r = eng.make(Scripted(wrong, deny), deep_enabled=False).ask(SCOPE, "一线城市住宿上限是多少", today=date(2026, 11, 11))
     assert r.abstained and "999" not in r.answer
     assert r.retrieval_rounds == 2 and eng.search_calls["n"] == 2      # 首轮 1 + 补检索 1，不再多
+    # Deep 开放时的同一问题见 test_deep.py::test_unsatisfiable_question_through_deep_stays_within_budget
 
 
 # ---------- AC-8-3：8.2 的每个信号 ----------
@@ -174,19 +189,22 @@ class LowReranker:
 
 
 def test_signals_towards_deep_are_recorded_while_deep_is_not_available(eng):
+    """Deep 关闭（准入未通过）时只记录信号；Deep 开放时的升级见 test_deep.py。"""
     retr = Retriever(eng.conn, eng.index, eng.retriever.embedder, LowReranker())
     missing = lambda p: {"abstain": False, "missing": "没有找到二线城市的标准",  # noqa: E731
                          "claims": [claim("第二季度差旅总费用为128万元。", p, "128万元")]}
-    r = eng.make(Scripted(missing), retriever=retr).ask(SCOPE, "第二季度差旅总费用和二线城市标准", today=date(2026, 11, 11))
+    r = eng.make(Scripted(missing), retriever=retr, deep_enabled=False).ask(
+        SCOPE, "第二季度差旅总费用和二线城市标准", today=date(2026, 11, 11))
     deep = [e for e in r.escalations if e.startswith("应转入 Deep")]
     assert deep and "重排后最高分低于阈值" in deep[0] and "部分要点没有证据覆盖" in deep[0] and "Deep 尚未开放" in deep[0]
     r = eng.make(Scripted(lambda p: {"abstain": False, "claims": [
-        claim("第二季度差旅总费用为130万元。", p, "128万元")]})).ask(SCOPE, "第二季度差旅总费用是多少", today=date(2026, 11, 11))
+        claim("第二季度差旅总费用为130万元。", p, "128万元")]}), deep_enabled=False).ask(
+        SCOPE, "第二季度差旅总费用是多少", today=date(2026, 11, 11))
     assert any("引用检查失败" in e for e in r.escalations)
 
 
 def test_comparison_question_is_routed_to_deep_and_falls_back(eng):
-    r = eng.make(Scripted(ANSWER_650)).ask(SCOPE, "2026 年 7 月修订前后住宿上限有什么变化", today=date(2026, 11, 11))
+    r = eng.make(Scripted(ANSWER_650), deep_enabled=False).ask(SCOPE, "2026 年 7 月修订前后住宿上限有什么变化", today=date(2026, 11, 11))
     assert r.router["decided"] == "deep" and "Deep 尚未开放" in " ".join(r.notices)
     assert r.mode_path == ["fast", "verified"]                      # 版本比较命中强制验证，仍经过 Verified
 
@@ -233,7 +251,8 @@ def test_targeted_retrieval_repairs_a_claim_that_cited_the_wrong_evidence(eng):
         return ({"verdict": "supported", "confidence": 0.95, "supporting_ids": good} if good
                 else {"verdict": "unsupported", "confidence": 0.9, "supporting_ids": []})
 
-    r = eng.make(Scripted(draft, judge)).ask(SCOPE, "一线城市住宿上限是多少", today=date(2026, 11, 11))
+    # Deep 关闭：引用检查失败本应转入 Deep，这里只看 Verified 的定向补检索
+    r = eng.make(Scripted(draft, judge), deep_enabled=False).ask(SCOPE, "一线城市住宿上限是多少", today=date(2026, 11, 11))
     c = r.claims[0]
     assert c.repaired and c.status == "supported" and not r.abstained and r.retrieval_rounds == 2
     assert "650" in eng.conn.execute("SELECT content FROM evidence WHERE id = %s",

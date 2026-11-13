@@ -170,13 +170,15 @@ class Steps:
 
     # ---------- 引用检查 ----------
 
-    def check(self, scope: Scope, claims: list[dict], hits: list[Hit], meta: dict, target: Target) -> list[ClaimOut]:
+    def check(self, scope: Scope, claims: list[dict], hits: list[Hit], meta: dict, target: Target,
+              version_targets: dict[str, Target] | None = None) -> list[ClaimOut]:
+        """version_targets：Deep 比较不同版本或时间点时，各版本按自己的目标时间核对（见 DeterministicChecker）。"""
         by_id = {h.evidence_id: h for h in hits}
         checker = DeterministicChecker(self.conn, self.authorizer, scope, self.store)
         out: list[ClaimOut] = []
         for c in claims:
             ids = list(dict.fromkeys(c["evidence_ids"]))
-            r = checker.check(c["text"], ids, retrieved=set(by_id), target=target)
+            r = checker.check(c["text"], ids, retrieved=set(by_id), target=target, version_targets=version_targets)
             status = "supported" if r.outcome == "pass" else r.outcome
             out.append(ClaimOut(c["text"], status, bool(c.get("core")), self.citations(r.evidence_ids, by_id, meta),
                                 {k: {"outcome": v.outcome, "reason": v.reason} for k, v in r.checks.items()},

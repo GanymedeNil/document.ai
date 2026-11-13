@@ -10,8 +10,8 @@
     EAER_ENV=eval python -m eaer.evalrun.fast 事实表.xlsx --admin-url postgresql://… [--format docx|html]
 
 模型服务按 EAER_GEN_* / EAER_EMBED_* / EAER_RERANK_* 环境变量连接（见 eaer/adapters/online.py）。
-注意：Router、Deep、Verified 尚未实现，期望由 Deep 或 Verified 回答的问题这里也只用 Fast；Embedding 与重排
-服务未配置时，检索的向量一路用测试替身 HashingEmbedder、不重排，结果只说明流程，不能作为产品基线
+不带 --engine 时只用 Fast（期望由 Deep 或 Verified 回答的问题也只用 Fast）；带 --engine 时经完整编排器
+（Router、Deep、Verified）。Embedding 与重排服务未配置时，检索的向量一路用测试替身 HashingEmbedder、不重排，结果只说明流程，不能作为产品基线
 （CLAUDE.md“测试替身的数字不是产品结论”）。索引用内存参考实现，关键词一路是它的单字加二字切分。
 """
 from __future__ import annotations
@@ -106,7 +106,7 @@ def verify_claim(conn, retriever, model, tenant_id: str, q) -> tuple[str, str]:
 
 def run_engine(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelClient, store, index: SearchIndex,
                embedder: Embedder, reranker=None) -> list[FastResult]:
-    """经完整的编排器回答（Router、升级、Verified）；不传时间参数，时间点由编排器从问题中识别（7.5）。"""
+    """经完整的编排器回答（Router、升级、Deep、Verified）；不传时间参数，时间点由编排器从问题中识别（7.5）。"""
     from eaer.orchestrator.engine import Engine
     calc = Calculator(fs)
 
@@ -165,8 +165,7 @@ def report(results: list[FastResult], *, model: str, embedder: str) -> str:
     if engine:
         routed = [r for r in results if r.expected_mode and r.mode_path is not None]
         hit = sum(r.expected_mode.lower() in r.mode_path + [r.router] for r in routed)
-        lines.append(f"模式：预期模式出现在 Router 决定或实际路径中的 {hit} / {len(routed)}"
-                     "（Deep 尚未实现，Router 决定为 Deep 的问题实际由 Fast 回答）")
+        lines.append(f"模式：预期模式出现在 Router 决定或实际路径中的 {hit} / {len(routed)}")
         lines += ["| 查询 | 类型 | 结果 | 预期模式 | Router | 路径 | 未验证标注 | 耗时 | 回答 |",
                   "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     else:
@@ -193,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("xlsx")
     p.add_argument("--admin-url", required=True)
     p.add_argument("--format", choices=["docx", "html"], default="docx")
-    p.add_argument("--engine", action="store_true", help="经完整编排器（Router、升级、Verified）回答")
+    p.add_argument("--engine", action="store_true", help="经完整编排器（Router、升级、Deep、Verified）回答")
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
         print("只在评测环境运行（EAER_ENV=eval）", file=sys.stderr)

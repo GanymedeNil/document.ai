@@ -11,6 +11,8 @@
       生成、Embedding、重排三项模型服务（EAER_GEN_*、EAER_EMBED_*、EAER_RERANK_*，见 eaer/adapters/online.py）。
       缺任何一项都启动报错（开发文档 12.1“Fast 无法运行，部署时报错”）；只想先开放上传与审核时
       设置 EAER_DISABLE_QUERY=1，提问接口返回 503。
+  EAER_DEEP_ENABLED   默认 1；设为 0 关闭 Deep（准入检查未通过时，开发文档 12.3），需要 Deep 的问题由 Fast 回答并说明。
+      模型没有结构化输出或上下文长度低于 thresholds.deep_min_context_tokens 时 Deep 自动关闭（12.1）。
 """
 import json
 import os
@@ -49,12 +51,14 @@ def _engine_factory():
     alias = os.environ.get("EAER_INDEX_ALIAS", "eaer")
     seg = segmenter_for(os.environ.get("EAER_TEXT_ANALYZER", "smartcn"))
     embedder = model.embedder()
+    deep_enabled = os.environ.get("EAER_DEEP_ENABLED", "1") != "0"     # 准入检查（12.3）未通过时设为 0
 
     def make(conn, tenant_id):
         row = conn.execute("SELECT thresholds, budgets FROM tenant_config WHERE tenant_id = %s", (tenant_id,)).fetchone()
         retriever = Retriever(conn, OpenSearchIndex(client, alias=alias, segmenter=seg), embedder, model)
         return Engine(conn, retriever, model, LocalAuthorizer(conn, _accounts), store=_store,
-                      thresholds=row["thresholds"] if row else None, budgets=row["budgets"] if row else None)
+                      thresholds=row["thresholds"] if row else None, budgets=row["budgets"] if row else None,
+                      deep_enabled=deep_enabled)
     return make
 
 

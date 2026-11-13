@@ -236,8 +236,12 @@ class DeterministicChecker:
     def __init__(self, conn: psycopg.Connection, authorizer, scope: Scope, store=None):
         self.conn, self.authorizer, self.scope, self.store = conn, authorizer, scope, store
 
-    def check(self, claim: str, evidence_ids: list[str], *, retrieved: set[str], target: Target | None) -> Result:
+    def check(self, claim: str, evidence_ids: list[str], *, retrieved: set[str], target: Target | None,
+              version_targets: dict[str, Target] | None = None) -> Result:
+        """version_targets：版本 id → 该版本的目标时间。Deep 的版本比较里，“修订前”的结论引用旧版本，
+        要按旧版本有效期内的日期核对 time_valid，而不是按提问日；没有列出的版本用 target。"""
         checks: dict[str, Check] = {}
+        vt = version_targets or {}
         foreign = [i for i in evidence_ids if i not in retrieved]
         if not evidence_ids or foreign:
             reason = "结论没有引用证据" if not evidence_ids else f"引用了本次检索结果以外的证据：{'、'.join(foreign)}"
@@ -261,17 +265,23 @@ class DeterministicChecker:
             locator_exists(rows.get(i), raw_exists=(self.store.exists(rows[i]["raw_object_uri"])
                                                      if self.store is not None and i in rows else None))
             for i in keep])
-        targets = () if target is None else tuple(
-            {target.on} | ({target.system_t.date()} if target.system_t is not None else set()))
-        checks["value_match"] = value_match(claim, [rows[i]["content"] for i in keep if i in rows], targets)
-        checks["time_valid"] = self._time(rows, keep, target)
+        targets: set[date] = set()
+        for t in ([target] if target is not None else []) + [vt[str(rows[i]["version_id"])] for i in keep
+                                                              if i in rows and str(rows[i]["version_id"]) in vt]:
+            targets |= {t.on} | ({t.system_t.date()} if t.system_t is not None else set())
+        checks["value_match"] = value_match(claim, [rows[i]["content"] for i in keep if i in rows], tuple(targets))
+        checks["time_valid"] = self._time(rows, keep, target, vt)
         return Result(worst(list(checks.values())).outcome, checks, keep, removed, alerts)
 
-    def _time(self, rows: dict, keep: list[str], target: Target | None) -> Check:
-        if target is None:
+    def _time(self, rows: dict, keep: list[str], default: Target | None, vt: dict[str, Target]) -> Check:
+        if default is None and not vt:
             return Check("pass", "不涉及目标时间")
         results = []
         for vid in {rows[i]["version_id"] for i in keep if i in rows}:
+            target = vt.get(str(vid), default)
+            if target is None:
+                results.append(Check("pass", "不涉及目标时间"))
+                continue
             r = next(rows[i] for i in keep if i in rows and rows[i]["version_id"] == vid)
             if target.system_t is not None:
                 if r["approved_at"] is None or r["approved_at"] > target.system_t:
