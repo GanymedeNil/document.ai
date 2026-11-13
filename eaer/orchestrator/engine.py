@@ -15,20 +15,29 @@
 6. 组装（8.6）。检索轮数受预算限制（8.5：Fast 1 轮；Deep 3 轮，含转入前 Fast 已用的；Verified 补检索 1 轮），
    用尽仍有缺口则拒答。
 结果写入 query_log（log_query），记录授权决定、模型标识、索引构建编号、成本与 Deep 的计划和动作（10.1 第 8 步、12.2）。
+
+执行结构（8.4）：第 1 步 prepare（时间点与 Router）在任务建立之前完成；其余是 LangGraph 图的四个节点
+first（首轮：Fast 或 Deep 的检索、生成与引用检查）→ escalate（Fast 转入 Deep）→ verify（转入 Verified 与验证）
+→ assemble（组装）。状态只含 JSON 值（codec.py），接上检查点后每个节点之后写入 PostgreSQL，进程重启后从最后一个
+检查点继续（异步执行见 tasks.py）；ask() 不接检查点，同步跑完整张图，供评测与测试使用。
 """
 from __future__ import annotations
 
+import operator
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
+from typing import Annotated, Any, TypedDict
 
 import psycopg
+from langgraph.graph import END, START, StateGraph
 from psycopg.types.json import Jsonb
 
 from eaer.adapters.model import Message, ModelClient
 from eaer.adapters.online import collect_calls, summarize
 from eaer.domain.identity import Scope
+from eaer.orchestrator import codec
 from eaer.orchestrator.deep import DeepOutcome, DeepRunner
 from eaer.orchestrator.fast import ABSTAIN, ClaimOut, Draft, Steps, evidence_block, target_of
 from eaer.orchestrator.forced_verify import Cited, must_verify
@@ -41,7 +50,35 @@ from eaer.verifier.semantic import DEFAULT_MIN_CONFIDENCE, SemanticChecker
 STATUS_RANK = {"supported": 0, "unverified": 1, "unsupported": 2}
 DEFAULT_THRESHOLDS = {"semantic_min_confidence": DEFAULT_MIN_CONFIDENCE, "rerank_min_top": 0.3,
                       "deep_min_context_tokens": 16000}
-DEFAULT_BUDGETS = {"fast_rounds": 1, "deep_rounds": 3, "verified_repair_rounds": 1}
+DEFAULT_BUDGETS = {"fast_rounds": 1, "deep_rounds": 3, "verified_repair_rounds": 1, "sync_seconds": 30}
+NODES = ("first", "escalate", "verify", "assemble")
+NODE_NAMES = {"first": "检索与生成", "escalate": "升级判断", "verify": "验证", "assemble": "组装回答"}
+
+
+class QueryState(TypedDict, total=False):
+    """图的状态（8.4 的 QueryState）。只含 JSON 值；授权范围不在其中，由执行者每次运行时传入。"""
+    request: dict                      # question、today、as_of_valid、as_of_system、mode_hint
+    tb: dict
+    route: dict
+    deep_off: str | None
+    notices: list[str]
+    mode_path: list[str]
+    escalations: list[str]
+    hits: list[dict]
+    meta: dict
+    draft: dict | None
+    claims: list[dict]
+    rounds: int
+    plan: dict | None
+    version_targets: dict
+    unresolved: list[str]
+    forced: list[str]
+    signals: list[str]
+    alerts: list[str]
+    answer: str
+    abstained: bool
+    calls: Annotated[list[dict], operator.add]     # 模型调用记录，跨节点、跨进程累加
+    steps: Annotated[list[dict], operator.add]     # 已完成的步骤与耗时
 
 
 @dataclass
@@ -101,6 +138,7 @@ class Engine:
         self.thresholds = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
         self.budgets = {**DEFAULT_BUDGETS, **(budgets or {})}
         self.deep_enabled = deep_enabled       # 准入检查（12.3）不达标时关闭
+        self.scope: Scope | None = None        # 本次运行的授权范围：由调用方传入，不进入状态与检查点
 
     def deep_unavailable(self) -> str | None:
         """Deep 不可用的原因；可用时返回 None（12.1：需要稳定的结构化输出与足够的上下文长度）。"""
@@ -136,83 +174,147 @@ class Engine:
 
     # ---------- 主流程 ----------
 
-    def ask(self, scope: Scope, question: str, *, today: date, as_of_valid: date | None = None,
-            as_of_system: date | None = None, mode_hint: str | None = None,
-            session_id: str | None = None) -> QueryResult:
-        started = time.monotonic()
+    def prepare(self, question: str, *, today: date, as_of_valid: date | None = None,
+                as_of_system: date | None = None, mode_hint: str | None = None) -> QueryState:
+        """第 1 步：时间点（7.5）与 Router（8.1）。结果是图的输入，也决定提问记录的入口模式。"""
+        t0 = time.monotonic()
         with collect_calls() as calls:
-            r = self._ask(scope, question, today, as_of_valid, as_of_system, mode_hint)
-        r.session_id = session_id or str(uuid.uuid4())
-        r.cost = summarize(calls)
-        r.seconds = round(time.monotonic() - started, 3)
-        return r
-
-    def _ask(self, scope, question, today, as_of_valid, as_of_system, mode_hint) -> QueryResult:
-        s = self.steps
-        tb = resolve(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
-                     resolver=self._resolve_with_model)
-        notices = tb.echo()
+            tb = resolve(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
+                         resolver=self._resolve_with_model)
         route = decide(question, tb, mode_hint)
-        verified_on = self.model.capabilities().structured_output
         deep_off = self.deep_unavailable()
-        on = tb.as_of_valid or tb.as_of_system or today
-        target = target_of(on, tb.as_of_system)
-        escalations: list[str] = []
+        notices = tb.echo()
         start = route.mode
         if start == "deep" and deep_off:
             notices.append(f"这个问题需要 Deep 模式（{route.reason}），{deep_off}，先按 Fast 检索回答")
             start = "fast"
-        mode_path = [start]
-        deep: DeepOutcome | None = None
+        return {"request": {"question": question, "today": today.isoformat(), "as_of_valid": codec.iso(as_of_valid),
+                            "as_of_system": codec.iso(as_of_system), "mode_hint": mode_hint},
+                "tb": tb.to_json(), "route": route.to_json(), "deep_off": deep_off, "notices": notices,
+                "mode_path": [start], "escalations": [], "rounds": 0, "calls": codec.calls_out(calls),
+                "steps": [{"node": "prepare", "seconds": round(time.monotonic() - t0, 3)}]}
 
-        if start == "deep":
-            deep = self._deep().run(scope, question, tb, today=today, target=target)
-            hits, meta, draft, rounds = deep.hits, deep.meta, deep.draft, deep.rounds
-        else:
-            hits = s.retrieve(scope, question, today=today, as_of_valid=tb.as_of_valid, as_of_system=tb.as_of_system)
-            rounds = 1
-            meta = s.meta(hits, target.system_t)
-            draft = s.generate(question, hits, meta, on) if hits else None
-        vt = deep.version_targets if deep else None
-        claims = s.check(scope, draft.claims, hits, meta, target, vt) if draft else []
+    def graph(self, checkpointer=None):
+        """四个节点的图；传入检查点时每个节点之后写入（tasks.py 用 PostgresSaver）。"""
+        g = StateGraph(QueryState)
+        for name in NODES:
+            g.add_node(name, self._node(name, getattr(self, f"_{name}")))
+        g.add_edge(START, NODES[0])
+        for a, b in zip(NODES, NODES[1:]):
+            g.add_edge(a, b)
+        g.add_edge(NODES[-1], END)
+        return g.compile(checkpointer=checkpointer)
 
-        # Fast 检索后判断是否转入 Deep（8.2）
-        deep_signals = self._deep_signals(hits, claims, draft) if mode_path == ["fast"] else []
-        if deep_signals and deep_off is None:
-            mode_path.append("deep")
-            escalations.append("转入 Deep：" + "、".join(deep_signals))
-            deep = self._deep().run(scope, question, tb, today=today, target=target, template="multihop", seed=hits,
-                                    seed_missing=draft.missing if draft else None, rounds_used=rounds)
-            hits, meta, draft, rounds, vt = deep.hits, deep.meta, deep.draft, deep.rounds, deep.version_targets
-            claims = s.check(scope, draft.claims, hits, meta, target, vt)
-        elif deep_signals:
-            escalations.append("应转入 Deep：" + "、".join(deep_signals) + f"（{deep_off}）")
+    def ask(self, scope: Scope, question: str, *, today: date, as_of_valid: date | None = None,
+            as_of_system: date | None = None, mode_hint: str | None = None,
+            session_id: str | None = None) -> QueryResult:
+        """同步跑完整次提问（不接检查点）。"""
+        self.scope = scope
+        st = self.prepare(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
+                          mode_hint=mode_hint)
+        return self.result(self.graph().invoke(st), session_id or str(uuid.uuid4()))
 
-        # Fast 或 Deep 检索后判断是否转入 Verified（8.1、8.2）
-        forced, signals = self._verified_signals(scope, question, tb, claims, draft, meta)
-        need_verified = mode_path[-1] == "verified" or bool(signals)
+    def result(self, st: dict[str, Any], session_id: str, status: str = "completed") -> QueryResult:
+        draft = codec.draft_in(st.get("draft"))
+        escalations = st.get("escalations", [])
+        return QueryResult(
+            session_id, status, st["mode_path"][-1], st["mode_path"], st["route"], st["tb"], st.get("answer"),
+            codec.claims_in(st.get("claims")), bool(st.get("abstained")), st.get("notices", []), st.get("forced", []),
+            escalations, st.get("rounds", 0), draft.model if draft else model_id(self.model), self._build_id(),
+            cost=summarize(codec.calls_in(st.get("calls"))),
+            seconds=round(sum(x["seconds"] for x in st.get("steps", [])), 3), alerts=st.get("alerts", []),
+            signals=st.get("signals", []) + [e for e in escalations if "Deep" in e], plan=st.get("plan"))
+
+    # ---------- 节点 ----------
+
+    def _node(self, name: str, fn):
+        def run(st: QueryState) -> dict:
+            t0 = time.monotonic()
+            with collect_calls() as calls:
+                out = fn(st)
+            return {**out, "calls": codec.calls_out(calls),
+                    "steps": [{"node": name, "seconds": round(time.monotonic() - t0, 3)}]}
+        return run
+
+    def _ctx(self, st: QueryState):
+        req = st["request"]
+        today = date.fromisoformat(req["today"])
+        tb = codec.tb_in(st["tb"])
+        on = tb.as_of_valid or tb.as_of_system or today
+        return req["question"], today, tb, on, target_of(on, tb.as_of_system)
+
+    def _deep_out(self, d: DeepOutcome, target: Target) -> dict:
+        vt = d.version_targets
+        claims = self.steps.check(self.scope, d.draft.claims, d.hits, d.meta, target, vt)
+        return {"hits": codec.hits_out(d.hits), "meta": codec.meta_out(d.meta), "draft": codec.draft_out(d.draft),
+                "claims": codec.claims_out(claims), "rounds": d.rounds, "plan": d.trace(),
+                "version_targets": codec.targets_out(vt), "unresolved": d.unresolved}
+
+    def _first(self, st: QueryState) -> dict:
+        s = self.steps
+        question, today, tb, on, target = self._ctx(st)
+        if st["mode_path"][0] == "deep":
+            return self._deep_out(self._deep().run(self.scope, question, tb, today=today, target=target), target)
+        hits = s.retrieve(self.scope, question, today=today, as_of_valid=tb.as_of_valid, as_of_system=tb.as_of_system)
+        meta = s.meta(hits, target.system_t)
+        draft = s.generate(question, hits, meta, on) if hits else None
+        claims = s.check(self.scope, draft.claims, hits, meta, target) if draft else []
+        return {"hits": codec.hits_out(hits), "meta": codec.meta_out(meta), "draft": codec.draft_out(draft),
+                "claims": codec.claims_out(claims), "rounds": 1, "version_targets": {}, "unresolved": []}
+
+    def _escalate(self, st: QueryState) -> dict:
+        """Fast 检索后判断是否转入 Deep（8.2）。"""
+        if st["mode_path"] != ["fast"]:
+            return {}
+        hits, draft = codec.hits_in(st["hits"]), codec.draft_in(st["draft"])
+        signals = self._deep_signals(hits, codec.claims_in(st["claims"]), draft)
+        if not signals:
+            return {}
+        if st.get("deep_off"):
+            return {"escalations": st["escalations"] + ["应转入 Deep：" + "、".join(signals) + f"（{st['deep_off']}）"]}
+        question, today, tb, _, target = self._ctx(st)
+        d = self._deep().run(self.scope, question, tb, today=today, target=target, template="multihop", seed=hits,
+                             seed_missing=draft.missing if draft else None, rounds_used=st["rounds"])
+        return {**self._deep_out(d, target), "mode_path": st["mode_path"] + ["deep"],
+                "escalations": st["escalations"] + ["转入 Deep：" + "、".join(signals)]}
+
+    def _verify(self, st: QueryState) -> dict:
+        """Fast 或 Deep 检索后判断是否转入 Verified（8.1、8.2），需要时做语义检查与定向补检索（9.3、9.4）。"""
+        question, today, tb, _, target = self._ctx(st)
+        hits, meta, draft = codec.hits_in(st["hits"]), dict(st["meta"]), codec.draft_in(st["draft"])
+        claims = codec.claims_in(st["claims"])
+        vt = codec.targets_in(st.get("version_targets"))
+        forced, signals = self._verified_signals(self.scope, question, tb, claims, draft, meta)
+        mode_path, escalations, notices = list(st["mode_path"]), list(st["escalations"]), list(st["notices"])
+        rounds = st["rounds"]
         alerts = [f"安全告警：授权核对未通过，已移除证据 {i}" for c in claims for i in c.removed]
-        if need_verified and not verified_on:
+        need = mode_path[-1] == "verified" or bool(signals)
+        if need and not self.model.capabilities().structured_output:
             notices.append("验证模式不可用（所用模型不支持结构化输出），时效性和强制验证类结论标为“未验证”")
             for c in claims:
                 if c.status == "supported":
                     c.status = "unverified"
-        elif need_verified:
+        elif need:
             if mode_path[-1] != "verified":
                 mode_path.append("verified")
                 escalations.append("转入 Verified：" + "、".join(signals))
-            rounds += self._verify(scope, question, claims, hits, meta, target, today, tb, vt)
-        text, abstained = s.assemble(claims, draft)
-        if deep is not None and deep.unresolved and not abstained:
-            notices.append("以下要点没有找到证据，回答未涉及：" + "；".join(deep.unresolved))
-        if not hits and draft is None:
+            rounds += self._repair(self.scope, question, claims, hits, meta, target, today, tb, vt)
+        return {"claims": codec.claims_out(claims), "meta": codec.meta_out(meta), "forced": forced, "signals": signals,
+                "mode_path": mode_path, "escalations": escalations, "notices": notices, "rounds": rounds,
+                "alerts": alerts}
+
+    def _assemble(self, st: QueryState) -> dict:
+        claims, draft = codec.claims_in(st["claims"]), codec.draft_in(st["draft"])
+        text, abstained = Steps.assemble(claims, draft)
+        notices = list(st["notices"])
+        if st.get("unresolved") and not abstained:
+            notices.append("以下要点没有找到证据，回答未涉及：" + "；".join(st["unresolved"]))
+        if not st["hits"] and draft is None:
             text = ABSTAIN
         if notices and not abstained:
-            text = "；".join(n for n in notices if n.startswith("按")) + ("。" if any(n.startswith("按") for n in notices) else "") + text
-        return QueryResult("", "completed", mode_path[-1], mode_path, route.to_json(), tb.to_json(), text, claims,
-                           abstained, notices, forced, escalations, rounds, draft.model if draft else model_id(self.model),
-                           self._build_id(), alerts=alerts,
-                           signals=signals + [e for e in escalations if "Deep" in e], plan=deep.trace() if deep else None)
+            echo = [n for n in notices if n.startswith("按")]
+            text = "；".join(echo) + ("。" if echo else "") + text
+        return {"answer": text, "abstained": abstained, "notices": notices}
 
     def _deep_signals(self, hits, claims: list[ClaimOut], draft: Draft | None) -> list[str]:
         out = []
@@ -241,7 +343,7 @@ class Engine:
             signals.append("结论依赖图表数值")
         return forced, signals
 
-    def _verify(self, scope, question, claims: list[ClaimOut], hits, meta, target: Target, today, tb: TimeBasis,
+    def _repair(self, scope, question, claims: list[ClaimOut], hits, meta, target: Target, today, tb: TimeBasis,
                 version_targets: dict[str, Target] | None = None) -> int:
         """语义检查与定向补检索；返回额外用掉的检索轮数。
         version_targets（Deep 比较不同版本）：只引用同一目标时间的版本的结论，按那个时间判断与补检索。"""
@@ -273,7 +375,7 @@ class Engine:
                                       as_of_system=tb.as_of_system)
             if not new:
                 continue
-            meta.update(self.steps.meta([h for h in new if h.version_id not in meta], target.system_t))
+            meta.update(codec.meta_out(self.steps.meta([h for h in new if h.version_id not in meta], target.system_t)))
             by_id.update({h.evidence_id: h for h in new})
             if own:
                 for h in new:
@@ -294,27 +396,35 @@ class Engine:
         return getattr(ix, "alias", None) or type(ix).__name__
 
 
-def log_query(conn: psycopg.Connection, r: QueryResult, *, scope: Scope, user_id: str, question: str,
-              asked_at: datetime | None = None) -> uuid.UUID:
-    """写入 query_log（10.1 第 8 步、10.4 审计）。必填字段缺一即报错，不写半条记录（AC-10-9）。"""
+def log_fields(r: QueryResult, scope: Scope) -> dict:
+    """query_log 中由执行结果决定的字段（10.1 第 8 步、10.4 审计）。"""
     authz = {"principals": sorted(scope.principals),
              "expires_at": scope.expires_at.isoformat() if scope.expires_at else None,
              "removed_evidence": [i for c in r.claims for i in c.removed], "alerts": r.alerts}
     claims = [{"text": c.text, "status": c.status, "core": c.core, "citations": [asdict(x) for x in c.citations],
                "checks": c.checks, "semantic": c.semantic, "repaired": c.repaired} for c in r.claims]
-    for name, value in (("session_id", r.session_id), ("user_id", user_id), ("question", question),
-                        ("mode", r.mode), ("model_id", r.model), ("index_build_id", r.index_build_id)):
+    for name, value in (("session_id", r.session_id), ("mode", r.mode), ("model_id", r.model),
+                        ("index_build_id", r.index_build_id)):
         if not value:
             raise ValueError(f"query_log 缺少必填字段 {name}")
-    qid = uuid.uuid4()
+    return {"time_basis": Jsonb(r.time_basis), "mode": r.mode, "mode_path": r.mode_path, "status": r.status,
+            "answer": r.answer, "claims": Jsonb(claims), "evidence_ids": r.evidence_ids, "abstained": r.abstained,
+            "authz_decision": Jsonb(authz), "model_id": r.model, "index_build_id": r.index_build_id,
+            "cost": Jsonb({**r.cost, "retrieval_rounds": r.retrieval_rounds, "seconds": r.seconds,
+                           "router": r.router, "escalations": r.escalations, "signals": r.signals,
+                           "forced_verify": r.forced_verify, "plan": r.plan})}
+
+
+def log_query(conn: psycopg.Connection, r: QueryResult, *, scope: Scope, user_id: str, question: str,
+              asked_at: datetime | None = None, query_id: uuid.UUID | None = None) -> uuid.UUID:
+    """写入 query_log。必填字段缺一即报错，不写半条记录（AC-10-9）。"""
+    if not user_id or not question:
+        raise ValueError("query_log 缺少必填字段 user_id 或 question")
+    f = log_fields(r, scope)
+    qid = query_id or uuid.uuid4()
     conn.execute(
-        "INSERT INTO query_log (id, tenant_id, session_id, user_id, asked_at, question, time_basis, mode, mode_path, "
-        "status, answer, claims, evidence_ids, abstained, authz_decision, model_id, index_build_id, cost) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "INSERT INTO query_log (id, tenant_id, session_id, user_id, asked_at, question, "
+        + ", ".join(f) + ") VALUES (%s, %s, %s, %s, %s, %s, " + ", ".join(["%s"] * len(f)) + ")",
         (qid, scope.tenant_id, uuid.UUID(r.session_id), user_id, asked_at or datetime.now(timezone.utc), question,
-         Jsonb(r.time_basis), r.mode, r.mode_path, r.status, r.answer, Jsonb(claims), r.evidence_ids, r.abstained,
-         Jsonb(authz), r.model, r.index_build_id,
-         Jsonb({**r.cost, "retrieval_rounds": r.retrieval_rounds, "seconds": r.seconds,
-                "router": r.router, "escalations": r.escalations, "signals": r.signals,
-                "forced_verify": r.forced_verify, "plan": r.plan})))
+         *f.values()))
     return qid

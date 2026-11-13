@@ -6,3 +6,7 @@ requires-python = ">=3.12"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# 第三方库在 Python 3.14 上的弃用提示（langgraph 依赖的 langsmith 0.14.16），与本项目代码无关
+filterwarnings = [
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:langsmith",
+]

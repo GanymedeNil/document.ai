@@ -166,3 +166,52 @@ def test_forced_verify_append_and_empty_tenant_delete_are_allowed(fv_rules):
                .fetchone()["forced_verify_rules"]) == 3
     fv_rules.execute("INSERT INTO tenant_config (tenant_id, updated_at) VALUES ('t-empty', now())")
     fv_rules.execute("DELETE FROM tenant_config WHERE tenant_id = 't-empty'")     # 没有规则的配置可以删除
+
+
+# ---------- AC-8-6（数据库部分）：提问记录与查询任务 ----------
+
+@pytest.fixture
+def qt(conn):
+    """一条运行中的提问记录与任务、一条已完成的提问记录与任务。"""
+    ids = {"run": uuid.uuid4(), "done": uuid.uuid4(), "sid": uuid.uuid4()}
+    for key, status in (("run", "running"), ("done", "completed")):
+        conn.execute(
+            "INSERT INTO query_log (id, tenant_id, session_id, user_id, asked_at, question, mode, mode_path, status, "
+            "authz_decision, model_id, index_build_id) VALUES (%s, 't1', %s, 'alice', now(), '问题', 'fast', '{fast}', "
+            "%s, '{}', 'm', 'b1')", (ids[key], ids["sid"], status))
+        lease = "now() + interval '1 minute'" if status == "running" else "NULL"
+        owner = "'api-1'" if status == "running" else "NULL"
+        conn.execute(
+            "INSERT INTO query_task (id, tenant_id, session_id, user_id, identity, state, status, locked_by, "
+            f"locked_until, created_at, updated_at) VALUES (%s, 't1', %s, 'alice', '{{}}', '{{}}', %s, {owner}, {lease}, "
+            "now(), now())", (ids[key], ids["sid"], status))
+    return conn, ids
+
+
+QT_VIOLATIONS = [
+    ("改写已完成的提问记录", "UPDATE query_log SET answer = '改过' WHERE id = %(done)s", "已结束的提问记录不可修改"),
+    ("已完成的提问记录退回运行中", "UPDATE query_log SET status = 'running' WHERE id = %(done)s", "已结束的提问记录不可修改"),
+    ("改写提问人", "UPDATE query_log SET user_id = 'bob' WHERE id = %(run)s", "提问人、会话、问题与时间不可修改"),
+    ("改写问题", "UPDATE query_log SET question = '别的问题' WHERE id = %(run)s", "提问人、会话、问题与时间不可修改"),
+    ("已完成的任务重新排队", "UPDATE query_task SET status = 'queued' WHERE id = %(done)s", "已结束的查询任务不可修改"),
+    ("改写任务的提问人", "UPDATE query_task SET user_id = 'bob' WHERE id = %(run)s", "查询任务的提问人与会话不可修改"),
+    ("改写任务的身份", "UPDATE query_task SET identity = '{\"roles\": [\"admin\"]}' WHERE id = %(run)s",
+     "查询任务的提问人与会话不可修改"),
+]
+
+
+@pytest.mark.parametrize("name, sql, message", QT_VIOLATIONS, ids=[v[0] for v in QT_VIOLATIONS])
+def test_query_log_and_task_violations_are_rejected(qt, name, sql, message):
+    conn, ids = qt
+    with pytest.raises(errors.RaiseException, match=f"invariant: .*{message}"):
+        conn.execute(sql, ids)
+
+
+def test_query_task_lease_must_match_status(qt):
+    conn, ids = qt
+    with pytest.raises(errors.CheckViolation):            # 运行中没有租约
+        conn.execute("UPDATE query_task SET locked_until = NULL, locked_by = NULL WHERE id = %(run)s", ids)
+    with pytest.raises(errors.CheckViolation):            # 排队中还留着租约
+        conn.execute("UPDATE query_task SET status = 'queued' WHERE id = %(run)s", ids)
+    conn.execute("UPDATE query_task SET status = 'queued', locked_until = NULL, locked_by = NULL WHERE id = %(run)s", ids)
+    conn.execute("UPDATE query_log SET status = 'cancelled' WHERE id = %(run)s", ids)       # 运行中 → 已取消：允许

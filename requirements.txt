@@ -14,3 +14,14 @@ python-docx==1.2.0
 matplotlib==3.11.2
 pytest==9.2.0
 httpx2==2.16.0
+# 查询状态机与会话检查点（开发文档 8.4、8.5）；其下更新频繁的传递依赖一并锁定，避免装到发布不满 14 天的版本
+langgraph==1.2.18
+langgraph-checkpoint==4.3.1
+langgraph-checkpoint-postgres==3.2.0
+langgraph-prebuilt==1.1.1
+langgraph-sdk==0.4.10
+langchain-core==1.7.3
+langchain-protocol==0.0.20
+langsmith==0.14.16
+psycopg-pool==3.3.3
+ormsgpack==1.13.0

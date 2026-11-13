@@ -79,11 +79,24 @@ def conn(db_url):
 
 
 @pytest.fixture
-def empty_db_url():
-    """未迁移的空数据库，用于测试迁移本身。"""
+def make_empty_db():
+    """返回一个函数，每次调用创建一个未迁移的空数据库并返回其连接串。"""
     admin = _admin()
-    name = f"eaer_e_{uuid.uuid4().hex[:8]}"
-    admin.execute(f'CREATE DATABASE "{name}"')
-    yield url_for(name)
-    admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+    created = []
+
+    def make() -> str:
+        name = f"eaer_e_{uuid.uuid4().hex[:8]}"
+        admin.execute(f'CREATE DATABASE "{name}"')
+        created.append(name)
+        return url_for(name)
+
+    yield make
+    for name in created:
+        admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
     admin.close()
+
+
+@pytest.fixture
+def empty_db_url(make_empty_db):
+    """未迁移的空数据库，用于测试迁移本身。"""
+    return make_empty_db()
