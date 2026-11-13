@@ -78,7 +78,7 @@ Fast 试跑（2026-11-13，`python -m eaer.evalrun.fast`，生成用 DeepSeek `d
 2. **中文分词。** 自定义镜像（smartcn、icu）、应用侧 jieba 候选和对比工具 `python -m eaer.evalrun.analyzers` 已完成（2026-11-12）。事实表样例只有 12 个可计分查询，五种候选召回都是 11/12，MRR 在 0.79–0.88 之间，区分不出来；用户倾向 jieba。接入真实 Embedding 并扩充评测集后重跑，按 AC-5-4 选定。jieba 0.42.1 自 2020 年未更新，在 Python 3.14 上导入有 SyntaxWarning，正式采用前评估替代实现。
 3. **补齐第 4 周关口中不依赖外部资源的项。** 已于 2026-11-12 完成：AC-3-1（`tests/test_module_boundaries.py`）、AC-6-3（`tests/test_state_machine.py`）、AC-6-4（`tests/test_pending_not_searchable.py`，检索层面）、AC-11-4（`eaer/adapters/conformance.py`）。
 4. **接入 Docling。** 已于 2026-11-12 完成：`eaer/ingestion/docling_parser.py`，覆盖 PDF、扫描件（RapidOCR）、PPTX、XLSX、图片，证据定位带页码；依赖单独锁定在 `requirements-docling.txt`。只在合成样例上验证过，AC-6-1 要求的“每种格式 20 份真实样本”人工核对尚未做。
-5. **模型接口与 Fast 模式。** 线上通用客户端（`eaer/adapters/online.py`）与 Fast 核心流程（`eaer/orchestrator/fast.py`）已完成（2026-11-13），生成用 DeepSeek。还缺：Embedding 与重排服务（等用户选定，不要自行假设服务商或密钥）；Router、Verified、Deep；提问接口 `POST /v1/query` 与 `query_log`（强制验证类问题必须经 Verified，接口要和 Router、Verified 一起开放）；真实的 Fast 基线。注意：后台任务进程 `python -m eaer.ingestion` 目前没有接索引任务（`Worker` 未传 `Indexer`，publish_index 与 index_update 不会执行），接入 `ModelClient.embed` 时一并接上，不能用测试替身 `HashingEmbedder`。
+5. **模型接口与 Fast 模式。** 线上通用客户端（`eaer/adapters/online.py`）与 Fast 核心流程（`eaer/orchestrator/fast.py`）已完成（2026-11-13），生成用 DeepSeek。还缺：Embedding 与重排服务（等用户选定，不要自行假设服务商或密钥）；Router、Verified、Deep；提问接口 `POST /v1/query` 与 `query_log`（强制验证类问题必须经 Verified，接口要和 Router、Verified 一起开放）；真实的 Fast 基线。后台任务进程 `python -m eaer.ingestion` 已接上索引任务（2026-11-13）：需要 `EAER_OPENSEARCH_URL` 与 Embedding 服务，缺少即启动报错（`--no-index` 只做解析）；先用 `python -m eaer.ingestion rebuild --build-id …` 建索引，`drop-retired` 要定时运行。
 
 ## 需要用户决定或提供的事项
 

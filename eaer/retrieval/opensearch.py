@@ -99,6 +99,14 @@ class OpenSearchIndex:
         got = self.client.indices.get(index=f"{self.alias}-*", ignore_unavailable=True, allow_no_indices=True)
         return {name: int(v["settings"]["index"]["creation_date"]) for name, v in got.items()}
 
+    def text_analysis(self) -> str | None:
+        """别名当前指向的索引在映射 _meta 中记录的分词方式（smartcn、icu_analyzer、jieba-0.42.1 等）。"""
+        names = sorted(self.current())
+        if not names:
+            return None
+        got = self.client.indices.get_mapping(index=names[0])
+        return (got[names[0]]["mappings"].get("_meta") or {}).get("text_analysis")
+
     def current(self) -> set[str]:
         if not self.client.indices.exists_alias(name=self.alias):
             return set()
