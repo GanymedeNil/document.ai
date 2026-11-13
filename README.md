@@ -19,6 +19,7 @@
 | 对外接口 | `eaer/api/`：提问（含流式）、会话、上传、审核任务、审核决定、归档、取消归档、证据；参考令牌身份校验，文档权限经授权接口 | AC-11-1 的部分用例、AC-11-2、AC-10-6 |
 | 检索 | `eaer/retrieval/`：引擎接口（OpenSearch 实现与内存参考实现）、对账、混合检索与数据库核对、回溯检索；每次查询固定一个索引视图。全量重建与旧索引清理在 `eaer/ingestion/indexer.py`（`rebuild`、`drop_retired`） | AC-5-1、AC-5-2、AC-5-3、AC-5-5、AC-6-7 |
 | 对接接口 | `eaer/adapters/`：DataSource、Authorizer、ModelClient 三个接口，本地文件夹与本地账号两个参考实现，一致性套件 `conformance.py` | AC-11-4 |
+| 准入检查 | `eaer/evalrun/admission.py`：验证器误通过率与误拒率、Deep 正确率、能力矩阵；`eaer/orchestrator/admission.py`：按准入结论开关 Verified 与 Deep | AC-12-3、AC-12-6 |
 | 提示注入防护 | `eaer/domain/injection.py`：证据区随机边界与转义、指令型文字识别；`eaer/evalrun/injection.py` 用真实模型测回答被带偏的比例 | AC-10-7 |
 | 模块边界 | `tests/test_module_boundaries.py`：静态检查开发文档 3.2 的索引读写、版本状态、模型 SDK 三条规则 | AC-3-1 |
 | 检索评测 | `eaer/evalrun/retrieval.py`：按日期回放合成语料，每个查询在提问日提出，计算召回、拒答与越权 | AC-5-4 的评测流程 |
@@ -50,6 +51,8 @@ export EAER_OPENSEARCH_URL=http://localhost:9200
 alembic upgrade head
 python -m modelserver --port 8100 --env-file .env  # 本地 Embedding 与重排服务（Qwen3，可选；也可用线上服务）
 python -m eaer.ingestion rebuild --build-id b1     # 首次部署：建索引并挂上别名
+EAER_ENV=eval python -m eaer.evalrun.admission docs/事实表样例.xlsx --admin-url … --database-url $EAER_DATABASE_URL --tenant t1
+                                                   # 准入检查：通过后才开启 Verified 与 Deep（本地开发可设 EAER_ADMISSION=off）
 uvicorn eaer.api.main:app --port 8000              # 接口进程
 python -m eaer.ingestion                           # 后台任务进程（含索引任务与转入后台的提问；缺配置即报错）
 python -m eaer.ingestion drop-retired              # 定时运行：删除超过 24 小时的旧索引
