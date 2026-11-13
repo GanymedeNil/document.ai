@@ -123,6 +123,7 @@ def test_builtin_rules_and_tenant_rule_kinds(conn):
     ("截至2026年3月1日住宿上限是多少", True), ("2025-12-01 当时执行的标准", True), ("修订前的规定怎么写", True),
     ("旧版和新版有什么区别", True), ("第2版的采购上限", True), ("第三版是否还有效", True), ("3月1日起的标准", True),
     ("一线城市住宿上限是多少", False), ("伙食补贴标准", False),
+    ("2026 年第二季度的差旅总费用是多少？", False), ("2026 年 7 月修订前后有什么变化", True),
 ])
 def test_time_and_version_wording(q, hit):
     assert mentions_time_or_version(q) is hit
