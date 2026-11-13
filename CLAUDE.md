@@ -30,8 +30,8 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 | `eaer/orchestrator/` | 查询执行（第 8 节）：时间点识别 `timeparse.py`、Router `router.py`、Fast 与共用步骤 `fast.py`、Deep 计划模板 `deep.py`、编排与 Verified `engine.py`（LangGraph 图，状态只含 JSON 值，见 `codec.py`）、异步执行 `tasks.py`（同步时限、转后台、进度、取消、租约与检查点恢复）、强制验证清单 `forced_verify.py`（内置规则 + 租户追加的规则，只增不减） |
 | `eaer/api/` | FastAPI 对外接口（提问、会话、取消、上传、审核、归档、取消归档、证据、强制验证清单）；文档权限经 `Authorizer`，未配置或不可用时 503。接口进程与后台任务进程的公共装配在 `eaer/runtime.py` |
 | `eaer/adapters/` | 对接接口（11.3）：数据源（参考实现本地文件夹 + `_acl.yaml`）、授权（参考实现本地账号）、模型（接口、测试替身，以及线上通用客户端 `online.py`：生成、Embedding、重排分别配置，配置见该文件的文档字符串；本地开发的密钥放在未纳入版本控制的 `.env`）；`conformance.py` 是客户实现交付前必跑的一致性套件 |
-| `eaer/domain/` | 证据 id 规则、身份与授权范围（`Identity`、`Scope`） |
-| `eaer/evalload/`、`eaer/evalrun/` | 评测专用的历史日期装载入口与检索评测运行器，只在 `EAER_ENV=eval` 时可用 |
+| `eaer/domain/` | 证据 id 规则、身份与授权范围（`Identity`、`Scope`）、提示注入防护（`injection.py`：证据区隔离与指令型文字识别） |
+| `eaer/evalload/`、`eaer/evalrun/` | 评测专用的历史日期装载入口与评测运行器（检索、Fast 与编排器试跑、分词对比、提示注入），只在 `EAER_ENV=eval` 时可用 |
 | `modelserver/` | 本地模型服务（参考实现，独立部署）：Qwen3-Embedding-0.6B 与 Qwen3-Reranker-0.6B，提供 `/v1/embeddings` 与 `/v1/rerank`；`python -m modelserver --port 8100 --env-file .env`，Mac 用 MPS、Linux 用 CUDA |
 | `factset/` | 合成评测集工具：校验事实表、生成文档、检查文档、计算标准答案 |
 | `tests/` | 每个测试文件的文档字符串注明对应的验收项（AC-x-y） |
@@ -63,11 +63,11 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 
 | 状态 | 验收项 |
 | --- | --- |
-| 已通过 | AC-3-1，AC-4-1~4-5，AC-5-1、5-2、5-3、5-5，AC-6-2、6-3、6-4（检索层面）、6-5、6-6、6-7、6-8，AC-7-2（检索层面）、7-4、7-5、7-6，AC-8-1~8-6，AC-9-1、9-2，AC-10-1（检索层面）、10-3（检索层面）、10-5、10-6、10-9，AC-11-2、11-3、11-4（三个接口的参考实现均通过；ModelClient 为 DeepSeek 生成 + 本地 Qwen3 Embedding 与重排）、11-5、11-6，AC-12-1、12-5，AC-14-1、14-3 |
+| 已通过 | AC-3-1，AC-4-1~4-5，AC-5-1、5-2、5-3、5-5，AC-6-2、6-3、6-4（检索层面）、6-5、6-6、6-7、6-8，AC-7-2（检索层面）、7-4、7-5、7-6，AC-8-1~8-6，AC-9-1、9-2，AC-10-1（检索层面）、10-3（检索层面）、10-5、10-6、10-7（越权 0；带偏比例为指标，待基线）、10-9，AC-11-2、11-3、11-4（三个接口的参考实现均通过；ModelClient 为 DeepSeek 生成 + 本地 Qwen3 Embedding 与重排）、11-5、11-6，AC-12-1、12-5，AC-14-1、14-3 |
 | 合成语料上通过，待真实数据 | AC-6-9（分类）、AC-7-7（时间抽取）、AC-14-2 的程序检查部分 |
 | 只有逻辑或流程，未在真实环境验证 | AC-5-4（检索评测流程已有，用的是测试替身）、AC-3-3（CI 已配置，未运行） |
 | 部分完成 | AC-11-1（契约测试只覆盖已有接口，尚无 OpenAPI 文件） |
-| 未开始 | AC-3-2，AC-6-1、6-10，第 10 节的缓存隔离（AC-10-4）、提示注入（AC-10-7）、Trace 清理（AC-10-10），第 12–13 节其余（准入检查 AC-12-3、计量对账、部署运维） |
+| 未开始 | AC-3-2，AC-6-1、6-10，第 10 节的缓存隔离（AC-10-4）、Trace 清理（AC-10-10），第 12–13 节其余（准入检查 AC-12-3、计量对账、部署运维） |
 
 事实表样例上的检索评测：可计分的 12 个查询命中 11 个；3 个拒答类全部正确；越权 0；对账差异 0。未命中的 Q05 是版本差异类，只看检索时取不到旧版本，经编排器由 Deep 的比较模板答对；Q15 图表类需要视觉模型。
 
@@ -84,7 +84,8 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 5. **模型接口、Fast、Router 与 Verified。** 已完成（2026-11-13）：线上通用客户端、本地 Qwen3 模型服务、Fast、Router（8.1）、Verified（语义检查、定向补检索）、编排器（`eaer/orchestrator/engine.py`）、提问与会话接口、`query_log`。后台任务进程已接上索引任务：需要 `EAER_OPENSEARCH_URL` 与 Embedding 服务，缺少即启动报错（`--no-index` 只做解析）；先用 `python -m eaer.ingestion rebuild --build-id …` 建索引，`drop-retired` 要定时运行。
 6. **Deep 模式。** 已完成（2026-11-13）：`eaer/orchestrator/deep.py` 的比较（版本、时间点、一般对象）、多跳、因果三个计划模板，Fast 的三个信号转入 Deep，检索服务的“取版本”，确定性检查按版本的目标时间，`tests/test_deep.py`。默认开启，`EAER_DEEP_ENABLED=0` 关闭。
 7. **异步执行。** 已完成（2026-11-13）：编排器改为 LangGraph 图（prepare 之后 first → escalate → verify → assemble），检查点写入 PostgreSQL（迁移 0005）；`eaer/orchestrator/tasks.py` 的同步时限（`budgets.sync_seconds`，初值 30 秒）、转后台、进度、取消、租约与中断恢复；后台任务进程接着执行，需要与接口进程相同的查询配置与 `EAER_TOKENS_FILE`；`tests/test_async.py`。检查点含证据原文，清理随 Trace 保留期（AC-10-10）一起做。
-8. **其余未开始的项。** 缓存隔离（AC-10-4）、提示注入（AC-10-7）、准入检查（AC-12-3）、OpenAPI 文件与契约测试（AC-11-1）、扩充评测集后选定分词与模型（AC-5-4）。
+8. **提示注入防护。** 已完成（2026-11-13）：证据区随机边界与转义、系统提示声明区内指令不执行、指令型文字识别（引用即转 Verified、入库时提示审核人）、`tests/test_injection.py`（照办一切指令的最坏情况模型，植入 60 条，越权 0）。真实模型（DeepSeek）在事实表样例植入 56 段后：越权 0；回答被带偏首次 3/15，修正拒答说明后 0/15；正确 13/15（未植入时 15/16）。`python -m eaer.evalrun.injection` 复测。
+9. **其余未开始的项。** 缓存隔离（AC-10-4）、准入检查（AC-12-3）、OpenAPI 文件与契约测试（AC-11-1）、扩充评测集后选定分词与模型（AC-5-4）。
 
 ## 需要用户决定或提供的事项
 
