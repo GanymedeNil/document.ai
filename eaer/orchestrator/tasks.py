@@ -287,3 +287,24 @@ class TaskRunner:
                 except Exception:  # noqa: BLE001 — 已记入任务与提问记录
                     pass
         return n
+
+
+# ---------- Trace 清理（10.2、AC-10-10） ----------
+
+def purge(conn: psycopg.Connection, now: datetime, *, limit: int = 5000) -> dict[str, int]:
+    """删除超过租户 trace_retention_days（默认 30 天）的执行记录：已结束任务的检查点（含证据原文的各步状态）与任务行；
+    同时删除已过期的回答缓存。执行中、排队中的任务不动；query_log 是审计记录（10.4），不在此清理。
+    每次最多处理 limit 个任务，后台任务进程定期调用，积压时分几次删完。"""
+    with conn.transaction():
+        old = [r["id"] for r in conn.execute(
+            "SELECT t.id FROM query_task t LEFT JOIN tenant_config c ON c.tenant_id = t.tenant_id "
+            "WHERE t.status IN ('completed', 'cancelled', 'failed') "
+            "AND t.updated_at < %s - make_interval(days => coalesce(c.trace_retention_days, 30)) "
+            "ORDER BY t.updated_at LIMIT %s", (now, limit))]
+        threads = [str(i) for i in old]
+        checkpoints = conn.execute("DELETE FROM checkpoints WHERE thread_id = ANY(%s)", (threads,)).rowcount
+        conn.execute("DELETE FROM checkpoint_blobs WHERE thread_id = ANY(%s)", (threads,))
+        conn.execute("DELETE FROM checkpoint_writes WHERE thread_id = ANY(%s)", (threads,))
+        tasks = conn.execute("DELETE FROM query_task WHERE id = ANY(%s)", (old,)).rowcount
+        cached = conn.execute("DELETE FROM query_cache WHERE expires_at <= %s", (now,)).rowcount
+    return {"tasks": tasks, "checkpoints": checkpoints, "cache": cached}

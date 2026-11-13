@@ -4,6 +4,7 @@
     python -m eaer.ingestion --no-index      只做解析与抽取，不处理索引任务与提问（留在队列里）
     python -m eaer.ingestion rebuild --build-id b2   全量重建索引并切换别名（开发文档 5.3）
     python -m eaer.ingestion drop-retired    删除别名不再指向、且超过 24 小时的旧索引（应定时运行）
+    python -m eaer.ingestion purge           立即做一次 Trace 清理（后台任务进程每 EAER_PURGE_SECONDS 秒自动做一次，默认 3600）
 
 环境变量：EAER_DATABASE_URL、EAER_STORAGE_DIR（同接口进程）；EAER_POLL_SECONDS（空闲轮询间隔，默认 2）；
 EAER_OPENSEARCH_URL、EAER_INDEX_ALIAS（默认 eaer）、EAER_TEXT_ANALYZER（smartcn / icu_analyzer / jieba 等，
@@ -65,7 +66,7 @@ def build_worker(conn: psycopg.Connection, store, env: dict[str, str], *, with_i
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="eaer.ingestion")
-    p.add_argument("command", nargs="?", default="worker", choices=["worker", "rebuild", "drop-retired"])
+    p.add_argument("command", nargs="?", default="worker", choices=["worker", "rebuild", "drop-retired", "purge"])
     p.add_argument("--no-index", action="store_true", help="只做解析与抽取，不处理索引任务")
     p.add_argument("--build-id", help="rebuild：新索引的构建编号")
     p.add_argument("--retain-hours", type=float, default=24.0, help="drop-retired：旧索引保留时长")
@@ -83,6 +84,12 @@ def main(argv: list[str] | None = None) -> int:
                                          older_than=timedelta(hours=args.retain_hours)))
             return 0
         conn = psycopg.connect(env["EAER_DATABASE_URL"], autocommit=True, row_factory=dict_row)
+        if args.command == "purge":
+            from datetime import datetime, timezone
+
+            from eaer.orchestrator.tasks import purge
+            print("已删除：", purge(conn, datetime.now(timezone.utc)))
+            return 0
         if args.command == "rebuild":
             from eaer.ingestion.indexer import rebuild
             if not args.build_id:
@@ -98,8 +105,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"配置错误：{e}", file=sys.stderr)
         return 2
     poll = float(env.get("EAER_POLL_SECONDS", "2"))
+    purge_every, last_purge = float(env.get("EAER_PURGE_SECONDS", "3600")), 0.0
     while True:
         done = worker.run_until_idle(limit=1000) + (runner.run_pending(limit=10) if runner else 0)
+        if time.monotonic() - last_purge >= purge_every:          # Trace 清理（10.2、AC-10-10）
+            from datetime import datetime, timezone
+
+            from eaer.orchestrator.tasks import purge
+            purge(conn, datetime.now(timezone.utc))
+            last_purge = time.monotonic()
         if done == 0:
             time.sleep(poll)
 

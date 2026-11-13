@@ -51,7 +51,8 @@ from eaer.verifier.semantic import DEFAULT_MIN_CONFIDENCE, SemanticChecker
 STATUS_RANK = {"supported": 0, "unverified": 1, "unsupported": 2}
 DEFAULT_THRESHOLDS = {"semantic_min_confidence": DEFAULT_MIN_CONFIDENCE, "rerank_min_top": 0.3,
                       "deep_min_context_tokens": 16000}
-DEFAULT_BUDGETS = {"fast_rounds": 1, "deep_rounds": 3, "verified_repair_rounds": 1, "sync_seconds": 30}
+DEFAULT_BUDGETS = {"fast_rounds": 1, "deep_rounds": 3, "verified_repair_rounds": 1, "sync_seconds": 30,
+                   "cache_ttl_seconds": 600}
 NODES = ("first", "escalate", "verify", "assemble")
 NODE_NAMES = {"first": "检索与生成", "escalate": "升级判断", "verify": "验证", "assemble": "组装回答"}
 

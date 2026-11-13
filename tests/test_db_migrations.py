@@ -11,9 +11,11 @@ TABLES = {"tenant_config", "acl_policy", "document", "document_version", "versio
           "version_relation", "evidence", "lifecycle_event", "review_task", "ingest_job", "query_log", "evidence_embedding"}
 CHECKPOINT_TABLES = {"checkpoint_migrations", "checkpoints", "checkpoint_blobs", "checkpoint_writes"}
 TABLES_0005 = {"query_task"} | CHECKPOINT_TABLES
+TABLES_0006 = {"query_cache"}
 TRIGGERS = {"version_delete_guard", "version_update_guard", "validity_guard", "relation_guard",
             "lifecycle_event_append_only", "forced_verify_append_only"}
 TRIGGERS_0005 = {"query_log_guard", "query_task_guard"}
+TRIGGERS_0006 = {"cache_on_version", "cache_on_validity", "cache_on_relation", "cache_on_acl_policy", "cache_on_tenant_config"}
 
 
 def _state(url):
@@ -24,7 +26,7 @@ def _state(url):
 
 
 def test_upgrade_downgrade_upgrade(empty_db_url):
-    full = (TABLES | TABLES_0005, TRIGGERS | TRIGGERS_0005)
+    full = (TABLES | TABLES_0005 | TABLES_0006, TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006)
     migrate(empty_db_url)
     assert _state(empty_db_url) == full
     downgrade(empty_db_url)
@@ -34,14 +36,16 @@ def test_upgrade_downgrade_upgrade(empty_db_url):
 
 
 def test_each_revision_downgrades_one_step(empty_db_url):
-    """逐个版本回滚：0005 回滚去掉查询任务与检查点表；0004 回滚只去掉强制验证清单的触发器。"""
+    """逐个版本回滚：0006 回滚去掉回答缓存；0005 去掉查询任务与检查点表；0004 只去掉强制验证清单的触发器。"""
     migrate(empty_db_url)
+    downgrade(empty_db_url, "0005")
+    assert _state(empty_db_url) == (TABLES | TABLES_0005, TRIGGERS | TRIGGERS_0005)
     downgrade(empty_db_url, "0004")
     assert _state(empty_db_url) == (TABLES, TRIGGERS)
     downgrade(empty_db_url, "0003")
     assert _state(empty_db_url) == (TABLES, TRIGGERS - {"forced_verify_append_only"})
     migrate(empty_db_url)
-    assert _state(empty_db_url) == (TABLES | TABLES_0005, TRIGGERS | TRIGGERS_0005)
+    assert _state(empty_db_url) == (TABLES | TABLES_0005 | TABLES_0006, TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006)
 
 
 def _checkpoint_schema(url):

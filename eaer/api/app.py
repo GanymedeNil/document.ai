@@ -246,44 +246,60 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
 
     @app.post("/v1/query")
     def query(conn: Conn, ident: Anyone, authz: Authz, body: QueryRequest):
-        """提问（11.2）。在请求线程之外执行，等待同步时限（budgets.sync_seconds）；超时返回 status=running，
-        其余字段为空，任务在当前步骤结束后交给后台任务进程，客户端轮询会话接口（8.5）。"""
+        """提问（11.2）。先查回答缓存（同租户、同授权范围、同索引构建，命中后仍核对权限）；未命中则在请求线程之外
+        执行，等待同步时限（budgets.sync_seconds）；超时返回 status=running，其余字段为空，任务在当前步骤结束后
+        交给后台任务进程，客户端轮询会话接口（8.5）。同步完成的回答写入缓存。"""
         from eaer.adapters.online import ModelCallError
-        from eaer.orchestrator import tasks
+        from eaer.orchestrator import cache, tasks
         from eaer.orchestrator.engine import QueryResult, log_query
 
         if engine is None:
             raise ApiError(503, "query_unavailable", "提问服务未配置模型或检索服务")
         if body.session_id is not None and not _own_session(conn, ident, body.session_id):
             raise ApiError(404, "not_found", "会话不存在")
-        _, scope = authz
+        authorizer_, scope = authz
         eng = engine(conn, ident.tenant_id)
         eng.scope = scope
         sid, qid, asked = body.session_id or uuid.uuid4(), uuid.uuid4(), clock()
         model_id = getattr(getattr(eng.model, "gen", None), "model", None) or "unknown"
-        try:
-            prepared = eng.prepare(body.question, today=asked.date(), as_of_valid=body.as_of_valid,
-                                   as_of_system=body.as_of_system, mode_hint=body.mode_hint)
-        except ModelCallError as e:
-            failed = QueryResult(str(sid), "failed", "fast", ["fast"], {}, {}, None, [], False, [], [], [], 0,
-                                 model_id, eng._build_id())
-            log_query(conn, failed, scope=scope, user_id=ident.user, question=body.question, asked_at=asked,
-                      query_id=qid)
-            raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
-        tasks.create(conn, query_id=qid, session_id=sid, ident=ident, scope=scope, question=body.question,
-                     asked_at=asked, prepared=prepared, model_id=model_id, index_build_id=eng._build_id(),
-                     owner=runner.owner)
-        handoff = threading.Event()
-        future = pool.submit(runner.run, qid, scope=scope, handoff=handoff)
-        try:
-            outcome, result = future.result(timeout=float(eng.budgets["sync_seconds"]))
-        except TimeoutError:
-            handoff.set()                       # 当前步骤结束后交给后台任务进程
-            outcome, result = "running", None
-        except AuthorizerUnavailable:
-            raise ApiError(503, "authz_unavailable", "授权服务不可用")
-        except ModelCallError as e:
-            raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
+        build_id, ttl = eng._build_id(), float(eng.budgets["cache_ttl_seconds"])
+        # 回答缓存（10.1 第 7 步）：键含租户、授权范围哈希与索引构建编号；命中后仍按当前授权范围核对所引证据
+        ck = cache.key(ident.tenant_id, scope, build_id, body.question, today=asked.date(), as_of_valid=body.as_of_valid,
+                       as_of_system=body.as_of_system, mode_hint=body.mode_hint, model=model_id,
+                       deep_enabled=eng.deep_enabled)
+        hit = cache.get(conn, ck, tenant_id=ident.tenant_id, scope=scope, authorizer=authorizer_, now=asked,
+                        session_id=str(sid)) if ttl > 0 else None
+        prepared = None
+        if hit is not None:
+            log_query(conn, hit, scope=scope, user_id=ident.user, question=body.question, asked_at=asked, query_id=qid)
+            outcome, result = "completed", hit
+        else:
+            try:
+                prepared = eng.prepare(body.question, today=asked.date(), as_of_valid=body.as_of_valid,
+                                       as_of_system=body.as_of_system, mode_hint=body.mode_hint)
+            except ModelCallError as e:
+                failed = QueryResult(str(sid), "failed", "fast", ["fast"], {}, {}, None, [], False, [], [], [], 0,
+                                     model_id, build_id)
+                log_query(conn, failed, scope=scope, user_id=ident.user, question=body.question, asked_at=asked,
+                          query_id=qid)
+                raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
+            tasks.create(conn, query_id=qid, session_id=sid, ident=ident, scope=scope, question=body.question,
+                         asked_at=asked, prepared=prepared, model_id=model_id, index_build_id=build_id,
+                         owner=runner.owner)
+            handoff = threading.Event()
+            future = pool.submit(runner.run, qid, scope=scope, handoff=handoff)
+            try:
+                outcome, result = future.result(timeout=float(eng.budgets["sync_seconds"]))
+            except TimeoutError:
+                handoff.set()                       # 当前步骤结束后交给后台任务进程
+                outcome, result = "running", None
+            except AuthorizerUnavailable:
+                raise ApiError(503, "authz_unavailable", "授权服务不可用")
+            except ModelCallError as e:
+                raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
+            if outcome == "completed":
+                cache.put(conn, ck, result, tenant_id=ident.tenant_id, scope=scope, build_id=build_id, ttl_seconds=ttl,
+                          source_query=qid, now=asked)
         if outcome == "completed":
             resp = jsonable_encoder(result.response())
         else:                                    # running（含已交给后台）或 cancelled：其余字段为空（11.2）
