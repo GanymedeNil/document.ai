@@ -57,7 +57,9 @@ class Retriever:
         factor = self.backtrack_factor if system_t else 1      # 回溯在检索后才筛有效期，候选放大
         index = self.index.snapshot()                          # 两路检索发往同一个索引，别名切换不混用（AC-5-3）
         lexical = index.search_text(question, f, self.k_lexical * factor)
-        vector = index.search_vector(self.embedder.embed([question])[0], f, self.k_vector * factor)
+        qv = (self.embedder.embed_query(question) if hasattr(self.embedder, "embed_query")
+              else self.embedder.embed([question])[0])            # 查询可带指令前缀，文档不带
+        vector = index.search_vector(qv, f, self.k_vector * factor)
         fused = rrf(lexical, vector, k=self.rrf_k)[: self.top_n * factor]
         hits = self._recheck(scope, fused, on, system_t)[: self.top_n]
         if self.reranker is not None and hits:

@@ -54,14 +54,22 @@ class ModelClient(Protocol):
 
 
 class ModelEmbedder:
-    """把 ModelClient.embed 包装成检索使用的 Embedder（retrieval.embed.Embedder）。"""
+    """把 ModelClient.embed 包装成检索使用的 Embedder（retrieval.embed.Embedder）。
 
-    def __init__(self, client: ModelClient, name: str):
-        self.client, self.name = client, name
+    query_instruction：查询向量化时加的指令前缀（Qwen3-Embedding 等模型要求查询带指令、文档不带）。
+    前缀只影响查询，文档向量与缓存（evidence_embedding，按模型名区分）不受影响。
+    """
+
+    def __init__(self, client: ModelClient, name: str, *, query_instruction: str | None = None):
+        self.client, self.name, self.query_instruction = client, name, query_instruction
         self.dims = client.capabilities().embedding_dims
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         return self.client.embed(texts)
+
+    def embed_query(self, question: str) -> list[float]:
+        text = f"Instruct: {self.query_instruction}\nQuery:{question}" if self.query_instruction else question
+        return self.client.embed([text])[0]
 
 
 _DEFAULTS = {"string": "", "integer": 0, "number": 0, "boolean": False, "array": [], "object": {}}

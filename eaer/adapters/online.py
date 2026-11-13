@@ -15,6 +15,7 @@
   EAER_GEN_BASE_URL / EAER_GEN_API_KEY / EAER_GEN_MODEL     生成服务；EAER_GEN_THINKING=disabled 关闭推理过程
   EAER_GEN_CONTEXT_TOKENS / EAER_GEN_VISION=1                上下文长度、是否支持图像输入
   EAER_EMBED_BASE_URL / EAER_EMBED_API_KEY / EAER_EMBED_MODEL / EAER_EMBED_DIMS
+  EAER_EMBED_QUERY_INSTRUCTION                               查询向量化的指令前缀（Qwen3-Embedding 需要）
   EAER_RERANK_BASE_URL / EAER_RERANK_API_KEY / EAER_RERANK_MODEL
   EAER_MODEL_TIMEOUT（秒，默认 30）/ EAER_MODEL_RETRIES（默认 2）
 """
@@ -91,12 +92,14 @@ def urllib_transport(url: str, headers: dict, body: dict, timeout: float) -> tup
 class OnlineModelClient:
     def __init__(self, generation: Endpoint | None, embedding: Endpoint | None = None,
                  rerank: Endpoint | None = None, *, embedding_dims: int = 0, context_tokens: int = 128_000,
-                 vision: bool = False, meter: Callable[[CallRecord], None] | None = None,
+                 vision: bool = False, query_instruction: str | None = None,
+                 meter: Callable[[CallRecord], None] | None = None,
                  transport: Transport = urllib_transport, sleep: Callable[[float], None] = time.sleep):
         if embedding is not None and embedding_dims <= 0:
             raise ValueError("配置了 Embedding 服务时必须给出向量维度")
         self.gen, self.emb, self.rr = generation, embedding, rerank
         self.embedding_dims, self.context_tokens, self.vision = embedding_dims, context_tokens, vision
+        self.query_instruction = query_instruction
         self.meter, self.transport, self.sleep = meter, transport, sleep
 
     @classmethod
@@ -118,13 +121,21 @@ class OnlineModelClient:
                    ep("EAER_EMBED"), ep("EAER_RERANK"),
                    embedding_dims=int(e.get("EAER_EMBED_DIMS", "0")),
                    context_tokens=int(e.get("EAER_GEN_CONTEXT_TOKENS", "128000")),
-                   vision=e.get("EAER_GEN_VISION") == "1", **kw)
+                   vision=e.get("EAER_GEN_VISION") == "1",
+                   query_instruction=e.get("EAER_EMBED_QUERY_INSTRUCTION") or None, **kw)
 
     # ---------- ModelClient ----------
 
     def capabilities(self) -> Capabilities:
         return Capabilities(self.gen is not None, self.context_tokens if self.gen else 0,
                             self.vision and self.gen is not None, self.embedding_dims if self.emb else 0)
+
+    def embedder(self):
+        """检索与索引使用的 Embedder；名字取 Embedding 模型名，向量缓存按它区分。"""
+        from eaer.adapters.model import ModelEmbedder
+        if self.emb is None:
+            raise CapabilityNotSupported("未配置 Embedding 服务")
+        return ModelEmbedder(self, self.emb.model, query_instruction=self.query_instruction)
 
     def missing_for_fast(self) -> list[str]:
         """Fast 模式需要生成、Embedding、重排三项（12.1）；缺任何一项都无法运行，部署时报错。"""

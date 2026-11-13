@@ -32,6 +32,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 | `eaer/adapters/` | 对接接口（11.3）：数据源（参考实现本地文件夹 + `_acl.yaml`）、授权（参考实现本地账号）、模型（接口、测试替身，以及线上通用客户端 `online.py`：生成、Embedding、重排分别配置，配置见该文件的文档字符串；本地开发的密钥放在未纳入版本控制的 `.env`）；`conformance.py` 是客户实现交付前必跑的一致性套件 |
 | `eaer/domain/` | 证据 id 规则、身份与授权范围（`Identity`、`Scope`） |
 | `eaer/evalload/`、`eaer/evalrun/` | 评测专用的历史日期装载入口与检索评测运行器，只在 `EAER_ENV=eval` 时可用 |
+| `modelserver/` | 本地模型服务（参考实现，独立部署）：Qwen3-Embedding-0.6B 与 Qwen3-Reranker-0.6B，提供 `/v1/embeddings` 与 `/v1/rerank`；`python -m modelserver --port 8100 --env-file .env`，Mac 用 MPS、Linux 用 CUDA |
 | `factset/` | 合成评测集工具：校验事实表、生成文档、检查文档、计算标准答案 |
 | `tests/` | 每个测试文件的文档字符串注明对应的验收项（AC-x-y） |
 
@@ -82,7 +83,7 @@ Fast 试跑（2026-11-13，`python -m eaer.evalrun.fast`，生成用 DeepSeek `d
 
 ## 需要用户决定或提供的事项
 
-- 线上 Embedding 与重排服务的选择与接入配置。生成已用 DeepSeek（`deepseek-flash`，2026-11-13 提供密钥）；DeepSeek 没有 Embedding 与重排接口（/embeddings 返回 404），而 Fast 模式需要三项齐全（12.1）。
+- 模型服务（2026-11-13 确定）：生成用 DeepSeek（`deepseek-flash`）；Embedding 与重排由用户选定本地部署 Qwen3（`modelserver/`，先用 0.6B）。是否换 4B/8B 在扩充评测集后按 AC-5-4 比较决定。
 - 确认“删除待审核版本时保留审核记录”。
 - 集群版私有化环境的 S3 兼容存储产品（第 13 周前）。MinIO 社区版已停止维护，候选为 Garage、SeaweedFS、Ceph RGW。
 - 各指标项的门槛，在基线评测后与用户一起回填到开发文档 16.2 节。
