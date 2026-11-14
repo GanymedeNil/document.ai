@@ -144,7 +144,8 @@ class Ingestion:
     def parse_deep(self, version_id: uuid.UUID) -> None:
         """发布后在后台解析表格与图片（6.2 第 6 阶段，不阻塞发布）。
 
-        表格：每个数据单元格一条证据，内容带行名和列名。图片：配置了有看图能力的模型（figure_reader）时交给它
+        表格：每个数据单元格一条证据，内容带行名和列名；只有第一格有内容的行（单列的清单、电子表格里一列写的条款）
+        整格一条证据。图片：配置了有看图能力的模型（figure_reader）时交给它
         转写，图表每个数据点一条证据（figures.py）；没有配置时跳过。表格先写入；图片逐张读取、逐张提交，
         已有证据的图片不再读取，所以任务失败重试时不会重复读取、也不会产生重复证据。有图片读取失败时，
         已写入的照常进索引，任务报错交给重试。
@@ -160,11 +161,21 @@ class Ingestion:
                 if len(t.rows) < 2:
                     continue
                 header = t.rows[0]
-                for r, row in enumerate(t.rows[1:], start=1):
+                single = all(not any(x for x in row[1:]) for row in t.rows)
+                for r, row in enumerate(t.rows):
+                    if r == 0 and not single:
+                        continue
+                    if not any(x for x in row[1:]):
+                        # 只有第一格有内容的行（电子表格里一列写的条款、清单，或单列的表）：整格就是一条证据，
+                        # 不能因为没有“列”就丢掉（Docling 把每个工作表解析成一张表）
+                        if row and row[0]:
+                            self.lc.add_evidence(version_id, "table", _locator(t, table=t_index, row=r, column=0),
+                                                 row[0], "deep")
+                        continue
                     for c in range(1, len(row)):
                         if not row[c]:
                             continue
-                        col = header[c] if c < len(header) else f"第{c + 1}列"
+                        col = header[c] if c < len(header) and header[c] else f"第{c + 1}列"
                         self.lc.add_evidence(version_id, "table", _locator(t, table=t_index, row=r, column=c),
                                              f"{row[0]}｜{col}：{row[c]}", "deep")
         failed = self._read_figures(version_id, parsed)
