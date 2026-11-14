@@ -18,7 +18,8 @@ info:
     - 需要文档权限的接口经授权服务解析授权范围；授权服务不可用时返回 503 `authz_unavailable`，不退化为放行。
     - 请求里未定义的字段被忽略。
 
-    11.1 的 429 `rate_limited`（频率限制）尚未实现，实现后补入本文件。
+    - 频率限制（11.1 的 429 `rate_limited`）：每个用户每分钟的提问、上传次数有上限（部署环境变量
+      `EAER_RATE_QUERY_PER_MINUTE`、`EAER_RATE_UPLOAD_PER_MINUTE`，默认 30、120），超过时返回 429 与 `Retry-After`。
 servers:
   - url: /
 security:
@@ -81,6 +82,7 @@ paths:
         '400': {$ref: '#/components/responses/InvalidRequest'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/ScopeUndetermined'}
+        '429': {$ref: '#/components/responses/RateLimited'}
         '404':
           description: session_id 是其他用户的会话
           headers:
@@ -244,6 +246,7 @@ paths:
         '400': {$ref: '#/components/responses/InvalidRequest'}
         '401': {$ref: '#/components/responses/Unauthenticated'}
         '403': {$ref: '#/components/responses/RoleRequired'}
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /v1/review/tasks:
     get:
@@ -482,6 +485,22 @@ components:
             allOf:
               - {$ref: '#/components/schemas/Error'}
               - properties: {code: {const: invalid_state}}
+    RateLimited:
+      description: |
+        超过频率限制（rate_limited）：每个用户每分钟的提问、上传次数有上限（部署时配置，默认 30、120）。
+        Retry-After 给出到下一分钟的秒数；多个接口实例共用同一份计数。
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+        Retry-After:
+          description: 需要等待的秒数
+          required: true
+          schema: {type: string, pattern: '^[1-9][0-9]*$'}
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: '#/components/schemas/Error'}
+              - properties: {code: {const: rate_limited}}
     AuthzUnavailable:
       description: 授权服务不可用（authz_unavailable）
       headers:

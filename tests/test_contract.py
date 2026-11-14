@@ -103,10 +103,10 @@ class Env:
         return Engine(c, Retriever(c, self.index, self.emb), self.st["model"], LocalAuthorizer(c, ACCOUNTS),
                       store=self.store, budgets={"sync_seconds": self.st["sync"]})
 
-    def app(self, *, engine: bool = True, authorizer=None) -> Checked:
+    def app(self, *, engine: bool = True, authorizer=None, rate_limits=None) -> Checked:
         app = create_app(self.db_url, self.store, TokenAuthenticator(TOKENS), lambda: NOW,
                          authorizer=authorizer or (lambda c: self.st["authz"](c)),
-                         engine=self.engine if engine else None, owner="contract")
+                         engine=self.engine if engine else None, owner="contract", rate_limits=rate_limits)
         return Checked(TestClient(app), self.contract)
 
     def upload(self, body: str, name: str, token: str = "tok-ed", principals: str = "R_STAFF", **form):
@@ -288,6 +288,11 @@ def s_query(e: Env):
     expect(e.ask(), 503, "authz_unavailable")
     e.st["authz"] = lambda c: LocalAuthorizer(c, ACCOUNTS)
     expect(e.ask(client=e.app(engine=False)), 503, "query_unavailable")
+    from eaer.api.ratelimit import Limits
+    limited = e.app(rate_limits=Limits(query=1, upload=1))                    # 每分钟 1 次：第二次 429
+    expect(e.ask("tok-staff2", client=limited), 200)
+    r = expect(e.ask("tok-staff2", client=limited), 429, "rate_limited")
+    assert int(r.headers["Retry-After"]) >= 1
 
 
 def s_get_session(e: Env):
@@ -352,6 +357,14 @@ def s_upload(e: Env):
     expect(e.client.post("/v1/documents", data={"principals": "R_STAFF"},
                          files={"file": ("a.html", b"<p>x</p>")}), 401, "unauthenticated")
     expect(e.upload(body, "r.html", token="tok-rv"), 403, "forbidden")
+    from eaer.api.ratelimit import Limits
+    limited = e.app(rate_limits=Limits(query=1, upload=1))
+    first = limited.post("/v1/documents", headers=H("tok-ed"), data={"principals": "R_STAFF"},
+                         files={"file": ("q1.html", html("限流甲", "甲").encode(), "text/html")})
+    assert first.status_code == 201, first.text
+    r = expect(limited.post("/v1/documents", headers=H("tok-ed"), data={"principals": "R_STAFF"},
+                            files={"file": ("q2.html", html("限流乙", "乙").encode(), "text/html")}), 429, "rate_limited")
+    assert "上传" in r.json()["message"] and r.headers["Retry-After"]
 
 
 def s_list_review_tasks(e: Env):

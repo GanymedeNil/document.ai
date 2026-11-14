@@ -16,11 +16,13 @@
   EAER_QUERY_THREADS  同时执行的提问数，默认 8。提问超过同步时限（budgets.sync_seconds，默认 30 秒）转为后台任务，
       由后台任务进程（python -m eaer.ingestion）接着执行，它需要与本进程相同的查询配置（见 eaer/runtime.py）。
   EAER_TRACE_EXPORTER none（默认）/ console / otlp：每次查询一条 trace（13.3，见 eaer/observability.py）。
+  EAER_RATE_QUERY_PER_MINUTE / EAER_RATE_UPLOAD_PER_MINUTE  每个用户每分钟的提问 / 上传上限，默认 30 / 120，0 不限（11.1 的 429）。
 """
 import os
 import socket
 
 from eaer.api.app import TokenAuthenticator, create_app
+from eaer.api.ratelimit import Limits
 from eaer.observability import configure as configure_tracing
 from eaer.runtime import authorizer_factory, engine_factory, load_tokens
 from eaer.storage import LocalFileStore
@@ -31,4 +33,4 @@ _store = LocalFileStore(os.environ["EAER_STORAGE_DIR"])
 app = create_app(os.environ["EAER_DATABASE_URL"], _store, TokenAuthenticator(_tokens),
                  authorizer=authorizer_factory(_accounts), engine=engine_factory(dict(os.environ), _accounts, _store),
                  query_threads=int(os.environ.get("EAER_QUERY_THREADS", "8")),
-                 owner=f"{socket.gethostname()}:{os.getpid()}")
+                 owner=f"{socket.gethostname()}:{os.getpid()}", rate_limits=Limits.from_env(dict(os.environ)))

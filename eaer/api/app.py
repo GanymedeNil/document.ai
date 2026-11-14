@@ -64,8 +64,8 @@ class TokenAuthenticator:
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, code: str, message: str):
-        self.status, self.code, self.message = status, code, message
+    def __init__(self, status: int, code: str, message: str, headers: dict[str, str] | None = None):
+        self.status, self.code, self.message, self.headers = status, code, message, headers or {}
 
 
 Grade = Literal["explicit", "inferred", "unknown"]
@@ -120,10 +120,11 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
                clock: Callable[[], datetime] = utcnow,
                authorizer: Callable[[psycopg.Connection], Authorizer] | None = None,
                engine: Callable[[psycopg.Connection, str], Any] | None = None, *,
-               query_threads: int = 8, owner: str | None = None) -> FastAPI:
+               query_threads: int = 8, owner: str | None = None, rate_limits=None) -> FastAPI:
     """authorizer：给定数据库连接返回授权接口实例；为 None 时需要文档权限的接口一律 503。
     engine：给定数据库连接与租户返回查询编排器（orchestrator.engine.Engine）；为 None 时提问接口 503。
-    query_threads：同时执行的提问数（每个提问在请求线程之外执行，以便超过同步时限时转入后台，8.5）。"""
+    query_threads：同时执行的提问数（每个提问在请求线程之外执行，以便超过同步时限时转入后台，8.5）。
+    rate_limits：eaer.api.ratelimit.Limits，每个用户每分钟的提问与上传次数上限（11.1 的 429）；None 时不限。"""
     from eaer.orchestrator.tasks import TaskRunner
 
     spec = openapi_spec()
@@ -140,13 +141,13 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         response.headers["X-Request-Id"] = request.state.request_id
         return response
 
-    def error(request: Request, status: int, code: str, message: str) -> JSONResponse:
+    def error(request: Request, status: int, code: str, message: str, headers: dict | None = None) -> JSONResponse:
         return JSONResponse({"code": code, "message": message, "request_id": request.state.request_id},
-                            status_code=status, headers={"X-Request-Id": request.state.request_id})
+                            status_code=status, headers={"X-Request-Id": request.state.request_id, **(headers or {})})
 
     @app.exception_handler(ApiError)
     async def _api_error(request: Request, e: ApiError):
-        return error(request, e.status, e.code, e.message)
+        return error(request, e.status, e.code, e.message, e.headers)
 
     @app.exception_handler(InvalidState)
     async def _invalid_state(request: Request, e: InvalidState):
@@ -192,6 +193,24 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
     Admin = Annotated[Identity, Depends(require("admin"))]
     Anyone = Annotated[Identity, Depends(identity)]
 
+    def limited(kind: str, role: str | None):
+        """频率限制（11.1）：身份通过后记一次，超过上限 429 并给出 Retry-After。"""
+        from eaer.api.ratelimit import hit
+
+        def dep(conn: Conn, ident: Annotated[Identity, Depends(require(role) if role else identity)]) -> Identity:
+            if rate_limits is not None:
+                limit = rate_limits.of(kind)
+                wait = hit(conn, f"{ident.tenant_id}:{ident.user}", kind, limit, clock())
+                if wait is not None:
+                    what = "提问" if kind == "query" else "上传"
+                    raise ApiError(429, "rate_limited", f"超过频率限制：每分钟最多{what} {limit} 次，请 {wait} 秒后重试",
+                                   {"Retry-After": str(wait)})
+            return ident
+        return dep
+
+    QueryUser = Annotated[Identity, Depends(limited("query", None))]
+    UploadEditor = Annotated[Identity, Depends(limited("upload", "editor"))]
+
     def authorize(conn: Conn, ident: Annotated[Identity, Depends(identity)]) -> tuple[Authorizer, Scope]:
         """10.1 第 2 步：解析授权范围；授权接口不可用时直接拒绝（AC-10-5）。"""
         if authorizer is None:
@@ -218,7 +237,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         return did
 
     @app.post("/v1/documents", status_code=201)
-    def upload(conn: Conn, ident: Editor,
+    def upload(conn: Conn, ident: UploadEditor,
                file: Annotated[UploadFile, File()],
                principals: Annotated[str, Form(description="可访问的角色，分号或逗号分隔")],
                source_ref: Annotated[str | None, Form()] = None,
@@ -284,7 +303,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
             raise ApiError(404, "not_found", "会话不存在")
 
     @app.post("/v1/query")
-    def query(conn: Conn, ident: Anyone, authz: Authz, body: QueryRequest):
+    def query(conn: Conn, ident: QueryUser, authz: Authz, body: QueryRequest):
         """提问（11.2）。先查回答缓存（同租户、同授权范围、同索引构建，命中后仍核对权限）；未命中则在请求线程之外
         执行，等待同步时限（budgets.sync_seconds）；超时返回 status=running，其余字段为空，任务在当前步骤结束后
         交给后台任务进程，客户端轮询会话接口（8.5）。同步完成的回答写入缓存。"""
