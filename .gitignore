@@ -7,3 +7,7 @@ __pycache__/
 /eval-output/
 .env
 .DS_Store
+
+# 部署配置（含密钥与令牌）
+/deploy/eaer.env
+/deploy/tokens.json

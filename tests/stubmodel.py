@@ -78,6 +78,7 @@ class StubModelServer:
         self.embedder = HashingEmbedder(dims)
         self.dims = dims
         self.calls = {"generate": 0, "embed": 0, "rerank": 0}
+        self.generate_delay = 0.0                         # 每次生成调用先等这么久（模拟慢模型，测转后台）
         self._lock = threading.Lock()
         stub = self
 
@@ -120,6 +121,9 @@ class StubModelServer:
                                 for i, d in enumerate(body["documents"])]}
         if path.endswith("/chat/completions"):
             self._count("generate")
+            if self.generate_delay:
+                import time
+                time.sleep(self.generate_delay)
             msgs = body["messages"]
             schema = None
             if msgs and msgs[0]["role"] == "system" and "JSON Schema：\n" in msgs[0]["content"]:

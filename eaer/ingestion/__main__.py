@@ -3,6 +3,7 @@
     python -m eaer.ingestion                 后台任务进程：解析、分类与抽取、深度解析、索引任务，以及转入后台的提问
     python -m eaer.ingestion --no-index      只做解析与抽取，不处理索引任务与提问（留在队列里）
     python -m eaer.ingestion rebuild --build-id b2   全量重建索引并切换别名（开发文档 5.3）
+    python -m eaer.ingestion ensure-index    别名不存在时建一个（首次部署、或索引丢失后从数据库重建）；已存在则什么都不做
     python -m eaer.ingestion drop-retired    删除别名不再指向、且超过 24 小时的旧索引（应定时运行）
     python -m eaer.ingestion purge           立即做一次 Trace 清理（后台任务进程每 EAER_PURGE_SECONDS 秒自动做一次，默认 3600）
     python -m eaer.ingestion stats           入库队列与索引更新延迟（JSON，供监控采集；--since-minutes 默认 60）
@@ -69,7 +70,8 @@ def build_worker(conn: psycopg.Connection, store, env: dict[str, str], *, with_i
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="eaer.ingestion")
-    p.add_argument("command", nargs="?", default="worker", choices=["worker", "rebuild", "drop-retired", "purge", "stats"])
+    p.add_argument("command", nargs="?", default="worker", choices=["worker", "rebuild", "ensure-index", "drop-retired",
+                                                                   "purge", "stats"])
     p.add_argument("--no-index", action="store_true", help="只做解析与抽取，不处理索引任务")
     p.add_argument("--build-id", help="rebuild：新索引的构建编号")
     p.add_argument("--retain-hours", type=float, default=24.0, help="drop-retired：旧索引保留时长")
@@ -103,6 +105,19 @@ def main(argv: list[str] | None = None) -> int:
 
             from eaer.orchestrator.tasks import purge
             print("已删除：", purge(conn, datetime.now(timezone.utc)))
+            return 0
+        if args.command == "ensure-index":
+            from datetime import datetime, timezone
+
+            from eaer.ingestion.indexer import rebuild
+            from eaer.retrieval.opensearch import OpenSearchIndex
+            client, alias, analyzer, seg, embedder = index_parts(env)
+            current = sorted(OpenSearchIndex(client, alias=alias).current())
+            if current:
+                print(f"别名 {alias} 已指向 {current}，无需新建")
+                return 0
+            build_id = args.build_id or datetime.now(timezone.utc).strftime("b%Y%m%d%H%M%S")
+            print(rebuild(conn, client, alias, build_id=build_id, embedder=embedder, analyzer=analyzer, segmenter=seg))
             return 0
         if args.command == "rebuild":
             from eaer.ingestion.indexer import rebuild
