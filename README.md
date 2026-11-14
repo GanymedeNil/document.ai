@@ -31,6 +31,7 @@
 | 评测可复现 | `eaer/evalrun/repro.py`：同一配置连续评测两次，McNemar 精确检验判断差异是否在随机波动范围内 | AC-14-5 |
 | 精简版部署 | `Dockerfile`、`docker-compose.yml`、`deploy/`（配置模板、备份恢复脚本）、`docs/部署说明.md`；冒烟测试集 `eaer/smoke.py` | AC-13-1、AC-13-3、AC-13-4 |
 | 横向扩展 | `tests/test_scale_out.py`：2 个接口实例、3 个后台进程，会话与异步任务不丢失 | AC-13-2 |
+| 三方对比 | `eaer/evalrun/compare3.py`：传统 Hybrid RAG、Always-Agent、Adaptive 的正确率、耗时、生成 token；报告 `docs/三方对比报告.md` | AC-8-11 |
 | 评测装载入口 | `eaer/evalload/loader.py`：按历史日期装载事实表，只在 `EAER_ENV=eval` 时可用 | 开发文档 14.2 |
 | 事实表工具 | `factset/`：校验、生成文档、检查文档、计算答案，用法见 `factset/README.md` | AC-14-1、AC-14-3、AC-14-2 程序部分 |
 
