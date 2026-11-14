@@ -56,6 +56,49 @@ FROZEN = {
 }
 
 
+# 下载的公开评测集文件：文件 SHA-256 → (数据集, 说明)。由 python -m eaer.evalrun.datasets 按固定提交号下载；
+# 只有这里登记过的文件才按该数据集的许可对待，改过一个字节就是未登记来源
+DATASET_FILES = {
+    "20b61b5ab84de84a927420c5d265b7ec8d859ae49980699958a787ade9e4d28f":
+        ("MultiHop-RAG", "corpus.json（yixuantt/MultiHopRAG@71ac0d0b）"),
+    "03cfb4926461f868684903aadc8024447bdda5bb3f6804741424cce338515bff":
+        ("MultiHop-RAG", "MultiHopRAG.json（yixuantt/MultiHopRAG@71ac0d0b）"),
+    # ViDoRe V3 HR 子集：PDF 原件按固定提交号下载；问题与文档清单经 dataset viewer 接口取得、排序后保存（eaer/evalrun/datasets.py）
+    "685ecfda8fa0c1ab537d8120a5dd1f04c703bde671de3c7104a992fd8edf26e0":
+        ("ViDoRe V3", "pdfs/a_demographic_perspective_on_the_future_of_european-KJ0125152ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "139828daea6050681122a19927aa1edf63df92ccb1b6db8db23c07ba2c7a2aef":
+        ("ViDoRe V3", "pdfs/access_for_domestic_workers_to_labour_and_social_protection-KE0124002ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "0342cfe69b002600232528032684562d3fdbcab4a603daeb5629c4e7d1d6fdb3":
+        ("ViDoRe V3", "pdfs/annual_report_on_intra-eu_labour_mobility-KE0125029ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "1b347c2b832740be3abf136eeedc6f7bbacbf162c33c0227fa611cbfb9e31615":
+        ("ViDoRe V3", "pdfs/employment_and_social_developments_in_europe-KE0125067ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "07151bec7bcdbedcf7b7efed07953cbd05e21f8a124d365d2edac195866c5b62":
+        ("ViDoRe V3", "pdfs/employment_and_social_developments_in_europe_2024-KEBD24002ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "0ea898b80b584e64a0d1c19ec5dc49873281e500a53f27c6d603584ed1cb9106":
+        ("ViDoRe V3", "pdfs/estimating_labour_market_transitions_and_skills_investment-KE0125066ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "df8794d0bf1f00124e66a705f91915e824d4077ec0ac9edfb550608b1c08337f":
+        ("ViDoRe V3", "pdfs/european_network_of_public_employment_services_annual-KE0124024ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "5bf0319a97dbeb45b6941547912ceb19198841bd0f75d57a8a569ff4fe770965":
+        ("ViDoRe V3", "pdfs/future-oriented_occupations_in_the_eu-KE0125043ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "e88b437140a6407e03bfcbd1c01f3fbb4d1f3540c953e678c0d8ed59ca39692e":
+        ("ViDoRe V3", "pdfs/joint_employment_report_2025-KE0125018ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "078435e3a5d09510ea9cc9f057b2bb231107b79628dbbc754ee68af4b37459a5":
+        ("ViDoRe V3", "pdfs/labour_market_and_wage_developments_in_europe-KEBN24001ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "b9e64a44d1c13a38e13c2c7cb836537073353c787a83026cf822d49746e4e899":
+        ("ViDoRe V3", "pdfs/posting_of_workers-KE0224850ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "412ea0cd6a31a0fa3cade6952249583a3c6549fffc936b0690670994c62ccff7":
+        ("ViDoRe V3", "pdfs/recruitment_working_conditions_career_development-KI0124000ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "1d2cfad34e3730be47abed627d0c97c706345a44324a5baee7ce350d9ed522d3":
+        ("ViDoRe V3", "pdfs/research_perspectives_on_the_future_of_work-KI0124087ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "77cd118bcda7694be496ced12a80c9f456f7131ecae5a4d0dbb94f3fe8c67f46":
+        ("ViDoRe V3", "pdfs/undeclared_care_work_in_the_eu-TJ0125004ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),
+    "ddd1ca18f5904fcfb567bf46f9203d4f9de8475ab59acd5be3101e67a11c8e06":
+        ("ViDoRe V3", "queries.json（vidore/vidore_v3_hr@0cdf0979）"),
+    "53698836493ea81817a6231e95df72401b4689956b70dda4eeebd62ac5bb4280":
+        ("ViDoRe V3", "documents_metadata.json（vidore/vidore_v3_hr@0cdf0979）"),
+}
+
+
 @dataclass(frozen=True)
 class Provenance:
     dataset: str                       # DATASETS 中的名字，或 UNREGISTERED
@@ -100,6 +143,20 @@ def _declared(path: Path) -> Provenance | None:
     modified = str(vals.get("是否改编") or "").strip() in ("是", "true", "True", "1")
     return Provenance(name if name in DATASETS else UNREGISTERED, modified,
                       str(vals.get("说明") or "") if name in DATASETS else f"“数据来源”表写的“{name}”未登记许可")
+
+
+def provenance_of_files(paths: list[str | Path]) -> Provenance:
+    """下载的公开评测集：全部文件都在 DATASET_FILES 里、且属于同一个数据集时按它的许可，否则为未登记来源。"""
+    found = []
+    for p in paths:
+        digest = hashlib.sha256(Path(p).read_bytes()).hexdigest()
+        if digest not in DATASET_FILES:
+            return Provenance(UNREGISTERED, False, f"{Path(p).name}（SHA-256 {digest[:12]}…，不是登记过的下载文件）")
+        found.append(DATASET_FILES[digest])
+    names = {n for n, _ in found}
+    if len(names) != 1:
+        return Provenance(UNREGISTERED, False, f"文件分属不同的数据集：{sorted(names)}")
+    return Provenance(names.pop(), False, "；".join(d for _, d in found))
 
 
 def external_problems(provs: list[Provenance]) -> list[str]:
