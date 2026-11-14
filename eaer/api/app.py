@@ -310,6 +310,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         # 一次提问一条 trace（13.3）：根 span 在这里，执行段（本进程或后台进程）经查询状态里的 traceparent 挂在它下面
         with span("eaer.query", **{"eaer.tenant": ident.tenant_id, "eaer.session_id": str(sid),
                                    "eaer.query_id": str(qid)}) as root:
+            since_epoch = cache.epoch(conn, ident.tenant_id) if ttl > 0 else 0   # 检索之前读失效序号
             hit = cache.get(conn, ck, tenant_id=ident.tenant_id, scope=scope, authorizer=authorizer_, now=asked,
                             session_id=str(sid)) if ttl > 0 else None
             prepared = None
@@ -342,7 +343,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
                     raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
                 if outcome == "completed":
                     cache.put(conn, ck, result, tenant_id=ident.tenant_id, scope=scope, build_id=build_id, ttl_seconds=ttl,
-                              source_query=qid, now=asked)
+                              source_query=qid, now=asked, since_epoch=since_epoch)
             if outcome == "completed":
                 resp = jsonable_encoder(result.response())
             else:                                    # running（含已交给后台）或 cancelled：其余字段为空（11.2）

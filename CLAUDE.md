@@ -21,7 +21,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 
 | 路径 | 内容 |
 | --- | --- |
-| `eaer/db/migrations/` | Alembic 迁移，原生 SQL。12 张业务表，另有查询任务表 `query_task`、LangGraph 的 4 张检查点表（0005，按库的表结构建、不在运行时建表）、回答缓存 `query_cache`（0006，失效由触发器完成）与准入记录 `model_admission`（0007，只追加）；0008 给审核任务加所属租户 `tenant_id`；不变量由触发器、检查约束、部分唯一索引保证 |
+| `eaer/db/migrations/` | Alembic 迁移，原生 SQL。12 张业务表，另有查询任务表 `query_task`、LangGraph 的 4 张检查点表（0005，按库的表结构建、不在运行时建表）、回答缓存 `query_cache`（0006，失效由触发器完成）与准入记录 `model_admission`（0007，只追加）；0008 给审核任务加所属租户 `tenant_id`；0009 让索引任务完成时也清缓存，并加每租户的失效序号 `query_cache_epoch`（写缓存前比较，堵住先算后写的竞争）；不变量由触发器、检查约束、部分唯一索引保证 |
 | `eaer/lifecycle/` | 生命周期服务（唯一能改版本状态的模块）与按系统时间的回溯查询 |
 | `eaer/ingestion/` | 入库第 1–3、6 阶段，解析器接口（原生 Word/HTML 与 Docling），抽取规则，索引任务（`indexer.py`，唯一写索引的地方），后台任务进程（也接着执行转入后台的提问；任务按阶段的优先级领取，见 `eaer/domain/jobs.py`），队列与索引更新延迟统计（`stats.py`，`python -m eaer.ingestion stats` 输出 JSON） |
 | `eaer/review/` | 审核服务 |

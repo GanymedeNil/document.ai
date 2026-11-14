@@ -20,8 +20,10 @@ TRIGGERS_0005 = {"query_log_guard", "query_task_guard"}
 TRIGGERS_0006 = {"cache_on_version", "cache_on_validity", "cache_on_relation", "cache_on_acl_policy", "cache_on_tenant_config"}
 TRIGGERS_0007 = {"model_admission_append_only", "cache_on_model_admission"}
 TRIGGERS_0008 = {"review_task_tenant_guard"}
-ALL = (TABLES | TABLES_0005 | TABLES_0006 | TABLES_0007,
-       TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006 | TRIGGERS_0007 | TRIGGERS_0008)
+TRIGGERS_0009 = {"cache_on_index_job"}
+TABLES_0009 = {"query_cache_epoch"}
+ALL = (TABLES | TABLES_0005 | TABLES_0006 | TABLES_0007 | TABLES_0009,
+       TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006 | TRIGGERS_0007 | TRIGGERS_0008 | TRIGGERS_0009)
 
 
 def _state(url):
@@ -42,9 +44,14 @@ def test_upgrade_downgrade_upgrade(empty_db_url):
 
 
 def test_each_revision_downgrades_one_step(empty_db_url):
-    """逐个版本回滚：0008 去掉审核任务的租户与其触发器；0007 去掉准入记录；0006 去掉回答缓存；
-    0005 去掉查询任务与检查点表；0004 只去掉强制验证清单的触发器。"""
+    """逐个版本回滚：0009 去掉索引任务完成时清缓存的触发器；0008 去掉审核任务的租户与其触发器；0007 去掉准入记录；
+    0006 去掉回答缓存；0005 去掉查询任务与检查点表；0004 只去掉强制验证清单的触发器。"""
     migrate(empty_db_url)
+    downgrade(empty_db_url, "0008")
+    assert _state(empty_db_url) == (ALL[0] - TABLES_0009, ALL[1] - TRIGGERS_0009)
+    with psycopg.connect(empty_db_url) as c:                    # 0006 的清缓存函数恢复原样（不再引用失效序号）
+        assert "eaer_cache_invalidate" not in c.execute(
+            "SELECT prosrc FROM pg_proc WHERE proname = 'eaer_cache_clear_for_version'").fetchone()[0]
     downgrade(empty_db_url, "0007")
     assert _state(empty_db_url) == (TABLES | TABLES_0005 | TABLES_0006 | TABLES_0007,
                                     TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006 | TRIGGERS_0007)

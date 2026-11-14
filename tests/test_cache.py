@@ -49,6 +49,7 @@ def answer(p):
     """按证据作答：问高管薪酬就找 300 万元那条，问住宿就找 650 元那条；提示里没有（无权或已归档）就拒答。"""
     question = p.split("问题：")[1].split("\n")[0]
     needle, text = (("300万元", "高管年薪上限为300万元。") if "高管" in question
+                    else ("一个工作日", "会议室预订须提前一个工作日提交申请。") if "会议" in question
                     else ("650元", "一线城市住宿上限为每晚650元。"))
     ids = ids_with(p, needle)
     if ids:
@@ -149,6 +150,72 @@ def test_permission_change_archive_and_unarchive_clear_the_cache(cq):
     cq.client.post(f"/v1/documents/{cq.docs['pub']}/unarchive", headers=H("tok-ed"))
     cq.ingest.run_until_idle()
     assert "650元" in ask(cq, "tok-staff", PUBLIC_Q)["answer"]                 # 取消归档后也不用旧的拒答
+
+
+def test_answers_from_the_index_update_window_are_not_served_after_it(cq):
+    """数据库已变、索引还没跟上（5.3 的延迟窗口）时得到的回答也会进缓存；索引任务完成时清除（迁移 0009），
+    否则索引跟上之后仍会返回旧的拒答，直到缓存过期。冒烟测试（eaer/smoke.py）发现的问题。"""
+    assert cq.client.post(f"/v1/documents/{cq.docs['pub']}/archive", headers=H("tok-ed")).status_code == 200
+    cq.ingest.run_until_idle()
+    cq.client.post(f"/v1/documents/{cq.docs['pub']}/unarchive", headers=H("tok-ed"))
+    stale = ask(cq, "tok-staff", PUBLIC_Q)                    # 索引更新任务还在排队：检索不到
+    assert stale["abstained"]
+    assert cq.conn.execute("SELECT count(*) AS n FROM query_cache").fetchone()["n"] == 1
+    cq.ingest.run_until_idle()                                # 索引跟上，任务完成时清除缓存
+    assert cq.conn.execute("SELECT count(*) AS n FROM query_cache").fetchone()["n"] == 0
+    assert "650元" in ask(cq, "tok-staff", PUBLIC_Q)["answer"]
+
+    body = "<h1>会议管理办法</h1><p>第一条　会议室预订须提前一个工作日提交申请。</p><p>第二条　本办法自2026年1月1日起施行。</p>"
+    cq.client.post("/v1/documents", headers=H("tok-ed"), data={"principals": "R_STAFF"},
+                   files={"file": ("m.html", body.encode(), "text/html")})
+    cq.ingest.run_until_idle()
+    task = [t for t in cq.client.get("/v1/review/tasks", headers=H("tok-rv")).json()["items"]][0]["task_id"]
+    cq.client.post("/v1/review/decisions", headers=H("tok-rv"), json={"decisions": [
+        {"task_id": task, "decision": "approve", "corrections": {"doc_type": "normative"}}]})
+    q = "会议室预订须提前多久提交申请"
+    assert ask(cq, "tok-staff", q)["abstained"]               # 审核通过了，写入索引的任务还没执行
+    cq.ingest.run_until_idle()
+    assert "一个工作日" in ask(cq, "tok-staff", q)["answer"]
+
+
+def test_an_answer_computed_before_an_invalidation_is_not_written_after_it(cq, db_url):
+    """先算后写的竞争（迁移 0009 的失效序号）：读序号之后发生了失效，就不再写缓存；
+    失效所在的事务还没提交时，写缓存等它提交后再判断。"""
+    import threading
+
+    from eaer.orchestrator import cache
+    from eaer.orchestrator.engine import QueryResult
+
+    r = QueryResult("s", "completed", "fast", ["fast"], {}, {}, "旧状态算出的回答", [], True, [], [], [], 1, "m", "b1")
+    scope = Scope("t1", frozenset({"R_STAFF"}))
+    put = lambda e, k: cache.put(cq.conn, k, r, tenant_id="t1", scope=scope, build_id="b1", ttl_seconds=600,  # noqa: E731
+                                 source_query=uuid.uuid4(), now=NOW, since_epoch=e)
+    e0 = cache.epoch(cq.conn, "t1")
+    assert put(e0, "k1")                                            # 期间没有失效：照常写入
+    e1 = cache.epoch(cq.conn, "t1")
+    vid = cq.conn.execute("SELECT id FROM document_version WHERE document_id = %s", (cq.docs["pub"],)).fetchone()["id"]
+    cq.lc.correct_validity(vid, "admin", valid_from=date(2026, 2, 1))   # 算完、写之前发生了失效
+    assert cache.epoch(cq.conn, "t1") > e1 and not put(e1, "k2")
+    job = cq.conn.execute("SELECT id FROM ingest_job WHERE stage = 'index_update' AND status = 'queued' LIMIT 1").fetchone()
+    e2 = cache.epoch(cq.conn, "t1")
+    cq.ingest.run_until_idle()                                       # 索引任务完成也算失效
+    assert job and cache.epoch(cq.conn, "t1") > e2
+
+    e3 = cache.epoch(cq.conn, "t1")
+    other = psycopg.connect(db_url, row_factory=dict_row)            # 另一个事务做了失效，还没提交
+    other.execute("UPDATE tenant_config SET thresholds = '{\"rerank_min_top\": 0.4}' WHERE tenant_id = 't1'")
+    if other.execute("SELECT count(*) AS n FROM tenant_config WHERE tenant_id = 't1'").fetchone()["n"] == 0:
+        other.execute("INSERT INTO tenant_config (tenant_id, updated_at) VALUES ('t1', now())")
+    out = {}
+    t = threading.Thread(target=lambda: out.setdefault("wrote", put(e3, "k3")))
+    t.start()
+    t.join(1.0)
+    assert t.is_alive()                                              # 写缓存在等失效的事务
+    other.commit()
+    other.close()
+    t.join(10)
+    assert out == {"wrote": False}
+    assert cq.conn.execute("SELECT count(*) AS n FROM query_cache WHERE key IN ('k2', 'k3')").fetchone()["n"] == 0
 
 
 def test_validity_correction_and_tenant_config_clear_the_cache(cq):
