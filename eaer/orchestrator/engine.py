@@ -38,6 +38,7 @@ from eaer.adapters.model import Message, ModelClient
 from eaer.adapters.online import collect_calls, summarize
 from eaer.domain.identity import Scope
 from eaer.domain.injection import suspicious
+from eaer.observability import call_totals, set_attrs, span, traceparent
 from eaer.orchestrator import codec
 from eaer.orchestrator.deep import DeepOutcome, DeepRunner
 from eaer.orchestrator.fast import ABSTAIN, ClaimOut, Draft, Steps, evidence_block, target_of
@@ -79,6 +80,7 @@ class QueryState(TypedDict, total=False):
     alerts: list[str]
     answer: str
     abstained: bool
+    traceparent: str | None            # 这次提问的 trace（W3C），后台进程接着执行时续上同一条（13.3）
     calls: Annotated[list[dict], operator.add]     # 模型调用记录，跨节点、跨进程累加
     steps: Annotated[list[dict], operator.add]     # 已完成的步骤与耗时
 
@@ -191,9 +193,17 @@ class Engine:
                 as_of_system: date | None = None, mode_hint: str | None = None) -> QueryState:
         """第 1 步：时间点（7.5）与 Router（8.1）。结果是图的输入，也决定提问记录的入口模式。"""
         t0 = time.monotonic()
-        with collect_calls() as calls:
-            tb = resolve(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
-                         resolver=self._resolve_with_model)
+        root = traceparent()                       # 调用方的 eaer.query；后续执行段都挂在它下面
+        with span("eaer.node.prepare", **{"eaer.node": "prepare"}) as sp, collect_calls() as calls:
+            st = self._prepare(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
+                               mode_hint=mode_hint, t0=t0)
+            set_attrs(sp, {"eaer.mode_path": st["mode_path"], "eaer.route": st["route"].get("mode"),
+                           **call_totals(calls)})
+        return {**st, "calls": codec.calls_out(calls), "traceparent": root}
+
+    def _prepare(self, question: str, *, today: date, as_of_valid, as_of_system, mode_hint, t0) -> QueryState:
+        tb = resolve(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
+                     resolver=self._resolve_with_model)
         route = decide(question, tb, mode_hint)
         deep_off = self.deep_unavailable()
         notices = tb.echo()
@@ -204,7 +214,7 @@ class Engine:
         return {"request": {"question": question, "today": today.isoformat(), "as_of_valid": codec.iso(as_of_valid),
                             "as_of_system": codec.iso(as_of_system), "mode_hint": mode_hint},
                 "tb": tb.to_json(), "route": route.to_json(), "deep_off": deep_off, "notices": notices,
-                "mode_path": [start], "escalations": [], "rounds": 0, "calls": codec.calls_out(calls),
+                "mode_path": [start], "escalations": [], "rounds": 0,
                 "steps": [{"node": "prepare", "seconds": round(time.monotonic() - t0, 3)}]}
 
     def graph(self, checkpointer=None):
@@ -223,9 +233,13 @@ class Engine:
             session_id: str | None = None) -> QueryResult:
         """同步跑完整次提问（不接检查点）。"""
         self.scope = scope
-        st = self.prepare(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
-                          mode_hint=mode_hint)
-        return self.result(self.graph().invoke(st), session_id or str(uuid.uuid4()))
+        sid = session_id or str(uuid.uuid4())
+        with span("eaer.query", **{"eaer.tenant": scope.tenant_id, "eaer.session_id": sid}) as root:
+            st = self.prepare(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
+                              mode_hint=mode_hint)
+            r = self.result(self.graph().invoke(st), sid)
+            trace_result(root, r)
+        return r
 
     def result(self, st: dict[str, Any], session_id: str, status: str = "completed") -> QueryResult:
         draft = codec.draft_in(st.get("draft"))
@@ -243,8 +257,13 @@ class Engine:
     def _node(self, name: str, fn):
         def run(st: QueryState) -> dict:
             t0 = time.monotonic()
-            with collect_calls() as calls:
+            with span(f"eaer.node.{name}", **{"eaer.node": name}) as sp, collect_calls() as calls:
                 out = fn(st)
+                hits = out.get("hits", st.get("hits"))
+                set_attrs(sp, {"eaer.mode_path": out.get("mode_path", st.get("mode_path")),
+                               "eaer.candidates": len(hits) if hits is not None else None,
+                               "eaer.rounds": out.get("rounds", st.get("rounds")),
+                               "eaer.claims": len(out["claims"]) if "claims" in out else None, **call_totals(calls)})
             return {**out, "calls": codec.calls_out(calls),
                     "steps": [{"node": name, "seconds": round(time.monotonic() - t0, 3)}]}
         return run
@@ -451,6 +470,16 @@ def log_fields(r: QueryResult, scope: Scope) -> dict:
             "cost": Jsonb({**r.cost, "retrieval_rounds": r.retrieval_rounds, "seconds": r.seconds,
                            "router": r.router, "escalations": r.escalations, "signals": r.signals,
                            "forced_verify": r.forced_verify, "plan": r.plan})}
+
+
+def trace_result(sp, r: QueryResult) -> None:
+    """把一次提问的结果写到根 span 上（只有模式、状态与计数，不含原文）。"""
+    statuses = [c.status for c in r.claims]
+    set_attrs(sp, {"eaer.status": r.status, "eaer.mode": r.mode, "eaer.mode_path": r.mode_path,
+                   "eaer.abstained": r.abstained, "eaer.claims": len(r.claims),
+                   **{f"eaer.claims.{k}": statuses.count(k) for k in ("supported", "unverified", "unsupported")},
+                   "eaer.escalations": len(r.escalations), "gen_ai.request.model": r.model,
+                   "eaer.index_build_id": r.index_build_id})
 
 
 def log_query(conn: psycopg.Connection, r: QueryResult, *, scope: Scope, user_id: str, question: str,

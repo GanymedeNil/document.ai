@@ -33,3 +33,8 @@ langchain-protocol==0.0.20
 langsmith==0.14.16
 psycopg-pool==3.3.3
 ormsgpack==1.13.0
+# 可观测（开发文档 3.3、13.3）：每次查询一条 trace。fastapi 已依赖 opentelemetry-api，与 SDK 一并锁定；
+# 导出到 OTLP 接收端（集群版的 Phoenix 等）另装 requirements-otlp.txt
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1

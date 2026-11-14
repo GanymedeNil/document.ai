@@ -18,6 +18,7 @@ import psycopg
 
 from eaer.domain.identity import Scope
 from eaer.lifecycle.asof import end_of_day
+from eaer.observability import set_attrs, span
 from eaer.retrieval.embed import Embedder
 from eaer.retrieval.index import Filters, MissingScope, SearchIndex, rrf
 
@@ -68,18 +69,26 @@ class Retriever:
         on = as_of_valid or as_of_system or today
         f = Filters(scope.tenant_id, frozenset(scope.principals), on, system_t)
         factor = self.backtrack_factor if system_t else 1      # 回溯在检索后才筛有效期，候选放大
-        index = self.index.snapshot()                          # 两路检索发往同一个索引，别名切换不混用（AC-5-3）
-        lexical = index.search_text(question, f, self.k_lexical * factor)
-        qv = (self.embedder.embed_query(question) if hasattr(self.embedder, "embed_query")
-              else self.embedder.embed([question])[0])            # 查询可带指令前缀，文档不带
-        vector = index.search_vector(qv, f, self.k_vector * factor)
-        fused = rrf(lexical, vector, k=self.rrf_k)[: self.top_n * factor]
-        hits = self._recheck(scope, fused, on, system_t)[: self.top_n]
-        if self.reranker is not None and hits:
-            scores = self.reranker.rerank(question, [h.content for h in hits])
-            # 重排后 score 改为重排分数（0–1），编排器据此判断“重排后最高分低于阈值”（8.2）
-            hits = [replace(h, score=s) for s, h in sorted(zip(scores, hits), key=lambda x: -x[0])]
-        return hits[: self.top_m]
+        with span("eaer.retrieve", **{"eaer.tenant": scope.tenant_id, "eaer.as_of_valid": bool(as_of_valid),
+                                      "eaer.as_of_system": bool(system_t)}) as sp:
+            index = self.index.snapshot()                          # 两路检索发往同一个索引，别名切换不混用（AC-5-3）
+            lexical = index.search_text(question, f, self.k_lexical * factor)
+            qv = (self.embedder.embed_query(question) if hasattr(self.embedder, "embed_query")
+                  else self.embedder.embed([question])[0])            # 查询可带指令前缀，文档不带
+            vector = index.search_vector(qv, f, self.k_vector * factor)
+            fused = rrf(lexical, vector, k=self.rrf_k)[: self.top_n * factor]
+            hits = self._recheck(scope, fused, on, system_t)[: self.top_n]
+            rechecked = len(hits)
+            if self.reranker is not None and hits:
+                scores = self.reranker.rerank(question, [h.content for h in hits])
+                # 重排后 score 改为重排分数（0–1），编排器据此判断“重排后最高分低于阈值”（8.2）
+                hits = [replace(h, score=s) for s, h in sorted(zip(scores, hits), key=lambda x: -x[0])]
+            hits = hits[: self.top_m]
+            # 各阶段的候选数（13.3“检索候选数”）；只记数量，不记证据内容
+            set_attrs(sp, {"eaer.candidates.lexical": len(lexical), "eaer.candidates.vector": len(vector),
+                           "eaer.candidates.fused": len(fused), "eaer.candidates.rechecked": rechecked,
+                           "eaer.candidates": len(hits), "eaer.reranked": self.reranker is not None})
+        return hits
 
     def versions(self, scope: Scope | None, document_id: str, *, as_of_system: date | None = None) -> list[VersionInfo]:
         """取版本：某文档中用户有权查看的可搜索版本，按版本号排序。

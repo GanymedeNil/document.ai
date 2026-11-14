@@ -14,6 +14,7 @@ jieba，默认 standard）；Embedding 服务 EAER_EMBED_*（见 eaer/adapters/o
 也不能用测试替身向量化。
 转入后台、或执行者中断的提问（开发文档 8.5）也由本进程接着执行，需要与接口进程相同的查询配置与 EAER_TOKENS_FILE
 （见 eaer/runtime.py）；不开放提问时设置 EAER_DISABLE_QUERY=1。
+EAER_TRACE_EXPORTER none（默认）/ console / otlp：后台任务与接着执行的提问记 trace（13.3，见 eaer/observability.py）。
 """
 from __future__ import annotations
 
@@ -111,6 +112,11 @@ def main(argv: list[str] | None = None) -> int:
             print(rebuild(conn, client, alias, build_id=args.build_id, embedder=embedder, analyzer=analyzer,
                           segmenter=seg))
             return 0
+        from eaer.observability import TraceConfigError, configure
+        try:
+            configure(env, "eaer-worker")
+        except TraceConfigError as e:
+            raise ConfigError(str(e))
         store = LocalFileStore(env["EAER_STORAGE_DIR"])
         worker = build_worker(conn, store, env, with_index=not args.no_index)
         runner = None if args.no_index else query_runner(env, store)

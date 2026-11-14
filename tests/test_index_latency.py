@@ -47,6 +47,11 @@ def test_latency_statistics(conn):
     assert q["oldest_queued_seconds"] == {"index_update": 40.0}
 
 
+def test_empty_queue(conn):
+    assert index_latency(conn) == {"n": 0, "p50": None, "p95": None, "max": None, "by_stage": {}}
+    assert queue_stats(conn, T) == {"queued": {}, "running": {}, "failed": {}, "oldest_queued_seconds": {}}
+
+
 def test_index_jobs_are_claimed_first(conn, tmp_path):
     """优先级（eaer/domain/jobs.py）：先排队的深度解析、解析不会挡住后排队的索引任务；同一优先级按排队先后。"""
     from eaer.domain.jobs import PRIORITY

@@ -15,14 +15,17 @@
       模型没有结构化输出或上下文长度低于 thresholds.deep_min_context_tokens 时 Deep 自动关闭（12.1）。
   EAER_QUERY_THREADS  同时执行的提问数，默认 8。提问超过同步时限（budgets.sync_seconds，默认 30 秒）转为后台任务，
       由后台任务进程（python -m eaer.ingestion）接着执行，它需要与本进程相同的查询配置（见 eaer/runtime.py）。
+  EAER_TRACE_EXPORTER none（默认）/ console / otlp：每次查询一条 trace（13.3，见 eaer/observability.py）。
 """
 import os
 import socket
 
 from eaer.api.app import TokenAuthenticator, create_app
+from eaer.observability import configure as configure_tracing
 from eaer.runtime import authorizer_factory, engine_factory, load_tokens
 from eaer.storage import LocalFileStore
 
+configure_tracing(dict(os.environ), "eaer-api")
 _tokens, _accounts = load_tokens(os.environ["EAER_TOKENS_FILE"])
 _store = LocalFileStore(os.environ["EAER_STORAGE_DIR"])
 app = create_app(os.environ["EAER_DATABASE_URL"], _store, TokenAuthenticator(_tokens),

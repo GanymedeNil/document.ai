@@ -28,7 +28,7 @@ def index_latency(conn: psycopg.Connection, since: datetime | None = None, *,
         (list(stages), since, since)).fetchall()
     out: dict = {"n": 0, "p50": None, "p95": None, "max": None, "by_stage": {}}
     for r in rows:
-        vals = {"n": r["n"], **{k: round(float(r[k]), 3) for k in ("p50", "p95", "max")}}
+        vals = {"n": r["n"], **{k: None if r[k] is None else round(float(r[k]), 3) for k in ("p50", "p95", "max")}}
         if r["stage"] is None:
             out.update(vals)
         else:

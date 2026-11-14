@@ -236,6 +236,24 @@ class OnlineModelClient:
     # ---------- 内部 ----------
 
     def _post(self, kind: str, ep: Endpoint, path: str, body: dict) -> tuple[dict, CallRecord]:
+        """一次模型调用（含重试），记一个 span：模型名、尝试次数、token 数、是否成功（13.3；不记请求与返回的内容）。"""
+        from eaer.observability import set_attrs, span
+
+        def note(sp, rec: CallRecord | None) -> None:
+            if rec is not None:
+                set_attrs(sp, {"gen_ai.usage.input_tokens": rec.input_tokens, "gen_ai.usage.output_tokens": rec.output_tokens,
+                               "eaer.attempts": rec.attempts, "eaer.ok": rec.ok})
+
+        with span(f"eaer.model.{kind}", **{"gen_ai.request.model": ep.model, "gen_ai.operation.name": kind}) as sp:
+            try:
+                out, rec = self._call(kind, ep, path, body)
+            except ModelCallError as e:
+                note(sp, getattr(e, "record", None))
+                raise
+            note(sp, rec)
+            return out, rec
+
+    def _call(self, kind: str, ep: Endpoint, path: str, body: dict) -> tuple[dict, CallRecord]:
         headers = {"Authorization": f"Bearer {ep.api_key}"}
         started, attempts, last = time.monotonic(), 0, ""
         for attempt in range(ep.retries + 1):
@@ -258,8 +276,11 @@ class OnlineModelClient:
                     break
             if attempt < ep.retries:
                 self.sleep(0.5 * 2 ** attempt)
-        self._record(CallRecord(kind, ep.model, 0, 0, attempts, time.monotonic() - started, False))
-        raise ModelCallError(f"{kind} 调用失败（{ep.model}，尝试 {attempts} 次）：{last}".replace(ep.api_key, "***"))
+        rec = CallRecord(kind, ep.model, 0, 0, attempts, time.monotonic() - started, False)
+        self._record(rec)
+        err = ModelCallError(f"{kind} 调用失败（{ep.model}，尝试 {attempts} 次）：{last}".replace(ep.api_key, "***"))
+        err.record = rec
+        raise err
 
     def _record(self, rec: CallRecord) -> None:
         if self.meter is not None:

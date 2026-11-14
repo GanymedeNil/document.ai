@@ -28,7 +28,8 @@ from psycopg.types.json import Jsonb
 
 from eaer.adapters.authorizer import AuthorizationError, AuthorizerUnavailable
 from eaer.domain.identity import Identity, Scope
-from eaer.orchestrator.engine import NODE_NAMES, QueryResult, log_fields
+from eaer.observability import set_attrs, span
+from eaer.orchestrator.engine import NODE_NAMES, QueryResult, log_fields, trace_result
 
 LEASE = timedelta(seconds=60)
 HEARTBEAT_SECONDS = 15.0
@@ -164,6 +165,18 @@ class TaskRunner:
                 raise
 
     def _execute(self, conn, eng, task, scope: Scope, sid: str, handoff):
+        """执行图的一段，记一个 span，挂在提问时的 trace 下（跨进程续接，13.3）。"""
+        parent = (task["state"] or {}).get("traceparent")
+        with span("eaer.query.execute", parent=parent, **{"eaer.query_id": str(task["id"]), "eaer.session_id": sid,
+                                                          "eaer.tenant": task["tenant_id"],
+                                                          "eaer.attempt": task["attempts"]}) as sp:
+            outcome, r = self._execute_graph(conn, eng, task, scope, sid, handoff)
+            set_attrs(sp, {"eaer.outcome": outcome})
+            if r is not None:
+                trace_result(sp, r)
+            return outcome, r
+
+    def _execute_graph(self, conn, eng, task, scope: Scope, sid: str, handoff):
         qid = task["id"]
         graph = eng.graph(checkpointer(conn))
         config = {"configurable": {"thread_id": str(qid)}}

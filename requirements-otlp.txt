@@ -1,0 +1,16 @@
+# 可选：把 trace 以 OTLP/HTTP 导出（EAER_TRACE_EXPORTER=otlp，开发文档 13.1 集群版接 Phoenix；精简版可选安装）。
+# 已包含核心依赖。版本按开发文档 3.3 的规则（发布满 14 天）用 uv 解析：
+#    uv pip compile requirements-otlp.in -c requirements.txt --exclude-newer 2026-10-28
+-r requirements.txt
+opentelemetry-exporter-otlp-proto-http==1.45.1
+opentelemetry-exporter-otlp-proto-common==1.45.1
+opentelemetry-exporter-otlp-common==0.66b1
+opentelemetry-exporter-http-transport==0.66b1
+opentelemetry-proto==1.45.1
+googleapis-common-protos==1.76.0
+protobuf==7.36.2
+requests==2.34.2
+urllib3==2.8.0
+certifi==2026.10.23
+charset-normalizer==3.5.2
+idna==3.20

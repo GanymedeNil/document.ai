@@ -22,6 +22,7 @@ from eaer.domain.jobs import DEFAULT_PRIORITY, PRIORITY
 from eaer.ingestion.extract import classify, extract
 from eaer.ingestion.parsers import DEFAULT_PARSERS, Parser, parser_for
 from eaer.lifecycle.service import Lifecycle, utcnow
+from eaer.observability import set_attrs, span
 from eaer.storage import FileStore
 
 LEGACY_GRADE = "unknown"   # 批量导入的上传时间不作为时间依据（6.2）
@@ -252,16 +253,20 @@ class Worker:
         job = self.claim()
         if job is None:
             return False
-        try:
-            self.handlers[job["stage"]](job["version_id"])
-        except Exception as e:  # noqa: BLE001 — 任何错误都记入任务，交给重试
-            status = "failed" if job["attempts"] >= self.max_attempts else "queued"
-            self.conn.execute(
-                "UPDATE ingest_job SET status = %s, last_error = %s, locked_until = NULL, updated_at = %s WHERE id = %s",
-                (status, f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}", self.ing.clock(), job["id"]))
-            return True
-        self.conn.execute("UPDATE ingest_job SET status = 'done', locked_until = NULL, updated_at = %s WHERE id = %s",
-                          (self.ing.clock(), job["id"]))
+        with span(f"eaer.ingest.{job['stage']}", **{"eaer.version_id": str(job["version_id"]),
+                                                    "eaer.attempt": job["attempts"]}) as sp:
+            try:
+                self.handlers[job["stage"]](job["version_id"])
+            except Exception as e:  # noqa: BLE001 — 任何错误都记入任务，交给重试
+                status = "failed" if job["attempts"] >= self.max_attempts else "queued"
+                self.conn.execute(
+                    "UPDATE ingest_job SET status = %s, last_error = %s, locked_until = NULL, updated_at = %s WHERE id = %s",
+                    (status, f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}", self.ing.clock(), job["id"]))
+                set_attrs(sp, {"eaer.job_status": status, "error.type": type(e).__name__})
+                return True
+            self.conn.execute("UPDATE ingest_job SET status = 'done', locked_until = NULL, updated_at = %s WHERE id = %s",
+                              (self.ing.clock(), job["id"]))
+            set_attrs(sp, {"eaer.job_status": "done"})
         return True
 
     def run_until_idle(self, limit: int = 100_000) -> int:

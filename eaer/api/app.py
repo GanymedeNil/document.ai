@@ -290,7 +290,8 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         交给后台任务进程，客户端轮询会话接口（8.5）。同步完成的回答写入缓存。"""
         from eaer.adapters.online import ModelCallError
         from eaer.orchestrator import cache, tasks
-        from eaer.orchestrator.engine import QueryResult, log_query
+        from eaer.observability import set_attrs, span
+        from eaer.orchestrator.engine import QueryResult, log_query, trace_result
 
         if engine is None:
             raise ApiError(503, "query_unavailable", "提问服务未配置模型或检索服务")
@@ -306,45 +307,51 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         ck = cache.key(ident.tenant_id, scope, build_id, body.question, today=asked.date(), as_of_valid=body.as_of_valid,
                        as_of_system=body.as_of_system, mode_hint=body.mode_hint, model=model_id,
                        deep_enabled=eng.deep_enabled, verified_enabled=eng.verified_enabled)
-        hit = cache.get(conn, ck, tenant_id=ident.tenant_id, scope=scope, authorizer=authorizer_, now=asked,
-                        session_id=str(sid)) if ttl > 0 else None
-        prepared = None
-        if hit is not None:
-            log_query(conn, hit, scope=scope, user_id=ident.user, question=body.question, asked_at=asked, query_id=qid)
-            outcome, result = "completed", hit
-        else:
-            try:
-                prepared = eng.prepare(body.question, today=asked.date(), as_of_valid=body.as_of_valid,
-                                       as_of_system=body.as_of_system, mode_hint=body.mode_hint)
-            except ModelCallError as e:
-                failed = QueryResult(str(sid), "failed", "fast", ["fast"], {}, {}, None, [], False, [], [], [], 0,
-                                     model_id, build_id)
-                log_query(conn, failed, scope=scope, user_id=ident.user, question=body.question, asked_at=asked,
-                          query_id=qid)
-                raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
-            tasks.create(conn, query_id=qid, session_id=sid, ident=ident, scope=scope, question=body.question,
-                         asked_at=asked, prepared=prepared, model_id=model_id, index_build_id=build_id,
-                         owner=runner.owner)
-            handoff = threading.Event()
-            future = pool.submit(runner.run, qid, scope=scope, handoff=handoff)
-            try:
-                outcome, result = future.result(timeout=float(eng.budgets["sync_seconds"]))
-            except TimeoutError:
-                handoff.set()                       # 当前步骤结束后交给后台任务进程
-                outcome, result = "running", None
-            except AuthorizerUnavailable:
-                raise ApiError(503, "authz_unavailable", "授权服务不可用")
-            except ModelCallError as e:
-                raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
+        # 一次提问一条 trace（13.3）：根 span 在这里，执行段（本进程或后台进程）经查询状态里的 traceparent 挂在它下面
+        with span("eaer.query", **{"eaer.tenant": ident.tenant_id, "eaer.session_id": str(sid),
+                                   "eaer.query_id": str(qid)}) as root:
+            hit = cache.get(conn, ck, tenant_id=ident.tenant_id, scope=scope, authorizer=authorizer_, now=asked,
+                            session_id=str(sid)) if ttl > 0 else None
+            prepared = None
+            if hit is not None:
+                log_query(conn, hit, scope=scope, user_id=ident.user, question=body.question, asked_at=asked, query_id=qid)
+                outcome, result = "completed", hit
+            else:
+                try:
+                    prepared = eng.prepare(body.question, today=asked.date(), as_of_valid=body.as_of_valid,
+                                           as_of_system=body.as_of_system, mode_hint=body.mode_hint)
+                except ModelCallError as e:
+                    failed = QueryResult(str(sid), "failed", "fast", ["fast"], {}, {}, None, [], False, [], [], [], 0,
+                                         model_id, build_id)
+                    log_query(conn, failed, scope=scope, user_id=ident.user, question=body.question, asked_at=asked,
+                              query_id=qid)
+                    raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
+                tasks.create(conn, query_id=qid, session_id=sid, ident=ident, scope=scope, question=body.question,
+                             asked_at=asked, prepared=prepared, model_id=model_id, index_build_id=build_id,
+                             owner=runner.owner)
+                handoff = threading.Event()
+                future = pool.submit(runner.run, qid, scope=scope, handoff=handoff)
+                try:
+                    outcome, result = future.result(timeout=float(eng.budgets["sync_seconds"]))
+                except TimeoutError:
+                    handoff.set()                       # 当前步骤结束后交给后台任务进程
+                    outcome, result = "running", None
+                except AuthorizerUnavailable:
+                    raise ApiError(503, "authz_unavailable", "授权服务不可用")
+                except ModelCallError as e:
+                    raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
+                if outcome == "completed":
+                    cache.put(conn, ck, result, tenant_id=ident.tenant_id, scope=scope, build_id=build_id, ttl_seconds=ttl,
+                              source_query=qid, now=asked)
             if outcome == "completed":
-                cache.put(conn, ck, result, tenant_id=ident.tenant_id, scope=scope, build_id=build_id, ttl_seconds=ttl,
-                          source_query=qid, now=asked)
-        if outcome == "completed":
-            resp = jsonable_encoder(result.response())
-        else:                                    # running（含已交给后台）或 cancelled：其余字段为空（11.2）
-            resp = {"session_id": str(sid), "status": "cancelled" if outcome == "cancelled" else "running",
-                    "mode": None, "mode_path": [], "time_basis": None, "answer": None, "claims": [],
-                    "abstained": None, "notices": []}
+                resp = jsonable_encoder(result.response())
+            else:                                    # running（含已交给后台）或 cancelled：其余字段为空（11.2）
+                resp = {"session_id": str(sid), "status": "cancelled" if outcome == "cancelled" else "running",
+                        "mode": None, "mode_path": [], "time_basis": None, "answer": None, "claims": [],
+                        "abstained": None, "notices": []}
+            set_attrs(root, {"eaer.cache_hit": hit is not None, "eaer.outcome": outcome})
+            if result is not None:
+                trace_result(root, result)
         if not body.stream:
             return resp
 
