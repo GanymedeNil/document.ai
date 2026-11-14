@@ -197,10 +197,14 @@ def main(argv: list[str] | None = None) -> int:
         docs = ingest(conn, LocalFileStore(Path(tmp)), index, embedder, corpus, log=log)
         log("检索召回：混合检索")
         hybrid = recall_summary(recall(conn, Retriever(conn, index, embedder), queries, docs))
+        log("混合检索：" + json.dumps(hybrid["all"], ensure_ascii=False))
         rerank = None
         if not args.no_rerank and model.rr is not None:
             log("检索召回：混合检索 + 重排")
-            rerank = recall_summary(recall(conn, Retriever(conn, index, embedder, model), queries, docs))
+            try:
+                rerank = recall_summary(recall(conn, Retriever(conn, index, embedder, model), queries, docs))
+            except Exception as e:  # noqa: BLE001 — 后一阶段失败不丢前面的结果
+                log(f"重排阶段失败，只报告混合检索：{type(e).__name__}: {e}")
         ans = None
         if args.answer_sample:
             log(f"拒答与回答：各抽 {args.answer_sample} 个")

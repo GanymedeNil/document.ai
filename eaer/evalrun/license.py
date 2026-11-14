@@ -63,6 +63,9 @@ DATASET_FILES = {
         ("MultiHop-RAG", "corpus.json（yixuantt/MultiHopRAG@71ac0d0b）"),
     "03cfb4926461f868684903aadc8024447bdda5bb3f6804741424cce338515bff":
         ("MultiHop-RAG", "MultiHopRAG.json（yixuantt/MultiHopRAG@71ac0d0b）"),
+    # LLM-AggreFact 测试集：经 dataset viewer 接口取得、排序后保存（只能原样评测）
+    "9a6f04ee9f6154fc5364fef734c16c450588063f4808d9d7035bb398610afcd4":
+        ("LLM-AggreFact", "test.json（lytang/LLM-AggreFact@981dfd0b，29,320 条）"),
     # ViDoRe V3 HR 子集：PDF 原件按固定提交号下载；问题与文档清单经 dataset viewer 接口取得、排序后保存（eaer/evalrun/datasets.py）
     "685ecfda8fa0c1ab537d8120a5dd1f04c703bde671de3c7104a992fd8edf26e0":
         ("ViDoRe V3", "pdfs/a_demographic_perspective_on_the_future_of_european-KJ0125152ENN.pdf（vidore/vidore_v3_hr@0cdf0979）"),

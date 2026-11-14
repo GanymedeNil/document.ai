@@ -7,7 +7,9 @@
                              也可以用多模态的 Qwen/Qwen3-VL-Embedding-2B、Qwen/Qwen3-VL-Reranker-2B（仓库名含 -VL- 时用
                              对应的后端；不给提交号时用 KNOWN_REVISIONS 里固定的提交）
   MODELSERVER_DEVICE         auto（cuda > mps > cpu）/ cuda / mps / cpu
-  MODELSERVER_MAX_LENGTH     单条输入的最大 token 数，默认 8192
+  MODELSERVER_MAX_LENGTH     Embedding 单条输入的最大 token 数，默认 8192
+  MODELSERVER_RERANK_MAX_LENGTH  重排每对（问题 + 段落）的最大 token 数，默认 2048：证据段落都很短，长文章不必整段重排，
+                             也免得几十个长段落一次撑满显存（内存不足时还会自动拆小批量重试）
   MODELSERVER_RERANK_INSTRUCTION  重排指令，默认面向“公司制度问答”的英文指令（模型说明建议用英文写指令）
   MODELSERVER_MEMORY_LIMIT   本进程的内存（含 MPS / CUDA 显存）预算，默认 24G：加载前按权重估算，超了不加载；
                              运行中 PyTorch 分配超过时这次请求返回 503（memguard.py）。几个服务一起跑时另开看门狗：
@@ -95,7 +97,8 @@ def main() -> None:
         admit("RERANK", RrCls)
     rr = None if args.no_rerank else RrCls(
         env["MODELSERVER_RERANK_MODEL"], _full(env["MODELSERVER_RERANK_MODEL"], env["MODELSERVER_RERANK_REVISION"]),
-        device=device, max_length=max_len, instruction=env.get("MODELSERVER_RERANK_INSTRUCTION", RERANK_INSTRUCTION))
+        device=device, max_length=int(env.get("MODELSERVER_RERANK_MAX_LENGTH", "2048")),
+        instruction=env.get("MODELSERVER_RERANK_INSTRUCTION", RERANK_INSTRUCTION))
     app = create_app(emb, rr, embed_name=env["MODELSERVER_EMBED_MODEL"].rsplit("/", 1)[-1],
                      rerank_name=env["MODELSERVER_RERANK_MODEL"].rsplit("/", 1)[-1],
                      api_key=env.get("MODELSERVER_API_KEY"), guard=guard)

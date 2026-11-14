@@ -113,3 +113,28 @@ def test_out_of_memory_is_a_503_not_a_crash():
     assert r.status_code == 503 and "内存不足" in r.json()["error"]["message"]
     assert c.post("/v1/embeddings", json={"input": ["一"]}).status_code == 200      # 进程照常服务
     assert c.get("/health").json()["memory"]["limit_bytes"] == 24 * GiB
+
+
+def test_batches_are_split_when_memory_runs_out():
+    """一批内存不足时对半拆开重试，结果顺序不变；拆到单条仍不够才把内存不足抛出去。"""
+    from modelserver.backends import split_on_oom
+
+    calls = []
+
+    def run(items):
+        calls.append(len(items))
+        if len(items) > 2:
+            raise RuntimeError("MPS backend out of memory")
+        return [x * 10 for x in items]
+    assert split_on_oom(run, [1, 2, 3, 4, 5, 6, 7, 8], "cpu") == [10, 20, 30, 40, 50, 60, 70, 80]
+    assert calls[0] == 8 and max(calls[1:]) <= 4
+
+    def always(items):
+        raise RuntimeError("CUDA out of memory")
+    with pytest.raises(RuntimeError, match="out of memory"):
+        split_on_oom(always, [1, 2], "cpu")
+
+    def other(items):
+        raise ValueError("bad input")
+    with pytest.raises(ValueError):                                                  # 不是内存不足：原样抛出，不重试
+        split_on_oom(other, [1, 2, 3], "cpu")

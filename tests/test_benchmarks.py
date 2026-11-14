@@ -104,9 +104,9 @@ def test_vidore_picks_chart_and_table_questions_in_english():
 def test_aggrefact_sampling_and_metrics():
     from eaer.evalrun import aggrefact
     rows = [{"dataset": d, "doc": "x", "claim": "y", "label": k % 2} for d in ("A", "B") for k in range(10)]
-    picked = aggrefact.sample(rows, 3)
-    assert len(picked) == 6 and {r["dataset"] for r in picked} == {"A", "B"}
-    assert aggrefact.sample(rows, 3) == picked                                     # 固定种子，可复现
+    picked = aggrefact.sample(rows, 4)                                             # 每个来源正反例各 2 条
+    assert len(picked) == 8 and {(r["dataset"], r["label"]) for r in picked} == {("A", 0), ("A", 1), ("B", 0), ("B", 1)}
+    assert aggrefact.sample(rows, 4) == picked                                     # 固定种子，可复现
     res = [{"dataset": "A", "label": 1, "verdict": "supported"}, {"dataset": "A", "label": 1, "verdict": "unverified"},
            {"dataset": "A", "label": 0, "verdict": "unsupported"}, {"dataset": "A", "label": 0, "verdict": "supported"},
            {"dataset": "B", "label": 0, "verdict": "error: TimeoutError"}]
@@ -127,10 +127,11 @@ def test_aggrefact_passes_doc_and_claim_unchanged():
             return Capabilities(True, 32000, False, 0)
 
         def generate(self, messages, schema):
+            import re
             self.prompts.append(messages[-1].content)
-            return Completion("{}", {"verdict": "supported", "confidence": 0.9, "supporting_ids": ["ev_doc"]},
-                              Usage(1, 1), "m")
+            ids = re.findall(r"\[(ev_[0-9a-f]{16})\]", messages[-1].content)            # 产品格式的证据 id
+            return Completion("{}", {"verdict": "supported", "confidence": 0.9, "supporting_ids": ids}, Usage(1, 1), "m")
     doc = "The quarterly report shows revenue of 4.2 billion. " * 50
     out = aggrefact.run(M(), [{"dataset": "A", "doc": doc, "claim": "Revenue was 4.2 billion.", "label": 1}])
-    assert out == [{"dataset": "A", "label": 1, "verdict": "supported"}]
+    assert out == [{"dataset": "A", "label": 1, "verdict": "supported", "uncited": False}]
     assert doc.strip() in M.prompts[0] and "Revenue was 4.2 billion." in M.prompts[0]

@@ -41,6 +41,28 @@ def pick_device(requested: str = "auto") -> str:
     return "cpu"
 
 
+def split_on_oom(run, items: list, device: str) -> list:
+    """按批推理；这一批内存不足时释放缓存、对半拆开重试，拆到单条仍不够才把内存不足抛出去（由接口返回 503）。
+    长段落或大批量把显存一下子撑满时，服务降速而不是失败。"""
+    from modelserver.memguard import is_out_of_memory
+    try:
+        return run(items)
+    except Exception as e:  # noqa: BLE001 — 只处理内存不足
+        if not is_out_of_memory(e) or len(items) <= 1:
+            raise
+        _empty_cache(device)
+        half = len(items) // 2
+        return split_on_oom(run, items[:half], device) + split_on_oom(run, items[half:], device)
+
+
+def _empty_cache(device: str) -> None:
+    import torch
+    if device == "mps":
+        torch.mps.empty_cache()
+    elif device == "cuda":
+        torch.cuda.empty_cache()
+
+
 @dataclass
 class Encoded:
     vectors: list[list[float]]
@@ -64,20 +86,23 @@ class QwenEmbedding:
     def encode(self, texts: list[str]) -> Encoded:
         torch = self.torch
         out: list[list[float]] = []
-        tokens = 0
+        tokens = [0]
+
+        def run(chunk: list[str]) -> list[list[float]]:
+            batch = self.tok(chunk, padding=True, truncation=True, max_length=self.max_length,
+                             return_tensors="pt").to(self.device)
+            tokens[0] += int(batch["attention_mask"].sum())
+            hidden = self.model(**batch).last_hidden_state
+            return torch.nn.functional.normalize(hidden[:, -1].float(), p=2, dim=1).cpu().tolist()   # 左侧填充
+
         with self.lock, torch.inference_mode():
             for i in range(0, len(texts), self.batch_size):
-                batch = self.tok(texts[i:i + self.batch_size], padding=True, truncation=True,
-                                 max_length=self.max_length, return_tensors="pt").to(self.device)
-                tokens += int(batch["attention_mask"].sum())
-                hidden = self.model(**batch).last_hidden_state
-                vec = torch.nn.functional.normalize(hidden[:, -1].float(), p=2, dim=1)     # 左侧填充：最后一位即最后一个 token
-                out += vec.cpu().tolist()
-        return Encoded(out, tokens)
+                out += split_on_oom(run, texts[i:i + self.batch_size], self.device)
+        return Encoded(out, tokens[0])
 
 
 class QwenReranker:
-    def __init__(self, repo: str, revision: str | None = None, *, device: str = "auto", max_length: int = 8192,
+    def __init__(self, repo: str, revision: str | None = None, *, device: str = "auto", max_length: int = 2048,
                  batch_size: int = 8, instruction: str = RERANK_INSTRUCTION):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -97,18 +122,22 @@ class QwenReranker:
         pairs = [rerank_pair(instruction or self.instruction, query, d) for d in documents]
         scores: list[float] = []
         tokens = 0
+        counted = [0]
+
+        def run(chunk: list[str]) -> list[float]:
+            enc = self.tok(chunk, padding=False, truncation="longest_first", return_attention_mask=False,
+                           max_length=self.max_length - len(self.prefix) - len(self.suffix))
+            enc["input_ids"] = [self.prefix + ids + self.suffix for ids in enc["input_ids"]]
+            batch = self.tok.pad(enc, padding=True, return_tensors="pt").to(self.device)
+            counted[0] += int(batch["attention_mask"].sum())
+            logits = self.model(**batch).logits[:, -1, :]
+            pair = torch.stack([logits[:, self.no], logits[:, self.yes]], dim=1).float()
+            return torch.nn.functional.softmax(pair, dim=1)[:, 1].cpu().tolist()
+
         with self.lock, torch.inference_mode():
             for i in range(0, len(pairs), self.batch_size):
-                enc = self.tok(pairs[i:i + self.batch_size], padding=False, truncation="longest_first",
-                               return_attention_mask=False,
-                               max_length=self.max_length - len(self.prefix) - len(self.suffix))
-                enc["input_ids"] = [self.prefix + ids + self.suffix for ids in enc["input_ids"]]
-                batch = self.tok.pad(enc, padding=True, return_tensors="pt").to(self.device)
-                tokens += int(batch["attention_mask"].sum())
-                logits = self.model(**batch).logits[:, -1, :]
-                pair = torch.stack([logits[:, self.no], logits[:, self.yes]], dim=1).float()
-                scores += torch.nn.functional.softmax(pair, dim=1)[:, 1].cpu().tolist()
-        return scores, tokens
+                scores += split_on_oom(run, pairs[i:i + self.batch_size], self.device)
+        return scores, tokens + counted[0]
 
 
 # ---------------- Qwen3-VL-Embedding 与 Qwen3-VL-Reranker（多模态，按官方仓库 QwenLM/Qwen3-VL-Embedding 的用法） ----------------

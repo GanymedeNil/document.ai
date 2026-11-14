@@ -32,6 +32,25 @@ SPECS = {
 }
 
 
+def _get_json(url: str, headers: dict, attempts: int = 8) -> dict:
+    """取一页；被限流（429）或服务暂时不可用时按 Retry-After 或指数退避重试。每页之间稍停，免得被限流。"""
+    import time
+    import urllib.error
+    for k in range(attempts):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as r:
+                page = json.load(r)
+            time.sleep(0.5)
+            return page
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 500, 502, 503, 504) or k == attempts - 1:
+                raise
+            wait = float(e.headers.get("Retry-After") or 0) or min(120.0, 5.0 * 2 ** k)
+            print(f"被限流或暂时不可用（HTTP {e.code}），{wait:.0f} 秒后重试", file=sys.stderr, flush=True)
+            time.sleep(wait)
+    raise RuntimeError("不会到这里")
+
+
 def _rows(repo: str, config: str, split: str = "test") -> list[dict]:
     """dataset viewer 接口的全部行，去掉图片列。设置了 HF_TOKEN 时带上（需要授权的数据集）。"""
     out, offset = [], 0
@@ -39,8 +58,7 @@ def _rows(repo: str, config: str, split: str = "test") -> list[dict]:
     while True:
         url = ("https://datasets-server.huggingface.co/rows?" + urllib.parse.urlencode(
             {"dataset": repo, "config": config, "split": split, "offset": offset, "length": 100}))
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as r:
-            page = json.load(r)
+        page = _get_json(url, headers)
         rows = [x["row"] for x in page.get("rows", [])]
         out += [{k: v for k, v in row.items() if k != "image"} for row in rows]
         offset += len(rows)

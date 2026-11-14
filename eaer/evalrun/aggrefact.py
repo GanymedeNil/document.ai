@@ -4,7 +4,7 @@
     EAER_ENV=eval python -m eaer.evalrun.aggrefact [--per-dataset 20] [--out 报告.md]
 
 每条数据是（文档，结论，标签 1 支持 / 0 不支持）。原样交给验证层的语义检查（eaer/verifier/semantic.py）：文档整篇作为
-一条证据，结论原文作为结论，不改写、不截断、不增删数据（只能原样评测；按来源数据集各抽 --per-dataset 条是抽子集，
+一条证据，结论原文作为结论，不改写、不截断、不增删数据（只能原样评测；按来源数据集各抽 --per-dataset 条、正反例各半是抽子集，
 不算改编）。语义检查判 supported 记为“支持”，unsupported 与 unverified 记为“不支持”。报告：
 - 均衡准确率（LLM-AggreFact 的通行指标，正反例召回的平均），按来源数据集与合计；
 - 误通过率（标签为不支持、却判为支持）与误拒率（标签为支持、却没判为支持），与准入检查（AC-9-3）的口径一致；
@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -36,11 +37,13 @@ def load(root: Path = DATASET_DIR):
 
 
 def sample(rows: list[dict], per_dataset: int, seed: int = 7) -> list[dict]:
-    by: dict[str, list[dict]] = {}
+    """每个来源数据集正反例各抽一半（标签约八成是“支持”，随机抽会让有的来源几乎没有反例，均衡准确率没有意义）。"""
+    by: dict[tuple[str, int], list[dict]] = {}
     for r in rows:
-        by.setdefault(r["dataset"], []).append(r)
+        by.setdefault((r["dataset"], int(r["label"])), []).append(r)
     rnd = random.Random(seed)
-    return [x for name in sorted(by) for x in rnd.sample(by[name], min(per_dataset, len(by[name])))]
+    half = max(1, per_dataset // 2)
+    return [x for key in sorted(by) for x in rnd.sample(by[key], min(half, len(by[key])))]
 
 
 def run(model, rows: list[dict], log=lambda s: None) -> list[dict]:
@@ -48,12 +51,14 @@ def run(model, rows: list[dict], log=lambda s: None) -> list[dict]:
 
     checker, out = SemanticChecker(model), []
     for k, r in enumerate(rows):
+        # 证据 id 用产品里的格式（ev_ 加 16 位十六进制）：格式不像证据 id 时，模型会把证据区的随机边界编号当成 id
+        eid = "ev_" + hashlib.sha256(r["doc"].encode("utf-8")).hexdigest()[:16]
         try:
-            v = checker.judge(r["claim"], [("ev_doc", r["doc"])], date(2026, 1, 1))
-            verdict = v.status
+            v = checker.judge(r["claim"], [(eid, r["doc"])], date(2026, 1, 1))
+            verdict, uncited = v.status, v.reason.startswith("模型判为支持但没有指出依据")
         except Exception as e:  # noqa: BLE001 — 记下错误继续
-            verdict = f"error: {type(e).__name__}"
-        out.append({"dataset": r["dataset"], "label": int(r["label"]), "verdict": verdict})
+            verdict, uncited = f"error: {type(e).__name__}", False
+        out.append({"dataset": r["dataset"], "label": int(r["label"]), "verdict": verdict, "uncited": uncited})
         if (k + 1) % 50 == 0:
             log(f"已判 {k + 1} / {len(rows)}")
     return out
@@ -69,6 +74,7 @@ def metrics(results: list[dict]) -> dict:
                 "balanced_accuracy": round((tpr + tnr) / 2, 4),
                 "false_pass": round(1 - tnr, 4), "false_reject": round(1 - tpr, 4),
                 "unverified": round(sum(r["verdict"] == "unverified" for r in rs) / max(1, len(rs)), 4),
+                "uncited": sum(bool(r.get("uncited")) for r in rs),
                 "errors": sum(r["verdict"].startswith("error") for r in rs)}
     by: dict[str, list[dict]] = {}
     for r in results:
@@ -82,6 +88,8 @@ def report(s: dict, *, model: str) -> str:
     for k, v in s.items():
         lines.append(f"| {'合计' if k == 'all' else k} | {v['n']}（{v['positives']} / {v['negatives']}） | "
                      f"{v['balanced_accuracy']:.1%} | {v['false_pass']:.1%} | {v['false_reject']:.1%} | {v['unverified']:.1%} |")
+    if s["all"]["uncited"]:
+        lines.append(f"\n判为支持却没有指出有效的证据 id、因此降为“未验证”的：{s['all']['uncited']} 条。")
     if s["all"]["errors"]:
         lines.append(f"\n模型调用出错 {s['all']['errors']} 次（计为不支持）。")
     return "\n".join(lines)
