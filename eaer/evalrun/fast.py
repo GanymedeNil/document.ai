@@ -7,7 +7,11 @@
 - “验证器”类查询（如 Q16）给的是待验证的结论而不是问题，不适用 Fast，单列。
 同时记录每个查询的耗时与 token 数，给出 P50、P95。
 
-    EAER_ENV=eval python -m eaer.evalrun.fast 事实表.xlsx --admin-url postgresql://… [--format docx|html]
+    EAER_ENV=eval python -m eaer.evalrun.fast 事实表.xlsx --admin-url postgresql://… [--format docx|html] \
+        [--json-out 结果.json]
+
+--json-out 把逐条结果连同运行配置（模型、采样参数、向量化与重排、索引、评测集的 SHA-256 与抽样方式）写成 JSON，
+供复现检查（AC-14-5，python -m eaer.evalrun.repro）比对两次评测。
 
 模型服务按 EAER_GEN_* / EAER_EMBED_* / EAER_RERANK_* 环境变量连接（见 eaer/adapters/online.py）。
 不带 --engine 时只用 Fast（期望由 Deep 或 Verified 回答的问题也只用 Fast）；带 --engine 时经完整编排器
@@ -21,7 +25,7 @@ import os
 import statistics
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from eaer.adapters.authorizer import LocalAuthorizer
@@ -206,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--engine", action="store_true", help="经完整编排器（Router、升级、Deep、Verified）回答")
     p.add_argument("--split", choices=["标定", "测试"], help="只用该集合的查询（14.3：指标在测试集上报）")
     p.add_argument("--per-type", type=int, help="每类查询最多取几条（按编号哈希抽样，可复现）")
+    p.add_argument("--json-out", help="把逐条结果与运行配置写成 JSON（复现检查用，AC-14-5）")
     add_external_flag(p)
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
@@ -238,6 +243,15 @@ def main(argv: list[str] | None = None) -> int:
                   embedder=embedder.name + (f"，重排 {model.rr.model}" if reranker else "，不重排"))
     if missing:
         text += f"\n\n注意：未配置 {'、'.join(missing)}，结果只说明流程，不能作为产品基线。"
+    if args.json_out:
+        import json
+
+        from eaer.evalrun.repro import run_config
+        cfg = run_config(args.xlsx, prov[0], engine=args.engine, model=model.gen.model, embedder=embedder.name,
+                         reranker=model.rr.model if reranker else None, index="MemoryIndex", fmt=args.format,
+                         split=args.split, per_type=args.per_type)
+        Path(args.json_out).write_text(json.dumps({"config": cfg, "results": [asdict(r) for r in results]},
+                                                  ensure_ascii=False, indent=1), encoding="utf-8")
     return emit(text, prov, external=args.external)
 
 

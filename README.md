@@ -25,6 +25,10 @@
 | 检索评测 | `eaer/evalrun/retrieval.py`：按日期回放合成语料，每个查询在提问日提出，计算召回、拒答与越权 | AC-5-4 的评测流程 |
 | 来源等级核对 | `eaer/evalrun/grades.py`：按日期回放合成集，核对回答标注的等级与“未验证”标注与事实表一致（不调用模型服务） | AC-7-3 |
 | 评测数据许可 | `eaer/evalrun/license.py`：每份评测报告带数据集标记，`--external` 生成对外报告时按许可拦截 | AC-14-4 |
+| 进程隔离 | `tests/livestack.py` 以子进程启动真实的接口与后台任务进程，`tests/stubmodel.py` 是 OpenAI 兼容的模型服务替身 | AC-3-2 |
+| 索引更新延迟 | `eaer/ingestion/stats.py`（`python -m eaer.ingestion stats`）统计索引任务从排队到可检索的 P95；`eaer/evalrun/indexlag.py` 压测；后台任务按阶段的优先级 `eaer/domain/jobs.py` | AC-5-6 |
+| 可观测 | `eaer/observability.py`：每次查询一条 OpenTelemetry trace，原文不进 trace；`eaer/metrics.py`（`python -m eaer.metrics`）输出监控指标 | AC-13-5 |
+| 评测可复现 | `eaer/evalrun/repro.py`：同一配置连续评测两次，McNemar 精确检验判断差异是否在随机波动范围内 | AC-14-5 |
 | 评测装载入口 | `eaer/evalload/loader.py`：按历史日期装载事实表，只在 `EAER_ENV=eval` 时可用 | 开发文档 14.2 |
 | 事实表工具 | `factset/`：校验、生成文档、检查文档、计算答案，用法见 `factset/README.md` | AC-14-1、AC-14-3、AC-14-2 程序部分 |
 
