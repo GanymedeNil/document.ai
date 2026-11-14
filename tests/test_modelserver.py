@@ -103,3 +103,37 @@ def test_reranker_prompt_follows_the_official_template():
     assert rerank_pair("I", "Q", "D") == "<Instruct>: I\n<Query>: Q\n<Document>: D"
     assert RERANK_PREFIX.startswith("<|im_start|>system\nJudge whether the Document meets the requirements")
     assert RERANK_SUFFIX == "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+
+# ---------- Qwen3-VL-Embedding / Qwen3-VL-Reranker 的输入格式（按官方仓库，不加载模型） ----------
+
+def test_vl_embedding_takes_the_instruction_from_the_eaer_query_prefix():
+    from modelserver.backends import split_instruction, vl_embedding_messages
+
+    assert split_instruction("Instruct: Given a question, retrieve passages\nQuery:一线城市住宿上限") == (
+        "Given a question, retrieve passages", "一线城市住宿上限")
+    assert split_instruction("第二条 一线城市住宿上限为每晚650元。") == (None, "第二条 一线城市住宿上限为每晚650元。")
+    doc = vl_embedding_messages("第二条 一线城市住宿上限为每晚650元。")
+    assert doc[0] == {"role": "system", "content": [{"type": "text", "text": "Represent the user's input."}]}
+    assert doc[1]["content"] == [{"type": "text", "text": "第二条 一线城市住宿上限为每晚650元。"}]
+    q = vl_embedding_messages("一线城市住宿上限", instruction="Given a question, retrieve passages")
+    assert q[0]["content"][0]["text"] == "Given a question, retrieve passages."          # 指令补句末标点
+    img = object()
+    assert [c["type"] for c in vl_embedding_messages("图注", [img])[1]["content"]] == ["image", "text"]
+
+
+def test_vl_reranker_prompt_follows_the_official_format():
+    from modelserver.backends import VL_RERANK_SYSTEM, vl_rerank_messages
+
+    m = vl_rerank_messages("Retrieve passages.", "一线城市住宿上限是多少", "第二条 一线城市住宿上限为每晚650元。")
+    assert m[0]["content"][0]["text"] == VL_RERANK_SYSTEM and "\"yes\" or \"no\"" in VL_RERANK_SYSTEM
+    assert [c["text"] for c in m[1]["content"]] == ["<Instruct>: Retrieve passages.", "<Query>:", "一线城市住宿上限是多少",
+                                                    "\n<Document>:", "第二条 一线城市住宿上限为每晚650元。"]
+
+
+def test_known_revisions_are_pinned_full_commits():
+    from modelserver.__main__ import DEFAULTS, KNOWN_REVISIONS
+
+    assert all(len(r) == 40 for r in KNOWN_REVISIONS.values())
+    assert KNOWN_REVISIONS[DEFAULTS["MODELSERVER_EMBED_MODEL"]] == DEFAULTS["MODELSERVER_EMBED_REVISION"]
+    assert {"Qwen/Qwen3-VL-Embedding-2B", "Qwen/Qwen3-VL-Reranker-2B"} <= set(KNOWN_REVISIONS)
