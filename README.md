@@ -23,6 +23,8 @@
 | 提示注入防护 | `eaer/domain/injection.py`：证据区随机边界与转义、指令型文字识别；`eaer/evalrun/injection.py` 用真实模型测回答被带偏的比例 | AC-10-7 |
 | 模块边界 | `tests/test_module_boundaries.py`：静态检查开发文档 3.2 的索引读写、版本状态、模型 SDK 三条规则 | AC-3-1 |
 | 检索评测 | `eaer/evalrun/retrieval.py`：按日期回放合成语料，每个查询在提问日提出，计算召回、拒答与越权 | AC-5-4 的评测流程 |
+| 来源等级核对 | `eaer/evalrun/grades.py`：按日期回放合成集，核对回答标注的等级与“未验证”标注与事实表一致（不调用模型服务） | AC-7-3 |
+| 评测数据许可 | `eaer/evalrun/license.py`：每份评测报告带数据集标记，`--external` 生成对外报告时按许可拦截 | AC-14-4 |
 | 评测装载入口 | `eaer/evalload/loader.py`：按历史日期装载事实表，只在 `EAER_ENV=eval` 时可用 | 开发文档 14.2 |
 | 事实表工具 | `factset/`：校验、生成文档、检查文档、计算答案，用法见 `factset/README.md` | AC-14-1、AC-14-3、AC-14-2 程序部分 |
 
