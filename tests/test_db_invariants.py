@@ -53,6 +53,11 @@ VIOLATIONS = [
      errors.RaiseException, "只能追加"),
     ("删除生命周期事件", "DELETE FROM lifecycle_event",
      errors.RaiseException, "只能追加"),
+    ("解析暂存的图片格式不认识",
+     "WITH c AS (INSERT INTO parse_cache (version_id, parser, blocks, created_at) VALUES (%(v1)s, 'p', '[]', now()) "
+     "RETURNING version_id) INSERT INTO parse_cache_image (version_id, block_order, mime, data) "
+     "SELECT version_id, 0, 'image/bmp', '\\x00'::bytea FROM c",
+     errors.CheckViolation, "parse_cache_image_mime_check"),
     ("频率限制计数为零",
      "INSERT INTO rate_limit_counter (subject, kind, window_start, count) VALUES ('t1:u', 'query', now(), 0)",
      errors.CheckViolation, "rate_limit_counter_count_check"),

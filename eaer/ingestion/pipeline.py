@@ -89,6 +89,7 @@ class Ingestion:
         with self.conn.transaction():
             for b in parsed.paragraphs():
                 self.lc.add_evidence(version_id, "text", _locator(b, para=b.order), b.text)
+            self._save_parsed(version_id, parsed)          # 留给深度解析，不再解析第二遍（迁移 0011）
             # parser_version 只在待审核时可改；记录实际使用的解析器
             self.conn.execute("UPDATE document_version SET parser_version = %s WHERE id = %s",
                               (parser.name, version_id))
@@ -154,7 +155,8 @@ class Ingestion:
         if v is None or v["status"] == "pending_review":
             return
         filename = v["raw_object_uri"].rsplit("/", 1)[-1]
-        parsed = parser_for(filename, self.parsers).parse(self.store.get(v["raw_object_uri"]), filename)
+        parser = parser_for(filename, self.parsers)
+        parsed = self._load_parsed(version_id, parser.name) or parser.parse(self.store.get(v["raw_object_uri"]), filename)
         tables = [b for b in parsed.blocks if b.kind == "table"]
         with self.conn.transaction():
             for t_index, t in enumerate(tables):
@@ -181,7 +183,40 @@ class Ingestion:
         failed = self._read_figures(version_id, parsed)
         self._enqueue(version_id, "index_update", repeatable=True)
         if failed:
-            raise FigureReadError("；".join(failed))
+            raise FigureReadError("；".join(failed))      # 暂存留着：重试时不必再解析
+        self.conn.execute("DELETE FROM parse_cache WHERE version_id = %s", (version_id,))
+
+    def _save_parsed(self, version_id: uuid.UUID, parsed) -> None:
+        blocks = [{"kind": b.kind, "text": b.text, "level": b.level, "rows": b.rows, "section": list(b.section),
+                   "order": b.order, "page": b.page, "image_type": b.image_type if b.image else None}
+                  for b in parsed.blocks]
+        self.conn.execute(
+            "INSERT INTO parse_cache (version_id, parser, title, blocks, created_at) VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT (version_id) DO UPDATE SET parser = EXCLUDED.parser, title = EXCLUDED.title, "
+            "blocks = EXCLUDED.blocks, created_at = EXCLUDED.created_at",
+            (version_id, parsed.parser, parsed.title, Jsonb(blocks), self.clock()))
+        self.conn.execute("DELETE FROM parse_cache_image WHERE version_id = %s", (version_id,))
+        for b in parsed.blocks:
+            if b.image and b.image_type:
+                self.conn.execute("INSERT INTO parse_cache_image (version_id, block_order, mime, data) "
+                                  "VALUES (%s, %s, %s, %s)", (version_id, b.order, b.image_type, b.image))
+
+    def _load_parsed(self, version_id: uuid.UUID, parser_name: str):
+        """文本解析时暂存的结果；没有、或解析器版本不同（升级后）时为 None，交给重新解析。"""
+        from eaer.ingestion.parsers import Block, ParsedDocument
+
+        row = self.conn.execute("SELECT parser, title, blocks FROM parse_cache WHERE version_id = %s",
+                                (version_id,)).fetchone()
+        if row is None or row["parser"] != parser_name:
+            return None
+        images = {r["block_order"]: (r["mime"], bytes(r["data"])) for r in self.conn.execute(
+            "SELECT block_order, mime, data FROM parse_cache_image WHERE version_id = %s", (version_id,))}
+        blocks = []
+        for d in row["blocks"]:
+            mime, data = images.get(d["order"], (None, None))
+            blocks.append(Block(d["kind"], d["text"], d["level"], d["rows"], tuple(d["section"]), d["order"], d["page"],
+                                image=data, image_type=mime))
+        return ParsedDocument(row["title"], blocks, row["parser"])
 
     def _read_figures(self, version_id: uuid.UUID, parsed) -> list[str]:
         if self.figure_reader is None:
