@@ -45,6 +45,21 @@ VALUE_POS = [
     ("2025年12月18日审核通过，上限600元", ["2025-12-18 审核通过；上限 600 元"]),
     ("１２０元", ["120元"]),
     ("根据第5份通知，上限为650元", ["上限为650元"]),                                # “第N份”也是序号
+    # 英文证据（ViDoRe V3）：年份不写“年”、英文日期、million、per cent、表头里的百分比单位
+    ("2023年马耳他最高，为90%", ["Share of EU movers with digital skills, 2023 (%)｜Malta：90"]),
+    ("2023 年就业率为 75.3%", ["In 2023 the employment rate reached 75.3%"]),
+    ("制造业就业 120万人", ["1.2 million EU movers worked in manufacturing"]),
+    ("约 42 亿欧元", ["revenue of EUR 4.2 billion"]),
+    ("自2024年1月1日起", ["applies as of 1 January 2024"]),
+    ("2024年1月5日", ["on January 5, 2024"]),
+    ("2024年3月", ["published in March 2024"]),
+    ("就业率为75.3%", ["employment rate of 75.3 per cent"]),
+    ("相差3.5个百分点", ["a gap of 3.5 percentage points"]),
+    ("In 2022, 12.3% of workers", ["Part-time contracts (%)｜Switzerland｜2022：12.3"]),
+    ("2021年至2022年增长", ["Table 2｜Inflows｜2021：120｜2022：135"]),
+    ("2023年20至34岁为3,346（单位：千人）", ["Table 5 (1 000s)｜20 - 34 years｜2023：3 346 (33 %)"]),  # 空格千分位
+    ("年度回流 738000 人", ["Annual return mobility 738 000 698 000 (+6 %)"]),
+    ("占33%", ["20 - 34 years｜2023：3 346 (33 %)"]),
 ]
 VALUE_NEG = [
     ("一线城市住宿上限为680元/晚", ["一线城市｜标准：650元/晚"]),                    # Q16 扰动
@@ -68,6 +83,16 @@ VALUE_NEG = [
     ("报销比例为0.5", ["报销比例为0.05"]),
     ("上限为１００元", ["上限为10元"]),
     ("第三条规定上限为3元", ["第三条　上限为650元"]),
+    ("2023年马耳他最高，为90%", ["Malta｜2023：90"]),                               # 证据没有百分比单位
+    ("就业率为75.3%", ["a gap of 75.3 percentage points"]),                         # percentage 不是百分号
+    ("2023年马耳他最高，为91%", ["Share of EU movers, 2023 (%)｜Malta：90"]),
+    ("2024年就业率为75.3%", ["In 2023 the employment rate reached 75.3%"]),
+    ("制造业就业 12万人", ["1.2 million EU movers worked in manufacturing"]),
+    ("自2024年2月1日起", ["applies as of 1 January 2024"]),
+    ("2024年5月", ["workers may 2024 apply"]),                                      # 小写 may 不是月份
+    ("2024年3月", ["published in May 2024"]),
+    ("年度回流 738001 人", ["Annual return mobility 738 000 698 000 (+6 %)"]),
+    ("共 3456 人", ["3 456.5 million"]),                                         # 带小数的不是空格千分位
 ]
 
 
@@ -346,3 +371,31 @@ def test_q16_perturbed_claim_is_unsupported_on_real_evidence(conn, tmp_path, mon
 ])
 def test_value_match_exempts_only_the_query_target_dates(claim, ev, targets, want):
     assert value_match(claim, ev, targets).outcome == want
+
+
+# 证据中没有、但等于所引证据中两个数值的差或和：只核对了算术，含义待核实，标“未验证”而不是删除（ViDoRe V3：
+# “相差 10 个百分点”“上升了 2 个百分点”这类结论原先被判不支持，核心结论被删，整个回答拒答）
+DERIVED = [
+    ("2023年欧盟流动医疗工作者与本国国民的永久合同比例相差10个百分点", ["Contract type, 2023｜EU movers in health｜permanent：96 %", "Contract type, 2023｜nationals｜permanent：86 %"]),
+    ("从2018年到2023年上升了2个百分点", ["low education｜2018：28 %", "low education｜2023：30 %"]),
+    ("两项合计1610元", ["住宿 650 元", "交通 960 元"]),
+    ("相差6.4个百分点", ["employment rate 75.34 %", "TCN employment rate 68.9 %"]),     # 按结论的小数位数比较
+]
+NOT_DERIVED = [
+    ("相差11个百分点", ["permanent：96 %", "permanent：86 %"]),
+    ("从2018年到2023年的5年间上升了2个百分点", ["2018：28 %", "2023：31 %"]),            # 年份不参与
+    ("上限为680元", ["一线城市｜标准：650元/晚"]),                                        # 只有一个数
+    ("相差10个百分点，自2026年1月1日起", ["96 %", "86 %"]),                                # 日期找不到仍是不支持
+]
+
+
+@pytest.mark.parametrize("claim, ev", DERIVED)
+def test_value_derived_from_cited_numbers_is_unverified(claim, ev):
+    r = value_match(claim, ev)
+    assert r.outcome == "unverified" and "计算得出" in r.reason, r
+
+
+@pytest.mark.parametrize("claim, ev", NOT_DERIVED)
+def test_value_not_derivable_stays_unsupported(claim, ev):
+    r = value_match(claim, ev)
+    assert r.outcome == "unsupported" and r.reason.startswith("证据中没有"), r

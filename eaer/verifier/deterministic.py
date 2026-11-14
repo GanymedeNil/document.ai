@@ -7,6 +7,9 @@
 2. locator_exists：证据存在；证据 id 能由版本、模态、定位和内容哈希重新算出（定位与内容未被篡改）；
    定位的形状对该模态成立（页码、表格单元格、图表区域）；原件仍在文件存储中；
 3. value_match：结论中的数值、日期规范化后（全角半角、万与千、千分位、日期写法）都出现在所引证据中；
+   英文证据另认：不写“年”的年份、英文日期（1 January 2024）、thousand / million / billion、per cent、
+   空格千分位（3 456），以及写明了百分比单位的证据里不带 % 的数值（表头“(%)”）。证据中没有、但等于所引证据中
+   两个数值之差或之和的（“相差 10 个百分点”），只核对得了算术，判 unverified 并写明算式；
 4. time_valid：所引版本在目标时间有效。只有起决定作用的边界是 explicit 时才判“确定无效”（unsupported）；
    有效但仅由 inferred 或空值支撑时为 unverified。一条结论引用多个版本时取最差的结果。
 
@@ -51,8 +54,25 @@ _ORDINAL = re.compile(r"第\s*[0-9一二三四五六七八九十百零〇]+\s*[�
 _YMD = re.compile(r"(?<!\d)(\d{4})\s*(?:年|-|/|\.)\s*(\d{1,2})\s*(?:月|-|/|\.)\s*(\d{1,2})\s*[日号]?")
 _YM = re.compile(r"(?<!\d)(\d{4})\s*(?:年\s*(\d{1,2})\s*月|-(\d{1,2})(?![\d-]))")
 _Y = re.compile(r"(?<!\d)(\d{4})\s*年")
-_NUM = re.compile(r"(?<![\dA-Za-z_.])(\d+(?:\.\d+)?)\s*(亿|万|千)?\s*(%)?")   # 紧跟字母的数字是编号（P002、v2）
-_MULT = {None: Decimal(1), "千": Decimal(1000), "万": Decimal(10000), "亿": Decimal(100000000)}
+# 英文日期：月份名首字母大写（“may”是情态动词），如 1 January 2024、January 1, 2024、Jan. 2024
+_MONTHS = {m: k + 1 for k, ms in enumerate([
+    ("January", "Jan"), ("February", "Feb"), ("March", "Mar"), ("April", "Apr"), ("May",), ("June", "Jun"),
+    ("July", "Jul"), ("August", "Aug"), ("September", "Sep", "Sept"), ("October", "Oct"), ("November", "Nov"),
+    ("December", "Dec")]) for m in ms}
+_MON = r"(" + "|".join(sorted(_MONTHS, key=len, reverse=True)) + r")\b\.?"
+_EN_DMY = re.compile(r"(?<!\d)(\d{1,2})(?:st|nd|rd|th)?\s+" + _MON + r"\s+(\d{4})(?!\d)")
+_EN_MDY = re.compile(r"\b" + _MON + r"\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?!\d)")
+_EN_MY = re.compile(r"\b" + _MON + r"\s+(\d{4})(?!\d)")
+_NUM = re.compile(r"(?<![\dA-Za-z_.])(\d+(?:\.\d+)?)\s*(亿|万|千|thousand\b|million\b|billion\b|bn\b)?\s*"
+                  r"(%|per\s*cent\b|percent\b)?")   # 紧跟字母的数字是编号（P002、v2）；percentage 不是百分号
+_MULT = {None: Decimal(1), "千": Decimal(1000), "万": Decimal(10000), "亿": Decimal(100000000),
+         "thousand": Decimal(1000), "million": Decimal(1000000), "billion": Decimal(1000000000), "bn": Decimal(1000000000)}
+# 空格作千分位（欧盟出版物的写法：3 456、738 000）。与相邻的几个数无法区分（表格一行“9 700 9 930”），
+# 所以只用在证据一侧，作为另一种读法补充进去，不替换原读法
+_SPACE_THOUSANDS = re.compile(r"(?<![\d.,])\d{1,3}(?:[   ]\d{3})+(?![\d.,])")
+# 证据里写明了百分比单位（表头“(%)”、图题“占比（%）”、per cent）时，其中不带 % 的数值也可以是百分比
+_PCT_UNIT = re.compile(r"%|per\s*cent\b|percent\b|百分比")
+_YEARS = range(1900, 2101)
 
 
 @dataclass(frozen=True)
@@ -90,7 +110,13 @@ def extract(text: str) -> Facts:
         mo = int(m.group(2) or m.group(3))
         return (int(m.group(1)), mo, None) if 1 <= mo <= 12 else None
 
+    def en(y, mo, d=None):
+        return (int(y), _MONTHS[mo], int(d) if d else None) if d is None or 1 <= int(d) <= 31 else None
+
     take(_YMD, ymd)
+    take(_EN_DMY, lambda m: en(m.group(3), m.group(2), m.group(1)))
+    take(_EN_MDY, lambda m: en(m.group(3), m.group(1), m.group(2)))
+    take(_EN_MY, lambda m: en(m.group(2), m.group(1)))
     take(_YM, ym)
     take(_Y, lambda m: (int(m.group(1)), None, None))
     qs: set[tuple[Decimal, str]] = set()
@@ -101,6 +127,21 @@ def extract(text: str) -> Facts:
             continue
         qs.add((v.normalize(), "pct" if m.group(3) else "num"))
     return Facts(frozenset(qs), frozenset(dates))
+
+
+def _space_grouped(text: str) -> set[tuple[Decimal, str]]:
+    """空格分隔的数字串的各种千分位读法：“738 000 698 000”可能是 738000 与 698000，也可能是一个数，
+    相邻的几组合起来的每一种都算（只用于证据一侧）。"""
+    out: set[tuple[Decimal, str]] = set()
+    for m in _SPACE_THOUSANDS.finditer(text.translate(_FULLWIDTH)):
+        g = re.split(r"[   ]", m.group())[:12]
+        out |= {(Decimal("".join(g[i:j + 1])).normalize(), "num") for i in range(len(g)) for j in range(i + 1, len(g))}
+    return out
+
+
+def _year(v: Decimal) -> int | None:
+    """可能是年份的数值（英文与表头里的年份不写“年”，抽出来是数值）。"""
+    return int(v) if v == v.to_integral_value() and int(v) in _YEARS else None
 
 
 def _fmt(v: Decimal) -> str:
@@ -123,13 +164,43 @@ def value_match(claim: str, evidence_texts: list[str], target_dates: tuple[date,
     have_d: set = set()
     for t in evidence_texts:
         f = extract(t)
-        have_q |= f.quantities
+        qs = set(f.quantities) | _space_grouped(t)
+        if _PCT_UNIT.search(_norm_text(t)):
+            qs |= {(v, "pct") for v, k in qs if k == "num"}
+        have_q |= qs
         have_d |= f.dates
+    have_d |= {(y, None, None) for v, k in have_q if k == "num" and (y := _year(v)) is not None}
+    have_q |= {(Decimal(d[0]), "num") for d in have_d}
     targets = {(t.year, t.month, t.day) for t in target_dates}
-    missing = [f"{_fmt(v)}{'%' if k == 'pct' else ''}" for v, k in sorted(want.quantities) if (v, k) not in have_q]
-    missing += ["-".join(str(x) for x in d if x is not None) for d in sorted(want.dates, key=str)
-                if not _date_found(d, have_d) and not _date_found(d, targets)]
-    return Check("unsupported", f"证据中没有：{'、'.join(missing)}") if missing else PASS
+    lacking = [(v, k) for v, k in sorted(want.quantities) if (v, k) not in have_q]
+    missing = [f"{_fmt(v)}{'%' if k == 'pct' else ''}" for v, k in lacking]
+    dates = ["-".join(str(x) for x in d if x is not None) for d in sorted(want.dates, key=str)
+             if not _date_found(d, have_d) and not _date_found(d, targets)]
+    if not missing and not dates:
+        return PASS
+    derived = None if dates else _derivations([v for v, _ in lacking], have_q)
+    if derived:
+        return Check("unverified", f"数值由所引证据计算得出：{'；'.join(derived)}，代码只核对了算术，含义待核实")
+    return Check("unsupported", f"证据中没有：{'、'.join(missing + dates)}")
+
+
+def _derivations(values: list[Decimal], have_q: set) -> list[str] | None:
+    """结论里证据中没有的数值，是否都等于所引证据中两个数值的差或和（按结论写的小数位数比较）：
+    “相差 10 个百分点”（96% 与 86%）、“上升了 2 个百分点”、“两项合计 1,610”。年份不参与（2023 − 2018 = 5 之类
+    几乎什么都能凑出来）。有一个凑不出就返回 None。"""
+    pool = sorted({v for v, _ in have_q if _year(v) is None})
+    if len(pool) < 2 or len(pool) > 60:
+        return None
+    out = []
+    for want in values:
+        exp = want.as_tuple().exponent if want.as_tuple().exponent < 0 else 0
+        q = Decimal(1).scaleb(exp)
+        hit = next((f"{_fmt(want)} = {_fmt(a)} {op} {_fmt(b)}" for i, a in enumerate(pool) for b in pool[:i]
+                    for op, r in (("−", a - b), ("+", a + b)) if r.quantize(q) == want.quantize(q)), None)
+        if hit is None:
+            return None
+        out.append(hit)
+    return out
 
 
 # ---------------------------------------------------------------- locator_exists
