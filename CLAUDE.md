@@ -21,7 +21,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 
 | 路径 | 内容 |
 | --- | --- |
-| `eaer/db/migrations/` | Alembic 迁移，原生 SQL。12 张业务表，另有查询任务表 `query_task`、LangGraph 的 4 张检查点表（0005，按库的表结构建、不在运行时建表）、回答缓存 `query_cache`（0006，失效由触发器完成）与准入记录 `model_admission`（0007，只追加）；不变量由触发器、检查约束、部分唯一索引保证 |
+| `eaer/db/migrations/` | Alembic 迁移，原生 SQL。12 张业务表，另有查询任务表 `query_task`、LangGraph 的 4 张检查点表（0005，按库的表结构建、不在运行时建表）、回答缓存 `query_cache`（0006，失效由触发器完成）与准入记录 `model_admission`（0007，只追加）；0008 给审核任务加所属租户 `tenant_id`；不变量由触发器、检查约束、部分唯一索引保证 |
 | `eaer/lifecycle/` | 生命周期服务（唯一能改版本状态的模块）与按系统时间的回溯查询 |
 | `eaer/ingestion/` | 入库第 1–3、6 阶段，解析器接口（原生 Word/HTML 与 Docling），抽取规则，索引任务（`indexer.py`，唯一写索引的地方），后台任务进程（也接着执行转入后台的提问） |
 | `eaer/review/` | 审核服务 |
@@ -92,7 +92,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 9. **缓存隔离与 Trace 清理。** 已完成（2026-11-13）：回答缓存（键含租户、授权范围哈希、索引构建编号；数据库触发器在权限、状态、有效期、关系、租户配置变化时清除该租户缓存；命中后仍核对权限）、Trace 清理（已结束任务的检查点与任务行按 trace_retention_days 删除，后台任务进程每小时一次，`python -m eaer.ingestion purge` 手动），`tests/test_cache.py`。OpenTelemetry trace（13.3）未接入。
 10. **准入检查。** 已完成（2026-11-13）：`python -m eaer.evalrun.admission`（验证器评测集由事实表生成、标定与评测分开、误通过率与误拒率门槛；Deep 比较题正确率门槛），结论写入 `model_admission`，部署时据此开关 Verified 与 Deep，没有记录的模型两者关闭（`EAER_ADMISSION=off` 只用于本地开发）。DeepSeek + 本地 Qwen3 在样例上：Verified 误通过 0%、误拒 22%，Deep 10/10，能力矩阵见 `docs/能力矩阵-线上模型.md`。本地跑接口前先用 `--database-url … --tenant …` 写入准入结论。
 11. **扩充评测集。** 已完成（2026-11-13）：`factset/synth.py` 按 14.3 的样本量生成合成集（高风险类别各 300、其他各 100，共 2000 条，30% 标定、70% 测试），v2 约四成查询用改写问法；`docs/评测集/合成集-v2.xlsx` 冻结（测试核对与生成器一致），抽检单 `合成集-v2-抽检单.xlsx`（100 条）待人工核对。评测运行器支持 `--split 测试`、`--per-type N`。
-12. **OpenAPI 文件与契约测试（AC-11-1）。** 已完成（2026-11-13）：`eaer/api/openapi.yaml`、`tests/contract.py`（按文件校验请求与响应的检查器）、`tests/test_contract.py`。审核决定的 `corrections` 改为按格式校验（格式错误整个请求 400）。发现但未处理：`GET /v1/review/tasks?status=deleted` 永远为空——删除后审核任务的 version_id 置空，按租户过滤要经版本关联文档，删除的任务因此查不到；修正需要给 review_task 加 tenant_id（新迁移）。429 频率限制未实现。
+12. **OpenAPI 文件与契约测试（AC-11-1）。** 已完成（2026-11-13）：`eaer/api/openapi.yaml`、`tests/contract.py`（按文件校验请求与响应的检查器）、`tests/test_contract.py`。审核决定的 `corrections` 改为按格式校验（格式错误整个请求 400）。当时发现的 `GET /v1/review/tasks?status=deleted` 永远为空（删除后任务不再指向版本，按租户过滤要经版本关联文档）已于 2026-11-14 修正：迁移 0008 给 review_task 加 tenant_id（从版本回填；迁移前已删除的任务无从得知租户，保持为空、不推断），触发器保证与版本所属文档的租户一致且不可修改；列表与处理都按任务自己的租户判断，每项多了 reviewer、decided_at。429 频率限制未实现。
 13. **其余未开始的项。** 选定 Embedding 与重排模型的规格（AC-5-4）、计量对账（AC-12-4）、部署运维、OpenTelemetry trace（13.3）。
 
 ## 需要用户决定或提供的事项

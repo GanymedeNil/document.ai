@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import psycopg
+import pytest
 
 from eaer.db import downgrade, migrate
 
@@ -18,7 +19,9 @@ TRIGGERS = {"version_delete_guard", "version_update_guard", "validity_guard", "r
 TRIGGERS_0005 = {"query_log_guard", "query_task_guard"}
 TRIGGERS_0006 = {"cache_on_version", "cache_on_validity", "cache_on_relation", "cache_on_acl_policy", "cache_on_tenant_config"}
 TRIGGERS_0007 = {"model_admission_append_only", "cache_on_model_admission"}
-ALL = (TABLES | TABLES_0005 | TABLES_0006 | TABLES_0007, TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006 | TRIGGERS_0007)
+TRIGGERS_0008 = {"review_task_tenant_guard"}
+ALL = (TABLES | TABLES_0005 | TABLES_0006 | TABLES_0007,
+       TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006 | TRIGGERS_0007 | TRIGGERS_0008)
 
 
 def _state(url):
@@ -39,8 +42,15 @@ def test_upgrade_downgrade_upgrade(empty_db_url):
 
 
 def test_each_revision_downgrades_one_step(empty_db_url):
-    """逐个版本回滚：0007 去掉准入记录；0006 去掉回答缓存；0005 去掉查询任务与检查点表；0004 只去掉强制验证清单的触发器。"""
+    """逐个版本回滚：0008 去掉审核任务的租户与其触发器；0007 去掉准入记录；0006 去掉回答缓存；
+    0005 去掉查询任务与检查点表；0004 只去掉强制验证清单的触发器。"""
     migrate(empty_db_url)
+    downgrade(empty_db_url, "0007")
+    assert _state(empty_db_url) == (TABLES | TABLES_0005 | TABLES_0006 | TABLES_0007,
+                                    TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006 | TRIGGERS_0007)
+    with psycopg.connect(empty_db_url) as c:
+        assert c.execute("SELECT count(*) FROM information_schema.columns "
+                         "WHERE table_name = 'review_task' AND column_name = 'tenant_id'").fetchone()[0] == 0
     downgrade(empty_db_url, "0006")
     assert _state(empty_db_url) == (TABLES | TABLES_0005 | TABLES_0006, TRIGGERS | TRIGGERS_0005 | TRIGGERS_0006)
     downgrade(empty_db_url, "0005")
@@ -51,6 +61,30 @@ def test_each_revision_downgrades_one_step(empty_db_url):
     assert _state(empty_db_url) == (TABLES, TRIGGERS - {"forced_verify_append_only"})
     migrate(empty_db_url)
     assert _state(empty_db_url) == ALL
+
+
+def test_0008_backfills_review_task_tenant_without_guessing(empty_db_url):
+    """0008 从版本所属文档回填审核任务的租户；迁移前已删除的任务没有依据，保持为空、不推断，
+    且之后新写入的任务必须带租户。"""
+    from psycopg.rows import dict_row
+
+    from dbutil import seed
+
+    migrate(empty_db_url)
+    with psycopg.connect(empty_db_url, autocommit=True, row_factory=dict_row) as c:
+        lc, _, ids = seed(c)                                     # t1：v1 已通过、v2 待审核
+        doc = lc.create_document("t1", "X", "临时文件")
+        lc.delete_pending(lc.add_version(doc, content_hash="h", raw_object_uri="file://x", acl_policy_id=ids["acl"],
+                                         parser_version="t"), "bob")
+    downgrade(empty_db_url, "0007")
+    migrate(empty_db_url)
+    with psycopg.connect(empty_db_url, autocommit=True, row_factory=dict_row) as c:
+        rows = c.execute("SELECT status, tenant_id FROM review_task ORDER BY status").fetchall()
+        assert rows == [{"status": "approved", "tenant_id": "t1"}, {"status": "deleted", "tenant_id": None},
+                        {"status": "open", "tenant_id": "t1"}]
+        with pytest.raises(psycopg.errors.CheckViolation, match="review_task_tenant_required"):
+            c.execute("INSERT INTO review_task (id, status, reviewer, decided_at) "
+                      "VALUES (gen_random_uuid(), 'deleted', 'bob', now())")
 
 
 def _checkpoint_schema(url):

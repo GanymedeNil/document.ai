@@ -250,7 +250,9 @@ paths:
       operationId: listReviewTasks
       tags: [文档与审核]
       summary: 列出审核任务
-      description: 需要 reviewer 角色。按任务 id 排序，游标分页。
+      description: |
+        需要 reviewer 角色。只列出本租户的任务，按任务 id 排序，游标分页。
+        status=deleted 列出已删除的待审核版本留下的审核记录（谁在何时删除，不含内容）。
       parameters:
         - name: status
           in: query
@@ -836,8 +838,10 @@ components:
         next_cursor: {type: [string, 'null']}
     ReviewTask:
       type: object
-      required: [task_id, batch_id, status, suggestions, corrections, version_id, version_no, uploaded_at,
-                 import_batch_id, document_id, title, doc_type, extraction_status, draft_validity]
+      description: |
+        已删除（deleted）的任务只保留谁在何时删除：不再指向版本，版本与文档的字段、入库提示与更正都为 null（6.3）。
+      required: [task_id, batch_id, status, suggestions, corrections, reviewer, decided_at, version_id, version_no,
+                 uploaded_at, import_batch_id, document_id, title, doc_type, extraction_status, draft_validity]
       additionalProperties: false
       properties:
         task_id: {type: string, format: uuid}
@@ -849,12 +853,19 @@ components:
         corrections:
           type: [object, 'null']
           description: 审核人提交的更正
-        version_id: {type: string, format: uuid}
-        version_no: {type: integer, minimum: 1}
-        uploaded_at: {type: string, format: date-time}
+        reviewer:
+          type: [string, 'null']
+          description: 审核通过或删除的人；open 时为 null
+        decided_at:
+          type: [string, 'null']
+          format: date-time
+          description: 审核通过或删除的时间；open 时为 null
+        version_id: {type: [string, 'null'], format: uuid}
+        version_no: {type: [integer, 'null'], minimum: 1}
+        uploaded_at: {type: [string, 'null'], format: date-time}
         import_batch_id: {type: [string, 'null']}
-        document_id: {type: string, format: uuid}
-        title: {type: string}
+        document_id: {type: [string, 'null'], format: uuid}
+        title: {type: [string, 'null']}
         doc_type:
           oneOf:
             - {$ref: '#/components/schemas/DocType'}
@@ -865,6 +876,37 @@ components:
         draft_validity:
           type: [object, 'null']
           description: 审核前的待确认有效期（valid_from、valid_to 及其等级、无法换算的原文、定位）
+      allOf:
+        - if: {properties: {status: {const: deleted}}}
+          then:
+            properties:
+              suggestions: {type: 'null'}
+              corrections: {type: 'null'}
+              version_id: {type: 'null'}
+              version_no: {type: 'null'}
+              uploaded_at: {type: 'null'}
+              import_batch_id: {type: 'null'}
+              document_id: {type: 'null'}
+              title: {type: 'null'}
+              doc_type: {type: 'null'}
+              extraction_status: {type: 'null'}
+              draft_validity: {type: 'null'}
+          else:
+            properties:
+              version_id: {type: string}
+              version_no: {type: integer}
+              uploaded_at: {type: string}
+              document_id: {type: string}
+              title: {type: string}
+        - if: {properties: {status: {const: open}}}
+          then:
+            properties:
+              reviewer: {type: 'null'}
+              decided_at: {type: 'null'}
+          else:
+            properties:
+              reviewer: {type: string}
+              decided_at: {type: string}
     Decisions:
       type: object
       required: [decisions]

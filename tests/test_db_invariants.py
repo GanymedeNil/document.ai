@@ -53,6 +53,14 @@ VIOLATIONS = [
      errors.RaiseException, "只能追加"),
     ("删除生命周期事件", "DELETE FROM lifecycle_event",
      errors.RaiseException, "只能追加"),
+    ("审核任务不带租户",
+     "INSERT INTO review_task (id, status, reviewer, decided_at) VALUES (gen_random_uuid(), 'deleted', 'bob', now())",
+     errors.CheckViolation, "review_task_tenant_required"),
+    ("审核任务的租户与版本所属文档不同",
+     "INSERT INTO review_task (id, tenant_id, version_id, status) VALUES (gen_random_uuid(), 't2', %(v2)s, 'open')",
+     errors.RaiseException, "与版本所属文档的租户"),
+    ("修改审核任务的租户", "UPDATE review_task SET tenant_id = 't2' WHERE version_id = %(v2)s",
+     errors.RaiseException, "审核任务的租户写入后不可修改"),
 ]
 
 

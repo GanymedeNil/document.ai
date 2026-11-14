@@ -58,6 +58,27 @@ def test_list_tasks_shows_suggestions_and_pages(env):
     assert env.review.list_tasks("other-tenant")[0] == []
 
 
+def test_deleted_tasks_are_listed_with_who_and_when(env):
+    """删除待审核版本后，审核记录仍按租户列出：保留删除人和时间，不保留内容（6.3）；其他租户既看不到也不能处理。"""
+    batch = uuid.uuid4()
+    r = env.ing.receive("t1", html("临时草稿", "第一条　草稿内容。"), "draft.html", acl_policy_id=env.acl, batch_id=batch)
+    env.worker.run_until_idle()
+    task = task_of(env.conn, r.version_id)
+    assert env.review.decide("t1", [{"task_id": task, "decision": "delete"}], "bob")[0]["ok"]
+
+    items, nxt = env.review.list_tasks("t1", status="deleted")
+    assert nxt is None and [i["task_id"] for i in items] == [uuid.UUID(task)]
+    item = items[0]
+    assert item["reviewer"] == "bob" and item["decided_at"] is not None and item["batch_id"] == batch
+    assert all(item[k] is None for k in ("version_id", "document_id", "title", "suggestions", "corrections",
+                                         "extraction_status", "draft_validity"))
+    assert env.review.list_tasks("t1", status="deleted", batch_id=batch)[0] == items
+    assert env.review.list_tasks("other-tenant", status="deleted")[0] == []
+    # 其他租户处理这个任务：与不存在的任务一样，不暴露“已处理”
+    assert env.review.decide("other-tenant", [{"task_id": task, "decision": "delete"}], "eve")[0]["error"] == "审核任务不存在"
+    assert "已处理" in env.review.decide("t1", [{"task_id": task, "decision": "delete"}], "bob")[0]["error"]
+
+
 def test_reviewer_supplied_date_is_explicit_and_attributed(env):
     r = env.ing.receive("t1", html("采购审批权限规定", "部门经理单笔采购审批上限为50,000元。"), "p.html", acl_policy_id=env.acl)
     env.worker.run_until_idle()

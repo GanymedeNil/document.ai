@@ -89,9 +89,11 @@ class Lifecycle:
                 "VALUES (%s, %s, %s, 'pending_review', %s, %s, %s, %s, %s, %s, %s, %s)",
                 (vid, document_id, version_no, content_hash, raw_object_uri, acl_policy_id, now,
                  source_created_at, import_batch_id, doc_date, parser_version))
+            # 任务自带租户：删除待审核版本后任务不再指向版本，仍要能按租户列出（迁移 0008）
             self.conn.execute(
-                "INSERT INTO review_task (id, version_id, batch_id, status) VALUES (%s, %s, %s, 'open')",
-                (uuid.uuid4(), vid, batch_id))
+                "INSERT INTO review_task (id, tenant_id, version_id, batch_id, status) "
+                "SELECT %s, tenant_id, %s, %s, 'open' FROM document WHERE id = %s",
+                (uuid.uuid4(), vid, batch_id, document_id))
         return vid
 
     def set_draft_validity(self, version_id: uuid.UUID, *, valid_from: date | None = None,

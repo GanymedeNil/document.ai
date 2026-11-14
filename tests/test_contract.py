@@ -365,6 +365,19 @@ def s_list_review_tasks(e: Env):
     assert len(rest["items"]) == 1 and rest["next_cursor"] is None
     assert expect(e.client.get("/v1/review/tasks", headers=H("tok-rv"), params={"status": "approved"}), 200).json()["items"]
     expect(e.client.get("/v1/review/tasks", headers=H("tok-rv"), params={"batch_id": str(uuid.uuid4())}), 200)
+    # 删除待审核版本后，审核记录仍按租户列出：谁在何时删除，不含内容；其他租户看不到
+    gone = first["items"][0]["task_id"]
+    res = expect(e.client.post("/v1/review/decisions", headers=H("tok-rv"),
+                               json={"decisions": [{"task_id": gone, "decision": "delete"}]}), 200).json()["results"]
+    assert res[0]["ok"], res
+    deleted = expect(e.client.get("/v1/review/tasks", headers=H("tok-rv"), params={"status": "deleted"}), 200).json()
+    assert [(t["task_id"], t["reviewer"], t["version_id"], t["title"]) for t in deleted["items"]] == [(gone, "rv", None, None)]
+    assert deleted["items"][0]["decided_at"]
+    assert expect(e.client.get("/v1/review/tasks", headers=H("tok-eve"), params={"status": "deleted"}),
+                  200).json()["items"] == []
+    res = expect(e.client.post("/v1/review/decisions", headers=H("tok-eve"),
+                               json={"decisions": [{"task_id": gone, "decision": "delete"}]}), 200).json()["results"]
+    assert res[0]["error"] == "审核任务不存在"
     for bad in ({"limit": 0}, {"limit": 201}, {"limit": "x"}, {"status": "bogus"}, {"batch_id": "xyz"}):
         expect(e.client.get("/v1/review/tasks", headers=H("tok-rv"), params=bad), 400, "invalid_request")
     expect(e.client.get("/v1/review/tasks"), 401, "unauthenticated")

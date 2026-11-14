@@ -31,16 +31,18 @@ class Review:
 
     def list_tasks(self, tenant_id: str, status: str = "open", batch_id: uuid.UUID | None = None,
                    cursor: str | None = None, limit: int = 50) -> tuple[list[dict], str | None]:
+        """按租户列出审核任务。已删除的任务只剩谁在何时删除：版本与文档的字段都为 null（6.3）。"""
         rows = self.conn.execute(
-            "SELECT t.id AS task_id, t.batch_id, t.status, t.suggestions, t.corrections, "
+            "SELECT t.id AS task_id, t.batch_id, t.status, t.suggestions, t.corrections, t.reviewer, t.decided_at, "
             "  v.id AS version_id, v.version_no, v.uploaded_at, v.import_batch_id, "
             "  d.id AS document_id, d.title, d.doc_type, "
             "  (SELECT status FROM ingest_job j WHERE j.version_id = v.id AND j.stage = 'classify_extract' "
             "     ORDER BY created_at DESC LIMIT 1) AS extraction_status, "
             "  (SELECT row_to_json(x) FROM (SELECT valid_from, valid_from_grade, valid_to, valid_to_grade, "
             "     unresolved_text, locator FROM version_validity WHERE version_id = v.id AND recorded_at IS NULL) x) AS draft_validity "
-            "FROM review_task t JOIN document_version v ON v.id = t.version_id JOIN document d ON d.id = v.document_id "
-            "WHERE d.tenant_id = %s AND t.status = %s AND (%s::uuid IS NULL OR t.batch_id = %s::uuid) "
+            "FROM review_task t LEFT JOIN document_version v ON v.id = t.version_id "
+            "  LEFT JOIN document d ON d.id = v.document_id "
+            "WHERE t.tenant_id = %s AND t.status = %s AND (%s::uuid IS NULL OR t.batch_id = %s::uuid) "
             "AND (%s::text IS NULL OR t.id::text > %s::text) ORDER BY t.id::text LIMIT %s",
             (tenant_id, status, batch_id, batch_id, cursor, cursor, limit + 1)).fetchall()
         items = rows[:limit]
@@ -72,10 +74,11 @@ class Review:
         except ValueError:
             raise ReviewError("task_id 格式错误")
         task = self.conn.execute(
-            "SELECT t.*, v.document_id, d.tenant_id, d.doc_type FROM review_task t "
+            "SELECT t.*, v.document_id, d.doc_type FROM review_task t "
             "LEFT JOIN document_version v ON v.id = t.version_id LEFT JOIN document d ON d.id = v.document_id "
             "WHERE t.id = %s FOR UPDATE OF t", (tid,)).fetchone()
-        if task is None or (task["tenant_id"] not in (None, tenant_id)):
+        # 按任务自己的租户判断：其他租户的任务（含已删除的）一律“不存在”
+        if task is None or task["tenant_id"] != tenant_id:
             raise ReviewError("审核任务不存在")
         if task["status"] != "open":
             raise ReviewError(f"审核任务已处理（{task['status']}）")
