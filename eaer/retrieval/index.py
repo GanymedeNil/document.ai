@@ -52,11 +52,14 @@ class Filters:
 
     on：判断生效的日期。system_t 不为空时是回溯查询：索引里只按审核通过时间过滤，
     有效期在检索后换成 system_t 时刻记录的值再判断（开发文档 7.4）。
+    point：问题带了历史时点（某天实际生效、截至某天系统所知）。记录类文档“按时点”：带时点时只取文档日期不晚于它的；
+    不带时点（当前）时不按日期过滤，没有文档日期的也参与（开发文档 7.4“记录类按时点”“空值不过滤”）。
     """
     tenant_id: str
     principals: frozenset[str]
     on: date
     system_t: datetime | None = None
+    point: bool = False
 
     def __post_init__(self):
         if not self.tenant_id or not self.principals:
@@ -68,7 +71,7 @@ class Filters:
         if self.system_t is not None:
             return d.approved_at <= self.system_t
         if d.doc_type == "record":
-            return d.doc_date is not None and d.doc_date <= self.on
+            return d.doc_date <= self.on if d.doc_date is not None else not self.point
         # 规范类与类型未定的文档按有效期判断；空值不过滤（开发文档 7.4）
         return ((d.valid_from is None or d.valid_from <= self.on)
                 and (d.valid_to is None or d.valid_to > self.on))
@@ -86,7 +89,9 @@ class Filters:
                 {"bool": {"should": [absent("valid_from"), {"range": {"valid_from": {"lte": on}}}], "minimum_should_match": 1}},
                 {"bool": {"should": [absent("valid_to"), {"range": {"valid_to": {"gt": on}}}], "minimum_should_match": 1}},
             ]}}
-        record = {"bool": {"filter": [{"term": {"doc_type": "record"}}, {"range": {"doc_date": {"lte": on}}}]}}
+        dated = [{"range": {"doc_date": {"lte": on}}}] + ([] if self.point else [absent("doc_date")])
+        record = {"bool": {"filter": [{"term": {"doc_type": "record"}},
+                                      {"bool": {"should": dated, "minimum_should_match": 1}}]}}
         return {"bool": {"filter": scope + [{"bool": {"should": [normative, record], "minimum_should_match": 1}}]}}
 
 

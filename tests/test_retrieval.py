@@ -76,7 +76,8 @@ def random_doc(rng: random.Random) -> IndexDoc:
 def random_filters(rng: random.Random) -> Filters:
     on = date(2025, 1, 1) + timedelta(days=rng.randrange(0, 730))
     t = rng.choice([None, datetime(2025, 1, 1, 23, 59, 59, tzinfo=UTC) + timedelta(days=rng.randrange(0, 730))])
-    return Filters(rng.choice(["t1", "t2"]), frozenset(rng.sample(["A", "B", "C"], rng.randint(1, 2))), on, t)
+    return Filters(rng.choice(["t1", "t2"]), frozenset(rng.sample(["A", "B", "C"], rng.randint(1, 2))), on, t,
+                   point=t is not None or rng.random() < 0.5)
 
 
 def test_dsl_and_python_filters_agree():
@@ -347,3 +348,20 @@ def test_evaluation_requires_eval_environment(conn, tmp_path, monkeypatch):
     monkeypatch.delenv("EAER_ENV", raising=False)
     with pytest.raises(PermissionError):
         run_eval(conn, None, tmp_path, {"versions": []}, store=None, index=MemoryIndex(), embedder=HashingEmbedder())
+
+
+def test_undated_records_take_part_in_current_queries_only(ix):
+    """记录类按时点（7.4）：没有文档日期的报告（抽不出“报告日期”，例如英文报告）当前查询照样能检索到；
+    带历史时点的查询只取文档日期不晚于它的，没有日期的无法确认当时已存在，不取。原先一律不取，这类文档永远查不到。"""
+    body = "<h1>Quarterly travel cost review</h1><p>Total travel cost in the second quarter was 1.28 million.</p>"
+    r = ix.ing.receive("t1", body.encode(), "review.html", acl_policy_id=ix.acl)
+    ix.worker.run_until_idle()
+    task = str(ix.conn.execute("SELECT id FROM review_task WHERE version_id = %s", (r.version_id,)).fetchone()["id"])
+    assert ix.review.decide("t1", [{"task_id": task, "decision": "approve", "corrections": {"doc_type": "record"}}],
+                            "rv")[0]["ok"]
+    ix.worker.run_until_idle()
+    assert ix.conn.execute("SELECT doc_date FROM document_version WHERE id = %s", (r.version_id,)).fetchone()["doc_date"] is None
+    scope, q = Scope("t1", frozenset({"R_STAFF"})), "travel cost in the second quarter"
+    assert any(h.version_id == str(r.version_id) for h in ix.retriever.search(scope, q, today=date(2026, 8, 1)))
+    assert not any(h.version_id == str(r.version_id)
+                   for h in ix.retriever.search(scope, q, today=date(2026, 8, 1), as_of_valid=date(2026, 7, 1)))

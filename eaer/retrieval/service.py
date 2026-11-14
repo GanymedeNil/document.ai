@@ -67,7 +67,8 @@ class Retriever:
             raise MissingScope("检索请求必须带授权范围")
         system_t = end_of_day(as_of_system) if as_of_system else None
         on = as_of_valid or as_of_system or today
-        f = Filters(scope.tenant_id, frozenset(scope.principals), on, system_t)
+        point = as_of_valid is not None or as_of_system is not None
+        f = Filters(scope.tenant_id, frozenset(scope.principals), on, system_t, point)
         factor = self.backtrack_factor if system_t else 1      # 回溯在检索后才筛有效期，候选放大
         with span("eaer.retrieve", **{"eaer.tenant": scope.tenant_id, "eaer.as_of_valid": bool(as_of_valid),
                                       "eaer.as_of_system": bool(system_t)}) as sp:
@@ -77,7 +78,7 @@ class Retriever:
                   else self.embedder.embed([question])[0])            # 查询可带指令前缀，文档不带
             vector = index.search_vector(qv, f, self.k_vector * factor)
             fused = rrf(lexical, vector, k=self.rrf_k)[: self.top_n * factor]
-            hits = self._recheck(scope, fused, on, system_t)[: self.top_n]
+            hits = self._recheck(scope, fused, on, system_t, point)[: self.top_n]
             rechecked = len(hits)
             if self.reranker is not None and hits:
                 scores = self.reranker.rerank(question, [h.content for h in hits])
@@ -114,7 +115,8 @@ class Retriever:
         return [VersionInfo(str(r["id"]), str(r["document_id"]), r["title"], r["version_no"], r["valid_from"],
                             r["valid_to"], r["approved_at"]) for r in rows]
 
-    def _recheck(self, scope: Scope, fused: list[tuple[str, float]], on: date, system_t: datetime | None) -> list[Hit]:
+    def _recheck(self, scope: Scope, fused: list[tuple[str, float]], on: date, system_t: datetime | None,
+                 point: bool = True) -> list[Hit]:
         if not fused:
             return []
         ids = [i for i, _ in fused]
@@ -142,16 +144,17 @@ class Retriever:
             if system_t is not None and r["approved_at"] > system_t:
                 continue
             val = validity.get(r["version_id"])
-            if not _in_force(r["doc_type"], r["doc_date"], val, on):
+            if not _in_force(r["doc_type"], r["doc_date"], val, on, point):
                 continue
             out.append(Hit(eid, str(r["version_id"]), str(r["document_id"]), r["modality"], r["content"],
                            r["locator"], score, _grade(r["doc_type"], val)))
         return out
 
 
-def _in_force(doc_type: str | None, doc_date: date | None, val: dict | None, on: date) -> bool:
+def _in_force(doc_type: str | None, doc_date: date | None, val: dict | None, on: date, point: bool = True) -> bool:
+    """记录类按时点：带历史时点时只取文档日期不晚于它的；当前查询不按日期过滤，没有文档日期的也参与（7.4）。"""
     if doc_type == "record":
-        return doc_date is not None and doc_date <= on
+        return doc_date <= on if doc_date is not None else not point
     if val is None:
         return False
     return ((val["valid_from"] is None or val["valid_from"] <= on)
