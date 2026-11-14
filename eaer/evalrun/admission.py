@@ -33,6 +33,7 @@ from datetime import date, datetime, timezone
 from itertools import combinations
 from pathlib import Path
 
+from eaer.evalrun.license import add_external_flag, emit, provenance_of, refuse_early
 from eaer.adapters.authorizer import LocalAuthorizer
 from eaer.orchestrator.admission import DEFAULT_CRITERIA
 from eaer.retrieval.service import Scope
@@ -398,10 +399,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", help="能力矩阵写到这个文件（Markdown）")
     p.add_argument("--format", choices=["docx", "html"], default="docx")
     p.add_argument("--per-type", type=int, default=10, help="能力矩阵中事实表查询每类最多取几条（默认 10）")
+    add_external_flag(p)
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
         print("只在评测环境运行（EAER_ENV=eval）", file=sys.stderr)
         return 2
+    prov = [provenance_of(args.xlsx)]
+    if (code := refuse_early(prov, external=args.external)) is not None:
+        return code
     if bool(args.database_url) != bool(args.tenant):
         print("--database-url 与 --tenant 要一起给", file=sys.stderr)
         return 2
@@ -424,12 +429,10 @@ def main(argv: list[str] | None = None) -> int:
             report = run_admission(conn, fs, work / "corpus", manifest, model=model,
                                    store=LocalFileStore(work / "files"), index=MemoryIndex(), embedder=embedder,
                                    reranker=reranker)
-    report["dataset"] = {"file": Path(args.xlsx).name,
+    report["dataset"] = {"file": Path(args.xlsx).name, "provenance": prov[0].dataset, "modified": prov[0].modified,
                          "sha256": hashlib.sha256(Path(args.xlsx).read_bytes()).hexdigest()}
-    text = matrix(report)
-    print(text)
-    if args.out:
-        Path(args.out).write_text(text, encoding="utf-8")
+    if (code := emit(matrix(report), prov, external=args.external, out=args.out)) != 0:
+        return code
     if args.database_url:
         import psycopg
         from psycopg.rows import dict_row

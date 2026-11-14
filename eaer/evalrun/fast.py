@@ -26,6 +26,7 @@ from pathlib import Path
 
 from eaer.adapters.authorizer import LocalAuthorizer
 from eaer.adapters.model import ModelClient
+from eaer.evalrun.license import add_external_flag, emit, provenance_of, refuse_early
 from eaer.evalrun.retrieval import run
 from eaer.orchestrator.fast import FastAnswer, FastPipeline
 from eaer.retrieval.embed import Embedder, HashingEmbedder
@@ -205,10 +206,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--engine", action="store_true", help="经完整编排器（Router、升级、Deep、Verified）回答")
     p.add_argument("--split", choices=["标定", "测试"], help="只用该集合的查询（14.3：指标在测试集上报）")
     p.add_argument("--per-type", type=int, help="每类查询最多取几条（按编号哈希抽样，可复现）")
+    add_external_flag(p)
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
         print("只在评测环境运行（EAER_ENV=eval）", file=sys.stderr)
         return 2
+    prov = [provenance_of(args.xlsx)]
+    if (code := refuse_early(prov, external=args.external)) is not None:
+        return code
     model = OnlineModelClient.from_env()
     missing = model.missing_for_fast()
     if "生成" in missing:
@@ -229,11 +234,11 @@ def main(argv: list[str] | None = None) -> int:
         results = runner(conn, fs, work / "corpus", manifest, model=model, store=LocalFileStore(work / "files"),
                          index=MemoryIndex(), embedder=embedder, reranker=reranker)
         conn.close()
-    print(report(results, model=model.gen.model,
-                 embedder=embedder.name + (f"，重排 {model.rr.model}" if reranker else "，不重排")))
+    text = report(results, model=model.gen.model,
+                  embedder=embedder.name + (f"，重排 {model.rr.model}" if reranker else "，不重排"))
     if missing:
-        print(f"\n注意：未配置 {'、'.join(missing)}，结果只说明流程，不能作为产品基线。")
-    return 0
+        text += f"\n\n注意：未配置 {'、'.join(missing)}，结果只说明流程，不能作为产品基线。"
+    return emit(text, prov, external=args.external)
 
 
 if __name__ == "__main__":

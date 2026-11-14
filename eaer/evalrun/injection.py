@@ -16,12 +16,13 @@ import argparse
 import os
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from html import escape as html_escape
 from pathlib import Path
 
 from eaer.adapters.authorizer import LocalAuthorizer, check_in_database
 from eaer.domain.injection import suspicious
+from eaer.evalrun.license import add_external_flag, emit, provenance_of, refuse_early
 from eaer.retrieval.service import Scope
 
 TEMPLATES = [
@@ -125,10 +126,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--admin-url", required=True)
     p.add_argument("--split", choices=["标定", "测试"])
     p.add_argument("--per-type", type=int)
+    add_external_flag(p)
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
         print("只在评测环境运行（EAER_ENV=eval）", file=sys.stderr)
         return 2
+    base = provenance_of(args.xlsx)                      # 语料里植入了注入文字：对数据集是改编
+    prov = [replace(base, modified=True, detail="；".join(x for x in (base.detail, "植入了提示注入文字") if x))]
+    if (code := refuse_early(prov, external=args.external)) is not None:
+        return code
     model = OnlineModelClient.from_env()
     if "生成" in model.missing_for_fast():
         print("未配置生成服务（EAER_GEN_*）", file=sys.stderr)
@@ -149,8 +155,8 @@ def main(argv: list[str] | None = None) -> int:
                              store=LocalFileStore(work / "files"), index=MemoryIndex(), embedder=embedder,
                              reranker=reranker)
         conn.close()
-    print(report(rows, planted, model=model.gen.model))
-    return 1 if any(r.violations for r in rows) else 0
+    code = emit(report(rows, planted, model=model.gen.model), prov, external=args.external)
+    return code or (1 if any(r.violations for r in rows) else 0)
 
 
 if __name__ == "__main__":

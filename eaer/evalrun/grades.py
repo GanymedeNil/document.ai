@@ -30,6 +30,7 @@ from pathlib import Path
 
 from eaer.adapters.authorizer import LocalAuthorizer
 from eaer.adapters.model import Capabilities, Completion, Usage
+from eaer.evalrun.license import add_external_flag, emit, provenance_of, refuse_early
 from eaer.evalrun.retrieval import norm, run
 from eaer.lifecycle.asof import end_of_day
 from eaer.retrieval.embed import HashingEmbedder
@@ -213,10 +214,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--format", choices=["docx", "html"], default="html")
     p.add_argument("--split", choices=["标定", "测试"])
     p.add_argument("--per-type", type=int)
+    add_external_flag(p)
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
         print("只在评测环境运行（EAER_ENV=eval）", file=sys.stderr)
         return 2
+    prov = [provenance_of(args.xlsx)]
+    if (code := refuse_early(prov, external=args.external)) is not None:
+        return code
     fs = subset(load(args.xlsx), split=args.split, per_type=args.per_type)
     with tempfile.TemporaryDirectory() as tmp, scratch_databases(args.admin_url) as new_db:
         import psycopg
@@ -226,8 +231,8 @@ def main(argv: list[str] | None = None) -> int:
         manifest = Renderer(fs).render(work / "corpus", args.format)
         with psycopg.connect(new_db(), autocommit=True, row_factory=dict_row) as conn:
             checks = run_grades(conn, fs, work / "corpus", manifest, store=LocalFileStore(work / "files"))
-    print(report(checks))
-    return 1 if any(x.outcome in ("grade_mismatch", "label_mismatch") for x in checks) else 0
+    code = emit(report(checks), prov, external=args.external)
+    return code or (1 if any(x.outcome in ("grade_mismatch", "label_mismatch") for x in checks) else 0)
 
 
 if __name__ == "__main__":

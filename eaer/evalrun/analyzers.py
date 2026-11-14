@@ -28,6 +28,7 @@ from urllib.parse import urlsplit, urlunsplit
 import psycopg
 from psycopg.rows import dict_row
 
+from eaer.evalrun.license import add_external_flag, emit, provenance_of, refuse_early
 from eaer.evalrun.retrieval import Report, run
 from eaer.ingestion.indexer import fresh_index
 from eaer.retrieval.embed import Embedder, HashingEmbedder
@@ -191,10 +192,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--split", choices=["标定", "测试"], help="只用该集合的查询（14.3：指标在测试集上报）")
     p.add_argument("--modes", default="lexical,hybrid", help="lexical（仅关键词）、hybrid（关键词 + 向量），逗号分隔")
     p.add_argument("--per-type", type=int, help="每类查询最多取几条（按编号哈希抽样，可复现）")
+    add_external_flag(p)
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
         print("分词器对比只在评测环境运行（EAER_ENV=eval）", file=sys.stderr)
         return 2
+    prov = [provenance_of(args.xlsx)]
+    if (code := refuse_early(prov, external=args.external)) is not None:
+        return code
     from factset.subset import subset
     fs = subset(load(args.xlsx), split=args.split, per_type=args.per_type)
     issues = validate(fs)
@@ -211,8 +216,7 @@ def main(argv: list[str] | None = None) -> int:
         rows = compare(fs, work / "corpus", manifest, client=connect(args.opensearch), new_db=new_db,
                        analyzers=tuple(a.strip() for a in args.analyzers.split(",") if a.strip()), work_dir=work,
                        embedder=embedder, modes=tuple(m.strip() for m in args.modes.split(",") if m.strip()))
-    print(table(rows, {q.id: q.note for q in fs.queries}))
-    return 0
+    return emit(table(rows, {q.id: q.note for q in fs.queries}), prov, external=args.external)
 
 
 if __name__ == "__main__":
