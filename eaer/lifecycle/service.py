@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 
 from eaer.domain.evidence import content_hash as hash_content
 from eaer.domain.evidence import evidence_id
+from eaer.domain.jobs import DEFAULT_PRIORITY, PRIORITY
 
 Clock = Callable[[], datetime]
 MODALITIES = {"text", "table", "figure"}
@@ -324,8 +325,9 @@ class Lifecycle:
 
     def _enqueue(self, version_id, stage: str, now: datetime) -> None:
         self.conn.execute(
-            "INSERT INTO ingest_job (id, version_id, stage, status, created_at, updated_at) "
-            "VALUES (%s, %s, %s, 'queued', %s, %s)", (uuid.uuid4(), version_id, stage, now, now))
+            "INSERT INTO ingest_job (id, version_id, stage, status, priority, created_at, updated_at) "
+            "VALUES (%s, %s, %s, 'queued', %s, %s, %s)",
+            (uuid.uuid4(), version_id, stage, PRIORITY.get(stage, DEFAULT_PRIORITY), now, now))
 
     def _event(self, version_id, event: str, actor: str, detail: Any, now: datetime) -> None:
         self.conn.execute(

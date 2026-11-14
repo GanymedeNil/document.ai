@@ -5,6 +5,7 @@
     python -m eaer.ingestion rebuild --build-id b2   全量重建索引并切换别名（开发文档 5.3）
     python -m eaer.ingestion drop-retired    删除别名不再指向、且超过 24 小时的旧索引（应定时运行）
     python -m eaer.ingestion purge           立即做一次 Trace 清理（后台任务进程每 EAER_PURGE_SECONDS 秒自动做一次，默认 3600）
+    python -m eaer.ingestion stats           入库队列与索引更新延迟（JSON，供监控采集；--since-minutes 默认 60）
 
 环境变量：EAER_DATABASE_URL、EAER_STORAGE_DIR（同接口进程）；EAER_POLL_SECONDS（空闲轮询间隔，默认 2）；
 EAER_OPENSEARCH_URL、EAER_INDEX_ALIAS（默认 eaer）、EAER_TEXT_ANALYZER（standard / cjk / smartcn / icu_analyzer /
@@ -67,10 +68,11 @@ def build_worker(conn: psycopg.Connection, store, env: dict[str, str], *, with_i
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="eaer.ingestion")
-    p.add_argument("command", nargs="?", default="worker", choices=["worker", "rebuild", "drop-retired", "purge"])
+    p.add_argument("command", nargs="?", default="worker", choices=["worker", "rebuild", "drop-retired", "purge", "stats"])
     p.add_argument("--no-index", action="store_true", help="只做解析与抽取，不处理索引任务")
     p.add_argument("--build-id", help="rebuild：新索引的构建编号")
     p.add_argument("--retain-hours", type=float, default=24.0, help="drop-retired：旧索引保留时长")
+    p.add_argument("--since-minutes", type=float, default=60.0, help="stats：统计最近多少分钟内排队的索引任务")
     args = p.parse_args(argv)
     env = dict(os.environ)
     try:
@@ -85,6 +87,16 @@ def main(argv: list[str] | None = None) -> int:
                                          older_than=timedelta(hours=args.retain_hours)))
             return 0
         conn = psycopg.connect(env["EAER_DATABASE_URL"], autocommit=True, row_factory=dict_row)
+        if args.command == "stats":
+            import json
+            from datetime import datetime, timedelta, timezone
+
+            from eaer.ingestion.stats import TARGET_P95_SECONDS, index_latency, queue_stats
+            now = datetime.now(timezone.utc)
+            lat = index_latency(conn, now - timedelta(minutes=args.since_minutes))
+            print(json.dumps({"queue": queue_stats(conn, now), "index_latency": lat,
+                              "index_latency_target_p95": TARGET_P95_SECONDS}, ensure_ascii=False, indent=2))
+            return 0
         if args.command == "purge":
             from datetime import datetime, timezone
 

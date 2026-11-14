@@ -18,6 +18,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from eaer.domain.injection import suspicious
+from eaer.domain.jobs import DEFAULT_PRIORITY, PRIORITY
 from eaer.ingestion.extract import classify, extract
 from eaer.ingestion.parsers import DEFAULT_PARSERS, Parser, parser_for
 from eaer.lifecycle.service import Lifecycle, utcnow
@@ -204,8 +205,9 @@ class Ingestion:
         if not exists:
             now = self.clock()
             self.conn.execute(
-                "INSERT INTO ingest_job (id, version_id, stage, status, created_at, updated_at) "
-                "VALUES (%s, %s, %s, 'queued', %s, %s)", (uuid.uuid4(), version_id, stage, now, now))
+                "INSERT INTO ingest_job (id, version_id, stage, status, priority, created_at, updated_at) "
+                "VALUES (%s, %s, %s, 'queued', %s, %s, %s)",
+                (uuid.uuid4(), version_id, stage, PRIORITY.get(stage, DEFAULT_PRIORITY), now, now))
 
 
 def _locator(b, **extra) -> dict:
