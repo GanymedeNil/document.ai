@@ -8,7 +8,7 @@
 `docling-tools models download` 下载，再用环境变量 EAER_DOCLING_ARTIFACTS 指向模型目录。
 
 映射到 Block：标题与章节标题 → heading；正文、列表项、图注 → paragraph；表格 → table（行列文本）；
-图片 → figure。页眉页脚丢弃。页码来自 Docling 的 prov，PPTX 为幻灯片序号，XLSX 为工作表序号。
+图片 → figure（带图片内容，供深度解析交给视觉模型）。页眉页脚丢弃。页码来自 Docling 的 prov，PPTX 为幻灯片序号，XLSX 为工作表序号。
 """
 from __future__ import annotations
 
@@ -51,7 +51,8 @@ class DoclingParser:
                 from docling.datamodel.pipeline_options import PdfPipelineOptions
                 from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
 
-                opts = PdfPipelineOptions(do_ocr=self.ocr, do_table_structure=True)
+                opts = PdfPipelineOptions(do_ocr=self.ocr, do_table_structure=True,
+                                          generate_picture_images=True, images_scale=2.0)
                 if self.artifacts_path:
                     opts.artifacts_path = self.artifacts_path
                 self._converter = DocumentConverter(
@@ -64,7 +65,7 @@ class DoclingParser:
         from docling.datamodel.base_models import DocumentStream
         from docling_core.types.doc import PictureItem, SectionHeaderItem, TableItem, TextItem, TitleItem
 
-        from eaer.ingestion.parsers import Block, _finish   # 在这里导入：parsers 在模块末尾注册本解析器
+        from eaer.ingestion.parsers import Block, _finish, figure   # 在这里导入：parsers 在模块末尾注册本解析器
 
         res = self._conv().convert(DocumentStream(name=Path(filename).name, stream=io.BytesIO(data)))
         doc = res.document
@@ -82,7 +83,7 @@ class DoclingParser:
                 if rows:
                     blocks.append(Block("table", rows=rows, page=page))
             elif isinstance(item, PictureItem):
-                blocks.append(Block("figure", page=page))
+                blocks.append(figure(data=_png(item, doc), page=page))
             elif isinstance(item, TitleItem):
                 blocks.append(Block("heading", _clean(item.text), 1, page=page))
             elif isinstance(item, SectionHeaderItem):
@@ -90,6 +91,19 @@ class DoclingParser:
             elif isinstance(item, TextItem) and _clean(item.text):
                 blocks.append(Block("paragraph", _clean(item.text), page=page))
         return _finish(blocks, self.name)
+
+
+def _png(item, doc) -> bytes | None:
+    """图片的 PNG 内容；Docling 没有生成图片时为 None（只留图片块，不读取）。"""
+    try:
+        img = item.get_image(doc)
+    except Exception:  # noqa: BLE001 — 取不到图片不影响文字解析
+        return None
+    if img is None:
+        return None
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _clean(text: str) -> str:

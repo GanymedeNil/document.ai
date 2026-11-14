@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from eaer.adapters.authorizer import LocalAuthorizer
-from eaer.evalrun.fast import FastResult, run_engine, score
+from eaer.evalrun.fast import FastResult, figure_reader_of, run_engine, score
 from eaer.evalrun.license import add_external_flag, emit, provenance_of, refuse_early
 from eaer.evalrun.retrieval import run
 from eaer.retrieval.service import Scope
@@ -43,7 +43,8 @@ def _calls(cost: dict) -> dict:
     return {k: v.get("calls", 0) for k, v in (cost.get("by_kind") or {}).items()}
 
 
-def run_config(name: str, conn, fs, corpus: Path, manifest: dict, *, model, store, index, embedder, reranker) -> list[Row]:
+def run_config(name: str, conn, fs, corpus: Path, manifest: dict, *, model, store, index, embedder, reranker,
+               figure_reader=None) -> list[Row]:
     from factset.answer import Calculator
 
     from eaer.adapters.online import collect_calls, summarize
@@ -53,7 +54,7 @@ def run_config(name: str, conn, fs, corpus: Path, manifest: dict, *, model, stor
 
     if name == "adaptive":
         return [Row(r) for r in run_engine(conn, fs, corpus, manifest, model=model, store=store, index=index,
-                                           embedder=embedder, reranker=reranker)]
+                                           embedder=embedder, reranker=reranker, figure_reader=figure_reader)]
     calc = Calculator(fs)
     rows: list[Row] = []
     ruled: set[str] = set()
@@ -97,7 +98,8 @@ def run_config(name: str, conn, fs, corpus: Path, manifest: dict, *, model, stor
         rows.append(Row(res, _calls(summarize(calls))))
         return res
 
-    run(conn, fs, corpus, manifest, store=store, index=index, embedder=embedder, ask=ask, reranker=reranker)
+    run(conn, fs, corpus, manifest, store=store, index=index, embedder=embedder, ask=ask, reranker=reranker,
+        figure_reader=figure_reader)
     return rows
 
 
@@ -193,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
             conn = psycopg.connect(new_db(), autocommit=True, row_factory=dict_row)
             print(f"—— {dict(CONFIGS)[key]} ——", file=sys.stderr)
             rows = run_config(key, conn, fs, work / "corpus", manifest, model=model, store=LocalFileStore(work / "files"),
-                              index=MemoryIndex(), embedder=embedder, reranker=model)
+                              index=MemoryIndex(), embedder=embedder, reranker=model, figure_reader=figure_reader_of(model))
             conn.close()
             stats[key] = summarize_config(rows)
     for key, _ in CONFIGS:

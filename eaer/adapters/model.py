@@ -19,9 +19,17 @@ class CapabilityNotSupported(Exception):
 
 
 @dataclass(frozen=True)
+class Image:
+    """随消息发给模型的图片（12.1 图像输入能力）。mime 为 image/png、image/jpeg、image/gif、image/webp。"""
+    mime: str
+    data: bytes
+
+
+@dataclass(frozen=True)
 class Message:
     role: Literal["system", "user", "assistant"]
     content: str
+    images: tuple[Image, ...] = ()      # 只有声明了 vision 能力的模型接受；否则抛 CapabilityNotSupported
 
 
 @dataclass(frozen=True)
@@ -92,6 +100,8 @@ class DeterministicTestModel:
     def generate(self, messages: list[Message], schema: dict | None) -> Completion:
         if schema is not None and not self.structured_output:
             raise CapabilityNotSupported("该模型不支持结构化输出")
+        if any(m.images for m in messages):
+            raise CapabilityNotSupported("该模型不支持图像输入")
         last = next((m.content for m in reversed(messages) if m.role == "user"), "")
         text = f"[测试替身] {last[:200]}"
         parsed = None

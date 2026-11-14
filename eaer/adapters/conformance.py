@@ -25,7 +25,7 @@ import pytest
 
 from eaer.adapters.authorizer import AuthorizationError, ScopeExpired
 from eaer.adapters.datasource import ACL_FILE, Change, SourceNotFound
-from eaer.adapters.model import Capabilities, CapabilityNotSupported, Completion, Message
+from eaer.adapters.model import Capabilities, CapabilityNotSupported, Completion, Image, Message
 from eaer.domain.identity import Identity, Scope
 
 # ---------------------------------------------------------------- 数据源
@@ -250,6 +250,16 @@ class ModelClientContract:
         assert isinstance(out, Completion) and out.text.strip() and out.parsed is None and out.model
         assert out.usage.input_tokens >= 0 and out.usage.output_tokens >= 0
 
+    def test_image_input_matches_declared_capability(self, model):
+        """声明了 vision 的能看图并照常返回；没声明的收到图片时抛 CapabilityNotSupported（12.1），不静默丢掉图片。"""
+        msgs = [Message("user", "图里写的数字是多少？只回答数字。", (Image("image/png", _digit_png()),))]
+        if model.capabilities().vision:
+            out = model.generate(msgs, None)
+            assert out.text.strip() and out.usage.input_tokens >= 0
+        else:
+            with pytest.raises(CapabilityNotSupported):
+                model.generate(msgs, None)
+
     def test_structured_output_matches_declared_capability(self, model):
         schema = {"type": "object", "properties": {"answer": {"type": "string"}, "confident": {"type": "boolean"}},
                   "required": ["answer", "confident"]}
@@ -261,6 +271,21 @@ class ModelClientContract:
         else:
             with pytest.raises(CapabilityNotSupported):
                 model.generate(msgs, schema)
+
+
+def _digit_png() -> bytes:
+    """一张写着数字 7 的小图（看图能力的一致性检查用）。"""
+    import io
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig = plt.figure(figsize=(1.2, 1.2), dpi=80)
+    fig.text(0.5, 0.5, "7", fontsize=48, ha="center", va="center")
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------- 参考驱动

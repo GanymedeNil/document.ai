@@ -5,7 +5,8 @@
 
 生成规则：
 - 正文类事实写成条款句子，表格类事实汇总成一张表，图表类事实画成柱状图，
-  图表的取值只出现在图片里，正文、图注和替代文字都不写取值；
+  图表的取值只出现在图片里，正文、图注和替代文字都不写取值；HTML 把图片以 data URI 内嵌（文件自成一体，
+  上传一个文件就带着图，与 Word 嵌入图片一致），同时在旁边留一份 PNG 便于查看；
 - 生效日写法为“正文写明”的版本，末条写“自某年某月某日起施行”；
   “仅上传时间”和“无”的版本全文不出现任何完整日期；
 - “无”的版本在清单中标记为批量导入，系统不得把上传时间当作时间依据（开发文档 6.2）；
@@ -237,7 +238,9 @@ def _write_html(blocks: list[Block], out_dir: Path, path: Path) -> None:
             parts += ["<tr>" + "".join(f"<td>{escape(c)}</td>" for c in r) + "</tr>" for r in body]
             parts.append("</tbody></table>")
         elif b.kind == "figure":
-            parts.append(f'<figure><img src="{escape(b.image)}" alt="{escape(b.text)}">'
+            import base64
+            uri = "data:image/png;base64," + base64.b64encode((out_dir / b.image).read_bytes()).decode()
+            parts.append(f'<figure><img src="{uri}" alt="{escape(b.text)}">'
                          f"<figcaption>{escape(b.text)}</figcaption></figure>")
     parts.append("</body></html>")
     path.write_text("\n".join(parts), encoding="utf-8")

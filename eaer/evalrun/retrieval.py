@@ -10,7 +10,7 @@
 - 名次：命中查询的名次取各条依据事实最早出现位置中最靠后的一个，用来计算 MRR（未命中记 0），
   召回率相同时用它比较排序质量；
 - 越权：任一返回证据在提问时不可搜索或提问角色无权查看，即计一次，应为 0；
-- 图表类事实需要视觉模型解析，尚未接入时单独列出，不计入召回分母。
+- 图表类事实需要视觉模型解析：没有配置图片读取器时单独列出，不计入召回分母；配置了（生成服务声明看图能力）则照常计分。
 时间参数直接取事实表中的生效时间点与回溯时间点，相当于时间识别完全正确；时间识别的准确率另行评测（AC-7-6）。
 """
 from __future__ import annotations
@@ -111,12 +111,13 @@ class _Clock:
 
 def run(conn: psycopg.Connection, fs: FactSet, corpus: Path, manifest: dict, *, store: FileStore,
         index: SearchIndex, embedder: Embedder, tenant_id: str = "eval", top_m: int = 10,
-        build_id: str = "eval", ask=None, reranker=None) -> Report:
-    """ask：在提问日回答每个查询的函数，签名同 _ask；默认按检索结果计分，Fast 试跑传入自己的回答函数。"""
+        build_id: str = "eval", ask=None, reranker=None, figure_reader=None) -> Report:
+    """ask：在提问日回答每个查询的函数，签名同 _ask；默认按检索结果计分，Fast 试跑传入自己的回答函数。
+    figure_reader：深度解析时读取图片的读取器（eaer/ingestion/figures.py）；给了它，图表类事实照常计分。"""
     if os.environ.get("EAER_ENV") != "eval":
         raise PermissionError("评测运行器只在评测环境启用（EAER_ENV=eval）")
     clock = _Clock()
-    ing = Ingestion(conn, store, clock)
+    ing = Ingestion(conn, store, clock, figure_reader=figure_reader)
     lc = Lifecycle(conn, clock)
     review = Review(conn, lc, store)
     worker = Worker(ing, Indexer(conn, index, embedder, build_id))
@@ -151,7 +152,8 @@ def run(conn: psycopg.Connection, fs: FactSet, corpus: Path, manifest: dict, *, 
         elif kind == "event":
             _apply_event(lc, fs, obj, ids, doc_ids)
         else:
-            results.append((ask or _ask)(conn, fs, obj, retriever, ids, tenant_id))
+            results.append(ask(conn, fs, obj, retriever, ids, tenant_id) if ask else
+                           _ask(conn, fs, obj, retriever, ids, tenant_id, vision=figure_reader is not None))
         worker.run_until_idle()
     diffs = reconcile(conn, index, tenant_id)
     return Report(results, sum(len(v) for v in diffs.values()), embedder.name, top_m)
@@ -170,7 +172,7 @@ def _apply_event(lc: Lifecycle, fs: FactSet, e, ids, doc_ids) -> None:
         lc.change_acl(doc_ids[doc], sorted(e.new_roles), ACTOR)
 
 
-def _ask(conn, fs: FactSet, q, retriever: Retriever, ids, tenant_id: str) -> QueryResult:
+def _ask(conn, fs: FactSet, q, retriever: Retriever, ids, tenant_id: str, *, vision: bool = False) -> QueryResult:
     hits = retriever.search(Scope(tenant_id, frozenset({q.role})), q.question, today=q.asked_on,
                             as_of_valid=q.as_of_valid, as_of_system=q.as_of_system)
     top = [h.evidence_id for h in hits]
@@ -182,7 +184,7 @@ def _ask(conn, fs: FactSet, q, retriever: Retriever, ids, tenant_id: str) -> Que
         leaked = any(h.version_id in own and own[h.version_id] in t for h, t in zip(hits, texts))
         return QueryResult(q.id, q.type, "refusal_leak" if leaked else "refused", leaks=leaks, top=top)
     facts = [fs.facts[i] for i in q.basis]
-    if any(f.carrier == "图表" for f in facts):
+    if not vision and any(f.carrier == "图表" for f in facts):
         return QueryResult(q.id, q.type, "needs_vision", needed=len(facts), leaks=leaks, top=top)
     found, rank = 0, 0
     for f in facts:

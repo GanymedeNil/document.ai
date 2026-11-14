@@ -63,6 +63,28 @@ def test_generate_sends_openai_compatible_request_and_records_usage():
     assert rec[0].kind == "generate" and rec[0].attempts == 1 and rec[0].ok
 
 
+def test_images_are_sent_as_data_uri_blocks_only_to_vision_models():
+    """12.1 图像输入：有图片的消息发成文字块加 image_url 块（base64 data URI）；没声明 vision 的模型直接拒绝，
+    不把图片静默丢掉；没有图片的消息仍是字符串。"""
+    import base64
+
+    from eaer.adapters.model import CapabilityNotSupported, Image
+    png = b"\x89PNG\r\n\x1a\nfake"
+    msgs = [Message("system", "读图"), Message("user", "图中数值是多少？", (Image("image/png", png),))]
+    s = Script(chat('{"value": "128"}'))
+    c, _, _ = client(s, vision=True)
+    c.generate(msgs, {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]})
+    body = s.calls[0][2]
+    assert isinstance(body["messages"][1]["content"], str)                      # 系统提示（含 schema）不变
+    user = body["messages"][-1]["content"]
+    assert user[0] == {"type": "text", "text": "图中数值是多少？"}
+    assert user[1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}}
+    plain, _, _ = client(Script(), vision=False)
+    with pytest.raises(CapabilityNotSupported, match="EAER_GEN_VISION"):
+        plain.generate(msgs, None)
+    assert plain.capabilities().vision is False and c.capabilities().vision is True
+
+
 @pytest.mark.parametrize("failures", [
     [(429, {"error": {"message": "rate limited"}})],
     [(503, None), TimeoutError("timed out")],

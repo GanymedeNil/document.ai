@@ -176,7 +176,9 @@ class OnlineModelClient:
     def generate(self, messages: list[Message], schema: dict | None) -> Completion:
         if self.gen is None:
             raise CapabilityNotSupported("未配置生成服务")
-        msgs = [{"role": m.role, "content": m.content} for m in messages]
+        if any(m.images for m in messages) and not self.vision:
+            raise CapabilityNotSupported("生成服务未声明图像理解能力（EAER_GEN_VISION=1）")
+        msgs = [{"role": m.role, "content": _content(m)} for m in messages]
         body: dict[str, Any] = {"model": self.gen.model, **self.gen.extra}
         if schema is not None:
             instruction = ("只输出一个 JSON 对象，不要输出其他文字。对象必须符合下面的 JSON Schema：\n"
@@ -288,6 +290,16 @@ class OnlineModelClient:
         calls = _COLLECTOR.get()
         if calls is not None:
             calls.append(rec)
+
+
+def _content(m: Message) -> Any:
+    """OpenAI 兼容的消息内容：没有图片时是字符串；有图片时是文字块加 image_url 块（base64 data URI）。"""
+    if not m.images:
+        return m.content
+    import base64
+    return [{"type": "text", "text": m.content}] + [
+        {"type": "image_url", "image_url": {"url": f"data:{i.mime};base64,{base64.b64encode(i.data).decode()}"}}
+        for i in m.images]
 
 
 def _error_text(out: Any) -> str:

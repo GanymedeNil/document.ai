@@ -116,7 +116,7 @@ def verify_claim(conn, retriever, model, tenant_id: str, q) -> tuple[str, str]:
 
 
 def run_engine(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelClient, store, index: SearchIndex,
-               embedder: Embedder, reranker=None) -> list[FastResult]:
+               embedder: Embedder, reranker=None, figure_reader=None) -> list[FastResult]:
     """经完整的编排器回答（Router、升级、Deep、Verified）；不传时间参数，时间点由编排器从问题中识别（7.5）。"""
     from eaer.orchestrator.engine import Engine
     calc = Calculator(fs)
@@ -145,11 +145,11 @@ def run_engine(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelC
         return res
 
     return run(conn, fs, corpus, manifest, store=store, index=index, embedder=embedder, ask=ask,
-               reranker=reranker).results
+               reranker=reranker, figure_reader=figure_reader).results
 
 
 def run_fast(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelClient, store, index: SearchIndex,
-             embedder: Embedder, reranker=None) -> list[FastResult]:
+             embedder: Embedder, reranker=None, figure_reader=None) -> list[FastResult]:
     calc = Calculator(fs)
 
     def ask(conn, fs, q, retriever, ids, tenant_id):
@@ -164,7 +164,13 @@ def run_fast(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelCli
         return score(fs, calc, q, a)
 
     return run(conn, fs, corpus, manifest, store=store, index=index, embedder=embedder, ask=ask,
-               reranker=reranker).results
+               reranker=reranker, figure_reader=figure_reader).results
+
+
+def figure_reader_of(model):
+    """生成服务声明了看图能力（EAER_GEN_VISION=1）时的图片读取器，否则 None（图表类照旧读不到）。"""
+    from eaer.ingestion.figures import FigureReader
+    return FigureReader(model) if model.capabilities().vision else None
 
 
 def report(results: list[FastResult], *, model: str, embedder: str) -> str:
@@ -237,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         conn = psycopg.connect(new_db(), autocommit=True, row_factory=dict_row)
         runner = run_engine if args.engine else run_fast
         results = runner(conn, fs, work / "corpus", manifest, model=model, store=LocalFileStore(work / "files"),
-                         index=MemoryIndex(), embedder=embedder, reranker=reranker)
+                         index=MemoryIndex(), embedder=embedder, reranker=reranker, figure_reader=figure_reader_of(model))
         conn.close()
     text = report(results, model=model.gen.model,
                   embedder=embedder.name + (f"，重排 {model.rr.model}" if reranker else "，不重排"))

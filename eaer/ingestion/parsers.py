@@ -3,6 +3,8 @@
 生产环境的首选解析器是 Docling（PDF、扫描件、PPTX、XLSX、图片），见 docling_parser.py；
 这里的 Word 与 HTML 原生解析器不依赖模型，用于测试，也作为这两种格式的轻量实现。
 解析结果按文档顺序给出块：标题、段落、表格、图片；页码对 Word 和 HTML 不适用。
+图片块带上图片本身（image、image_type），供深度解析交给视觉模型读取（6.2 第 6 阶段、12.1）：Word 取嵌入的图片；
+HTML 只取内嵌的 data URI 图片——外部地址不去下载（入库进程不访问文档里写的任意网址），这类图片只留替代文字。
 """
 from __future__ import annotations
 
@@ -26,6 +28,31 @@ class Block:
     section: tuple[str, ...] = ()     # 所在章节的标题路径
     order: int = 0                    # 在文档中的顺序
     page: int | None = None
+    image: bytes | None = field(default=None, repr=False)   # 图片块：图片内容
+    image_type: str | None = None     # 图片块：image/png、image/jpeg、image/gif、image/webp
+
+
+IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+def sniff_image(data: bytes) -> str | None:
+    """按内容判断图片格式（不信扩展名与声明的类型）；不是支持的格式返回 None。"""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def figure(text: str = "", data: bytes | None = None, **kw) -> Block:
+    """图片块；data 不是支持的图片格式或过大时只留文字。"""
+    mime = sniff_image(data) if data and len(data) <= MAX_IMAGE_BYTES else None
+    return Block("figure", text, image=data if mime else None, image_type=mime, **kw)
 
 
 @dataclass
@@ -79,7 +106,9 @@ class DocxParser:
             if tag == "p":
                 p = Paragraph(el, d)
                 if el.xpath(".//w:drawing"):
-                    blocks.append(Block("figure", p.text.strip()))
+                    rids = el.xpath(".//a:blip/@r:embed")
+                    part = d.part.related_parts.get(rids[0]) if rids else None
+                    blocks.append(figure(p.text.strip(), getattr(part, "blob", None)))
                     continue
                 text = p.text.strip()
                 if not text:
@@ -124,7 +153,8 @@ class _HTMLCollector(HTMLParser):
         elif tag in ("td", "th") and self._row is not None:
             self._cell = []
         elif tag == "img":
-            self.blocks.append(Block("figure", dict(attrs).get("alt", "") or ""))
+            a = dict(attrs)
+            self.blocks.append(figure(a.get("alt", "") or "", _data_uri(a.get("src") or "")))
         elif tag in self.HEADINGS or tag in ("p", "li", "figcaption"):
             self._tag, self._buf = tag, []
 
@@ -156,6 +186,19 @@ class _HTMLCollector(HTMLParser):
             self._cell.append(data)
         elif self._tag is not None:
             self._buf.append(data)
+
+
+def _data_uri(src: str) -> bytes | None:
+    """data:image/…;base64,… 的图片内容；其他（外部地址、相对路径）返回 None，不去下载。"""
+    import base64
+    import binascii
+
+    if not src.startswith("data:image/") or ";base64," not in src[:64]:
+        return None
+    try:
+        return base64.b64decode(src.split(",", 1)[1], validate=False)
+    except (binascii.Error, ValueError):
+        return None
 
 
 class HtmlParser:

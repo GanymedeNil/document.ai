@@ -4,6 +4,7 @@
     python -m eaer.ingestion --no-index      只做解析与抽取，不处理索引任务与提问（留在队列里）
     python -m eaer.ingestion rebuild --build-id b2   全量重建索引并切换别名（开发文档 5.3）
     python -m eaer.ingestion ensure-index    别名不存在时建一个（首次部署、或索引丢失后从数据库重建）；已存在则什么都不做
+    python -m eaer.ingestion requeue-deep    对全部已发布版本重新排队深度解析（例如刚开启看图能力后补读已有文档的图片）
     python -m eaer.ingestion drop-retired    删除别名不再指向、且超过 24 小时的旧索引（应定时运行）
     python -m eaer.ingestion purge           立即做一次 Trace 清理（后台任务进程每 EAER_PURGE_SECONDS 秒自动做一次，默认 3600）
     python -m eaer.ingestion stats           入库队列与索引更新延迟（JSON，供监控采集；--since-minutes 默认 60）
@@ -16,6 +17,8 @@ jieba，默认 standard）；Embedding 服务 EAER_EMBED_*（见 eaer/adapters/o
 转入后台、或执行者中断的提问（开发文档 8.5）也由本进程接着执行，需要与接口进程相同的查询配置与 EAER_TOKENS_FILE
 （见 eaer/runtime.py）；不开放提问时设置 EAER_DISABLE_QUERY=1。
 EAER_TRACE_EXPORTER none（默认）/ console / otlp：后台任务与接着执行的提问记 trace（13.3，见 eaer/observability.py）。
+图片读取（6.2 第 6 阶段）：生成服务声明了看图能力（EAER_GEN_VISION=1）时，深度解析把文档里的图片交给它转写成
+证据（eaer/ingestion/figures.py）；没有声明时跳过图片。
 """
 from __future__ import annotations
 
@@ -50,8 +53,17 @@ def index_parts(env: dict[str, str]):
             segmenter_for(analyzer), model.embedder())
 
 
+def figure_reader_for(env: dict[str, str]):
+    """生成服务声明了看图能力时的图片读取器，否则 None。"""
+    from eaer.adapters.online import OnlineModelClient
+    from eaer.ingestion.figures import FigureReader
+
+    model = OnlineModelClient.from_env(env)
+    return FigureReader(model) if model.gen is not None and model.vision else None
+
+
 def build_worker(conn: psycopg.Connection, store, env: dict[str, str], *, with_index: bool = True) -> Worker:
-    ing = Ingestion(conn, store)
+    ing = Ingestion(conn, store, figure_reader=figure_reader_for(env))
     if not with_index:
         return Worker(ing)
     from eaer.ingestion.indexer import Indexer
@@ -71,7 +83,7 @@ def build_worker(conn: psycopg.Connection, store, env: dict[str, str], *, with_i
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="eaer.ingestion")
     p.add_argument("command", nargs="?", default="worker", choices=["worker", "rebuild", "ensure-index", "drop-retired",
-                                                                   "purge", "stats"])
+                                                                   "purge", "stats", "requeue-deep"])
     p.add_argument("--no-index", action="store_true", help="只做解析与抽取，不处理索引任务")
     p.add_argument("--build-id", help="rebuild：新索引的构建编号")
     p.add_argument("--retain-hours", type=float, default=24.0, help="drop-retired：旧索引保留时长")
@@ -105,6 +117,22 @@ def main(argv: list[str] | None = None) -> int:
 
             from eaer.orchestrator.tasks import purge
             print("已删除：", purge(conn, datetime.now(timezone.utc)))
+            return 0
+        if args.command == "requeue-deep":
+            import uuid as _uuid
+            from datetime import datetime, timezone
+
+            from eaer.domain.jobs import PRIORITY
+            now = datetime.now(timezone.utc)
+            rows = conn.execute(
+                "SELECT v.id FROM document_version v WHERE v.status IN ('searchable', 'archived') AND NOT EXISTS ("
+                "  SELECT 1 FROM ingest_job j WHERE j.version_id = v.id AND j.stage = 'parse_deep' AND j.status = 'queued')"
+            ).fetchall()
+            for r in rows:
+                conn.execute("INSERT INTO ingest_job (id, version_id, stage, status, priority, created_at, updated_at) "
+                             "VALUES (%s, %s, 'parse_deep', 'queued', %s, %s, %s)",
+                             (_uuid.uuid4(), r["id"], PRIORITY["parse_deep"], now, now))
+            print(f"已为 {len(rows)} 个版本重新排队深度解析")
             return 0
         if args.command == "ensure-index":
             from datetime import datetime, timezone

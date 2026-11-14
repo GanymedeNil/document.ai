@@ -35,13 +35,18 @@ class Received:
     duplicate: bool
 
 
+class FigureReadError(Exception):
+    """有图片没能读取；已写入的证据保留，任务交给重试。"""
+
+
 class Ingestion:
     def __init__(self, conn: psycopg.Connection, store: FileStore,
-                 clock: Callable[[], datetime] = utcnow, parsers: list[Parser] | None = None):
+                 clock: Callable[[], datetime] = utcnow, parsers: list[Parser] | None = None, figure_reader=None):
         self.conn = conn
         self.store = store
         self.clock = clock
         self.parsers = parsers or DEFAULT_PARSERS
+        self.figure_reader = figure_reader      # eaer.ingestion.figures.FigureReader；None 时不读取图片
         self.lc = Lifecycle(conn, clock)
 
     # ---------- 第 1 阶段：接收 ----------
@@ -134,12 +139,15 @@ class Ingestion:
         return out + [{"field": "paragraph", "locator": loc, "kinds": k, "text": c[:80]}
                       for loc, c in paras for k in [suspicious(c)] if k]
 
-    # ---------- 第 6 阶段：深度解析（表格） ----------
+    # ---------- 第 6 阶段：深度解析（表格与图片） ----------
 
     def parse_deep(self, version_id: uuid.UUID) -> None:
-        """发布后在后台解析表格，每个数据单元格一条证据，内容带行名和列名，便于检索与引用。
+        """发布后在后台解析表格与图片（6.2 第 6 阶段，不阻塞发布）。
 
-        图表需要视觉模型转为结构化文本（开发文档 12.1），尚未接入，暂不生成图表证据。
+        表格：每个数据单元格一条证据，内容带行名和列名。图片：配置了有看图能力的模型（figure_reader）时交给它
+        转写，图表每个数据点一条证据（figures.py）；没有配置时跳过。表格先写入；图片逐张读取、逐张提交，
+        已有证据的图片不再读取，所以任务失败重试时不会重复读取、也不会产生重复证据。有图片读取失败时，
+        已写入的照常进索引，任务报错交给重试。
         """
         v = self.conn.execute("SELECT * FROM document_version WHERE id = %s", (version_id,)).fetchone()
         if v is None or v["status"] == "pending_review":
@@ -159,7 +167,38 @@ class Ingestion:
                         col = header[c] if c < len(header) else f"第{c + 1}列"
                         self.lc.add_evidence(version_id, "table", _locator(t, table=t_index, row=r, column=c),
                                              f"{row[0]}｜{col}：{row[c]}", "deep")
-            self._enqueue(version_id, "index_update", repeatable=True)
+        failed = self._read_figures(version_id, parsed)
+        self._enqueue(version_id, "index_update", repeatable=True)
+        if failed:
+            raise FigureReadError("；".join(failed))
+
+    def _read_figures(self, version_id: uuid.UUID, parsed) -> list[str]:
+        if self.figure_reader is None:
+            return []
+        from eaer.ingestion.figures import evidence_texts
+
+        figures = [b for b in parsed.blocks if b.kind == "figure"]
+        if not any(b.image for b in figures):
+            return []
+        done = {r["n"] for r in self.conn.execute(
+            "SELECT DISTINCT (locator->>'figure')::int AS n FROM evidence WHERE version_id = %s AND modality = 'figure'",
+            (version_id,))}
+        title = self.conn.execute("SELECT d.title FROM document_version v JOIN document d ON d.id = v.document_id "
+                                  "WHERE v.id = %s", (version_id,)).fetchone()["title"]
+        failed = []
+        for i, b in enumerate(figures):
+            if b.image is None or i in done:
+                continue
+            try:
+                r = self.figure_reader.read(b.image, b.image_type, context=" / ".join([title, *b.section]))
+            except Exception as e:  # noqa: BLE001 — 一张图读不出来不影响其他图与表格
+                failed.append(f"图{i + 1}：{type(e).__name__}: {e}")
+                continue
+            with self.conn.transaction():
+                for extra, text in evidence_texts(r, i + 1, b.text):
+                    self.lc.add_evidence(version_id, "figure",
+                                         _locator(b, figure=i, **extra, source="vision", reader=r.model), text, "deep")
+        return failed
 
     def _validity(self, v: dict, ex) -> dict:
         out: dict = {}
