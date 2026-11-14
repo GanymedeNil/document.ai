@@ -24,6 +24,7 @@ first（首轮：Fast 或 Deep 的检索、生成与引用检查）→ escalate�
 from __future__ import annotations
 
 import operator
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -50,6 +51,8 @@ from eaer.verifier.deterministic import DeterministicChecker, Target
 from eaer.verifier.semantic import DEFAULT_MIN_CONFIDENCE, SemanticChecker
 
 STATUS_RANK = {"supported": 0, "unverified": 1, "unsupported": 2}
+_NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_ARTICLE = re.compile(r"^第[一二三四五六七八九十百零〇]+条\s*")
 DEFAULT_THRESHOLDS = {"semantic_min_confidence": DEFAULT_MIN_CONFIDENCE, "rerank_min_top": 0.3,
                       "deep_min_context_tokens": 16000}
 DEFAULT_BUDGETS = {"fast_rounds": 1, "deep_rounds": 3, "verified_repair_rounds": 1, "sync_seconds": 30,
@@ -357,9 +360,13 @@ class Engine:
 
     def _assemble(self, st: QueryState) -> dict:
         claims, draft = codec.claims_in(st["claims"]), codec.draft_in(st["draft"])
+        notices = list(st["notices"])
+        sides, conflicted = self._missing_conflict_sides(st, claims, draft)
+        claims = claims + sides
+        if conflicted:
+            notices.append("不同文件对此说法不一致，两种说法都已列出，系统不代为选择")
         alerts = st.get("alerts", []) + self._recheck(claims)
         text, abstained = Steps.assemble(claims, draft)
-        notices = list(st["notices"])
         if st.get("unresolved") and not abstained:
             notices.append("以下要点没有找到证据，回答未涉及：" + "；".join(st["unresolved"]))
         if not st["hits"] and draft is None:
@@ -369,6 +376,46 @@ class Engine:
             text = "；".join(echo) + ("。" if echo else "") + text
         return {"answer": text, "abstained": abstained, "notices": notices, "claims": codec.claims_out(claims),
                 "alerts": alerts}
+
+    def _missing_conflict_sides(self, st: QueryState, claims: list[ClaimOut],
+                                draft: Draft | None) -> tuple[list[ClaimOut], bool]:
+        """冲突处理（7.4）：不同文件说法不一致时两份都列出、系统不代为选择——由代码保证（8.6 组装规则由代码执行）。
+
+        模型在 conflicts 里列出了跨文件的冲突、回答却只写了其中一方（Deep 的回答常这样），就按另一方证据的原文补一条
+        非核心结论，照常经确定性检查。只处理：两端都在本次检索、按目标时间核对过的证据里（已作废的版本、无权查看的
+        不在其中）；来自不同文件（同一文件不同版本的取值不同是版本差异，不是冲突）；回答至少涉及了这组冲突的一方。
+        另一方已被引用、或同一版本的其他证据被引用且结论写出了它的全部数值，视为已列出。
+        返回（补上的结论，回答里是否有这样一组跨文件冲突——有就给用户加一条提示）。"""
+        if draft is None or not draft.conflicts or not st.get("hits"):
+            return [], False
+        hits, meta = codec.hits_in(st["hits"]), dict(st["meta"])
+        by_id = {h.evidence_id: h for h in hits}
+        kept = [c for c in claims if c.status != "unsupported"]
+        cited = {x.evidence_id for c in kept for x in c.citations}
+        add: list[dict] = []
+        conflicted = False
+        for group in draft.conflicts:
+            sides = [by_id[i] for i in dict.fromkeys(group) if i in by_id]
+            if len({h.document_id for h in sides}) < 2 or not any(h.evidence_id in cited for h in sides):
+                continue
+            conflicted = True
+            for h in sides:
+                nums = _NUM.findall(h.content)
+                if h.evidence_id in cited or any(
+                        x.version_id == h.version_id and nums and all(n in c.text for n in nums)
+                        for c in kept for x in c.citations):
+                    continue
+                m = meta[h.version_id]
+                add.append({"text": f"另有《{m['title']}》第 {m['version_no']} 版写明：{_ARTICLE.sub('', h.content).strip()}",
+                            "evidence_ids": [h.evidence_id], "core": False})
+                cited.add(h.evidence_id)
+        if not add:
+            return [], conflicted
+        _, _, _, _, target = self._ctx(st)
+        out = self.steps.check(self.scope, add, hits, meta, target, codec.targets_in(st.get("version_targets")))
+        for c in out:
+            c.core = False                         # check 在没有核心结论时会把第一条设为核心；补列的永远不是
+        return [c for c in out if c.status != "unsupported"], conflicted
 
     def _deep_signals(self, hits, claims: list[ClaimOut], draft: Draft | None) -> list[str]:
         out = []
