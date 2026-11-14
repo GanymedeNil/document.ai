@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import importlib.util
+from datetime import date
 
 import pytest
 
 from test_ingestion import env, html  # noqa: F401
-from test_retrieval import ix, publish  # noqa: F401
+from test_retrieval import SCOPE, ix, publish  # noqa: F401
 
 
 def table_evidence(ix, vid) -> list[str]:
@@ -46,3 +47,33 @@ def test_spreadsheet_clauses_become_evidence(ix):
     ev = table_evidence(ix, r.version_id)
     clauses = [x for p in doc.pages for x in p.lines]
     assert all(c.replace("　", " ") in {e.replace("　", " ") for e in ev} for c in clauses), ev[:5]
+
+
+def test_table_caption_prefixes_every_cell(ix):
+    """有表题的表格，每个单元格的证据前加“表N《表题》｜”：单元格要靠表题才检索得到、才知道单位（ViDoRe V3 发现：
+    “Switzerland｜2022：12.3”这样的单元格不知道说的是什么，问题检索到的只有表题段落，取不到数值）。
+    没有表题的表格照旧，已有文档的证据 id 不变。"""
+    body = ("<h1>劳动力流动管理办法</h1><p>第一条　本办法自2026年1月1日起施行。</p>"
+            "<table><caption>Table 3: Part-time contracts by country, 2022 (%)</caption>"
+            "<tr><th>Country</th><th>2022</th></tr><tr><td>Switzerland</td><td>12.3</td></tr></table>"
+            "<table><tr><th>项目</th><th>标准</th></tr><tr><td>一线城市住宿</td><td>650元/晚</td></tr></table>")
+    r = publish(ix, body.encode(), "t.html")
+    ix.worker.run_until_idle()
+    ev = table_evidence(ix, r.version_id)
+    assert "表1《Table 3: Part-time contracts by country, 2022 (%)》｜Switzerland｜2022：12.3" in ev
+    assert "一线城市住宿｜标准：650元/晚" in ev
+    hits = ix.retriever.search(SCOPE, "part-time contracts Switzerland", today=date(2026, 3, 1))
+    assert any("Switzerland" in h.content for h in hits)
+
+
+def test_docling_table_caption_falls_back_to_the_title_paragraph_before_it():
+    from eaer.ingestion.docling_parser import table_caption
+    from eaer.ingestion.parsers import Block
+
+    title = Block("paragraph", "Table 5: Stock of movers in the EU by age group, 2018-2023 (1 000s)", page=39)
+    assert table_caption("Table 1: Main indicators", [title], 39) == "Table 1: Main indicators"   # Docling 关联的图注优先
+    assert table_caption("", [title], 39) == title.text
+    assert table_caption("", [title], 40) == ""                                     # 不在同一页
+    assert table_caption("", [Block("paragraph", "Table 5 shows that movers are older.", page=39)], 39) == ""
+    assert table_caption("", [Block("paragraph", "表2　各城市住宿标准", page=3)], 3) == "表2　各城市住宿标准"
+    assert len(table_caption("Table 9: " + "x" * 400, [], 1)) == 200

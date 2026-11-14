@@ -141,13 +141,17 @@ class _HTMLCollector(HTMLParser):
         self._rows: list[list[str]] | None = None
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
+        self._caption: list[str] = []
+        self._in_caption = False
         self._skip = 0
 
     def handle_starttag(self, tag, attrs):
         if tag in ("script", "style", "title", "head"):
             self._skip += 1
         elif tag == "table":
-            self._rows = []
+            self._rows, self._caption = [], []
+        elif tag == "caption" and self._rows is not None:
+            self._in_caption = True
         elif tag == "tr" and self._rows is not None:
             self._row = []
         elif tag in ("td", "th") and self._row is not None:
@@ -167,9 +171,12 @@ class _HTMLCollector(HTMLParser):
         elif tag == "tr" and self._row is not None and self._rows is not None:
             self._rows.append(self._row)
             self._row = None
+        elif tag == "caption":
+            self._in_caption = False
         elif tag == "table" and self._rows is not None:
-            self.blocks.append(Block("table", rows=self._rows))
-            self._rows = None
+            caption = " ".join("".join(self._caption).split())
+            self.blocks.append(Block("table", caption, rows=self._rows))     # 表格块的 text 是表题
+            self._rows, self._caption = None, []
         elif tag == self._tag:
             text = " ".join("".join(self._buf).split())
             if text and tag != "figcaption":
@@ -184,6 +191,8 @@ class _HTMLCollector(HTMLParser):
             return
         if self._cell is not None:
             self._cell.append(data)
+        elif self._in_caption:
+            self._caption.append(data)
         elif self._tag is not None:
             self._buf.append(data)
 

@@ -7,7 +7,7 @@
 版面、表格与 OCR 模型首次使用时从 Hugging Face 下载；私有化环境无法联网时，先用
 `docling-tools models download` 下载，再用环境变量 EAER_DOCLING_ARTIFACTS 指向模型目录。
 
-映射到 Block：标题与章节标题 → heading；正文、列表项、图注 → paragraph；表格 → table（行列文本）；
+映射到 Block：标题与章节标题 → heading；正文、列表项、图注 → paragraph；表格 → table（行列文本，text 为表题）；
 图片 → figure（带图片内容，供深度解析交给视觉模型）。页眉页脚丢弃。页码来自 Docling 的 prov，PPTX 为幻灯片序号，XLSX 为工作表序号。
 """
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import re
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -81,7 +82,7 @@ class DoclingParser:
             if isinstance(item, TableItem):
                 rows = [[" ".join(c.text.split()) for c in row] for row in item.data.grid]
                 if rows:
-                    blocks.append(Block("table", rows=rows, page=page))
+                    blocks.append(Block("table", table_caption(item.caption_text(doc), blocks, page), rows=rows, page=page))
             elif isinstance(item, PictureItem):
                 blocks.append(figure(data=_png(item, doc), page=page))
             elif isinstance(item, TitleItem):
@@ -91,6 +92,19 @@ class DoclingParser:
             elif isinstance(item, TextItem) and _clean(item.text):
                 blocks.append(Block("paragraph", _clean(item.text), page=page))
         return _finish(blocks, self.name)
+
+
+_TABLE_TITLE = re.compile(r"^(?:(?:Table|Tab\.)\s*[0-9A-Z]+[0-9.\-]*\s*[:：.．]|表\s*[0-9一二三四五六七八九十]+[0-9.\-]*)")
+
+
+def table_caption(caption: str, before: list, page: int | None) -> str:
+    """表题：Docling 关联到表格的图注；没有关联时，取同一页紧挨在表格前、以“Table 3:”“表 3”开头的段落。
+    表题写进每个单元格的证据，单元格才检索得到、才知道单位（“(%)”“(1 000s)”）。"""
+    text = _clean(caption)
+    if not text and before and before[-1].kind == "paragraph" and before[-1].page == page \
+            and _TABLE_TITLE.match(before[-1].text):
+        text = before[-1].text
+    return text[:200]
 
 
 def _png(item, doc) -> bytes | None:
