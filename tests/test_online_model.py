@@ -150,6 +150,14 @@ def test_invalid_structured_output_is_rejected(content, problem):
         c.generate(MSG, SCHEMA)
 
 
+def test_truncated_structured_output_says_so():
+    status, body = chat('{"answer": "x", "claims": [{"text": "t", "evid')
+    body["choices"][0]["finish_reason"] = "length"
+    c, _, _ = client(Script((status, body)))
+    with pytest.raises(StructuredOutputError, match="超过长度上限被截断"):
+        c.generate(MSG, SCHEMA)
+
+
 def test_embed_batches_orders_by_index_and_checks_dims():
     def emb(n, offset=0):
         return 200, {"data": [{"index": i, "embedding": [float(offset + i), 0.0, 1.0]} for i in reversed(range(n))],

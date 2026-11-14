@@ -198,6 +198,8 @@ class OnlineModelClient:
             try:
                 parsed = json.loads(text)
             except ValueError:
+                if out["choices"][0].get("finish_reason") == "length":
+                    raise StructuredOutputError("要求结构化输出，输出超过长度上限被截断，不是完整的 JSON")
                 raise StructuredOutputError("要求结构化输出，返回的不是 JSON")
             problem = validate(parsed, schema)
             if problem:

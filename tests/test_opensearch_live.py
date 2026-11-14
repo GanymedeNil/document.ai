@@ -4,7 +4,8 @@
 docker-compose.dev.yml 与 CI 都用它。
 
 在真实引擎上验证：同一组过滤条件下，OpenSearch 返回的证据集合与内存实现的判断完全一致；
-写入、更新、按版本删除、别名切换和两路检索都能正常执行；
+写入、更新、按版本删除、别名切换和两路检索都能正常执行；大文档（超过 1 万条证据）的批量写入按大小分批，
+已写入的证据 id 能取全；
 检索评测在真实引擎上按日期回放，越权与对账差异为 0。
 """
 from __future__ import annotations
@@ -70,6 +71,29 @@ def test_write_search_and_delete(live):
     assert ix.indexed_ids("v1") == {d.evidence_id} and ix.version_ids("t1") == {"v1"}
     ix.delete_version("v1")
     assert ix.indexed_ids("v1") == set()
+
+
+def test_large_version_is_written_in_chunks_and_listed_in_full(live):
+    """2026-11-14 ViDoRe 入库发现：一份报告 16,413 条证据，一次批量写入数百 MB，被 413 / 429 拒绝；
+    已写入的证据 id 只取到前 10,000 条。"""
+    client, ix, alias = live
+    base = replace(random_doc(random.Random(9)), version_id="big", tenant_id="t1", embedding=(0.1, 0.2, 0.3, 0.4))
+    docs = [replace(base, evidence_id=f"ev_{i:016x}", text=f"表格单元格 {i}") for i in range(10_500)]
+    calls = []
+    real = client.bulk
+
+    def counting(**kw):
+        calls.append((len(kw["body"]), kw["refresh"]))
+        return real(**kw)
+    client.bulk = counting
+    ix.max_bulk_bytes = 400_000
+    ix.upsert(docs)
+    assert len(calls) > 5 and sum(n for n, _ in calls) == 2 * len(docs)
+    assert [r for _, r in calls] == [False] * (len(calls) - 1) + [True]          # 只在最后一批刷新
+    assert ix.indexed_ids("big") == {d.evidence_id for d in docs}
+    calls.clear()
+    ix.update_fields([d.evidence_id for d in docs], {"principals": ("B",)})
+    assert len(calls) > 1
 
 
 def test_evaluation_replays_on_real_engine(make_db, tmp_path, monkeypatch):

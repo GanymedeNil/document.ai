@@ -12,6 +12,7 @@ docker/opensearch 镜像中的插件）；传入 segmenter 时在应用侧切词
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from dataclasses import replace
@@ -22,6 +23,9 @@ from eaer.retrieval.segment import Segmenter
 ALIAS = "eaer"
 DEFAULT_ANALYZER = "standard"      # 部署的默认分词方式（EAER_TEXT_ANALYZER 可改；换分词方式须重建索引）
 PRE_SEGMENTED = "whitespace"       # 应用侧已切好词时 text 字段使用的分词器
+# 一次批量写入请求的上限（字节）。一份大文档（上万个表格单元格）的全部证据连同向量可达数百 MB，
+# 一次发出去会超过 http.max_content_length（默认 100 MB，413）或协调节点的内存上限（堆的 10%，429）
+MAX_BULK_BYTES = 5 * 1024 * 1024
 
 
 def mapping(dims: int, analyzer: str = DEFAULT_ANALYZER, segmenter: str | None = None) -> dict:
@@ -60,10 +64,12 @@ def connect(url: str) -> Any:
 
 
 class OpenSearchIndex:
-    def __init__(self, client: Any, alias: str = ALIAS, segmenter: Segmenter | None = None):
+    def __init__(self, client: Any, alias: str = ALIAS, segmenter: Segmenter | None = None,
+                 max_bulk_bytes: int = MAX_BULK_BYTES):
         self.client = client
         self.alias = alias
         self.segmenter = segmenter
+        self.max_bulk_bytes = max_bulk_bytes
 
     # ---------- 索引管理 ----------
 
@@ -151,17 +157,33 @@ class OpenSearchIndex:
                                     refresh=True, conflicts="proceed")
 
     def _bulk(self, body: list[dict]) -> None:
-        resp = self.client.bulk(body=body, refresh=True)
-        if resp.get("errors"):
-            failed = [it for it in resp.get("items", []) if any(v.get("error") for v in it.values())]
-            raise RuntimeError(f"OpenSearch 批量写入有 {len(failed)} 条失败：{failed[:3]}")
+        """body 是“动作、内容”成对的列表；按 MAX_BULK_BYTES 分成几次请求，最后一次刷新（之前的随之可见）。
+        中途失败时任务重试，已写入的证据下次按 indexed_ids 跳过。"""
+        chunks, cur, size = [], [], 0
+        for i in range(0, len(body), 2):
+            pair = body[i:i + 2]
+            n = sum(len(json.dumps(x, ensure_ascii=False, default=str).encode()) + 1 for x in pair)
+            if cur and size + n > self.max_bulk_bytes:
+                chunks.append(cur)
+                cur, size = [], 0
+            cur += pair
+            size += n
+        if cur:
+            chunks.append(cur)
+        for k, chunk in enumerate(chunks):
+            resp = self.client.bulk(body=chunk, refresh=k == len(chunks) - 1)
+            if resp.get("errors"):
+                failed = [it for it in resp.get("items", []) if any(v.get("error") for v in it.values())]
+                raise RuntimeError(f"OpenSearch 批量写入有 {len(failed)} 条失败：{failed[:3]}")
 
     # ---------- 读取 ----------
 
     def indexed_ids(self, version_id: str) -> set[str]:
-        resp = self.client.search(index=self.alias, body={
-            "size": 10000, "_source": False, "query": {"term": {"version_id": version_id}}})
-        return {h["_id"] for h in resp["hits"]["hits"]}
+        """一个版本已写入索引的全部证据 id。用滚动查询取全：一份大文档的证据可以超过单次查询的 10,000 条上限
+        （超过时原先只取到前 10,000 条，其余每次都当成新证据重写）。"""
+        from opensearchpy.helpers import scan
+        return {h["_id"] for h in scan(self.client, index=self.alias, _source=False, size=5000,
+                                       query={"query": {"term": {"version_id": version_id}}})}
 
     def version_ids(self, tenant_id: str) -> set[str]:
         resp = self.client.search(index=self.alias, body={

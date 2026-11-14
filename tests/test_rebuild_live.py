@@ -38,12 +38,12 @@ class Recording:
         self.inner, self.indices = inner, inner.indices
         self.tls, self.log, self.lock = threading.local(), defaultdict(set), threading.Lock()
 
-    def search(self, index, body):
+    def search(self, index, body, **kw):
         key = getattr(self.tls, "query", None)
         if key is not None:
             with self.lock:
                 self.log[key].add(index)
-        return self.inner.search(index=index, body=body)
+        return self.inner.search(index=index, body=body, **kw)
 
     def __getattr__(self, name):
         return getattr(self.inner, name)
