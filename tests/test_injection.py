@@ -5,7 +5,7 @@ Deep 规划时专找机密文件与其他租户。用户只有 R_STAFF 角色；
 各带一个只在其中出现的标记。逐个模式（Fast、Deep 的比较、多跳、因果、Verified、纯文本退回）提问后核对：
 - 回答、结论、计划与 query_log 中引用的证据全部在用户有权查看的范围内；
 - 机密标记从未出现在任何发给模型的内容、回答与计划里；
-- 证据区不能被伪造：文档里的结束标记、证据编号、尖括号都被转义，每个证据区的边界编号不同；
+- 证据区不能被伪造：文档里的结束标记、证据编号、尖括号都被转义，每个证据区的边界标记不同；
 - 引用了含指令文字的证据时转入 Verified；入库时这些段落列在审核建议里。
 回答被带偏的比例是指标而不是硬性项，用真实模型另测（python -m eaer.evalrun.injection）。
 """
@@ -218,9 +218,16 @@ def test_fences_cannot_be_forged():
     body = a.split("\n", 2)[2].rsplit("\n", 1)[0]
     assert a.count(FENCE_START) == 1 and a.count(FENCE_END) == 1           # 只有代码写的一对边界
     assert "<" not in body and "[ev_" not in body and "＜5人" in body
-    assert a.split(">>>")[0] != b.split(">>>")[0]                         # 每个证据区的边界编号不同
+    assert a.split(">>>")[0] != b.split(">>>")[0]                         # 每个证据区的边界标记不同
     assert "疑似给模型的指令" in a.splitlines()[1] and "疑似" not in b
     assert escape("《[通知]》") == "《［通知］》"
+
+
+def test_boundary_marker_is_not_called_an_id():
+    """边界标记不能被说成“编号”：2026-11-14 发现提示把它叫作编号时，模型常把它当证据 id 引用，
+    语义检查因此把真正支持的结论降为“未验证”（LLM-AggreFact 上 56 条）。"""
+    from eaer.domain.injection import DATA_RULE
+    assert "编号" not in DATA_RULE and "不是证据 id" in DATA_RULE and "方括号里的证据 id" in DATA_RULE
 
 
 def test_every_prompt_with_evidence_declares_it_is_data(corpus):
