@@ -160,6 +160,24 @@ def test_general_comparison_uses_objects_from_the_model(deep):
     assert not r.abstained and "700元" in r.answer and "80元" in r.answer
 
 
+def test_objects_are_split_from_the_question_when_the_model_merges_them(deep):
+    """模型把两个对象合成一个检索词时（准入检查中“住宿上限和伙食补贴分别是多少”约三分之二的运行如此），按连接词拆开。"""
+    from eaer.orchestrator.deep import split_objects
+
+    def draft(p):
+        return {"abstain": False, "claims": [claim("一线城市住宿上限为每晚700元。", p, "700元", core=True),
+                                             claim("出差伙食补贴每天80元。", p, "80元", core=False)]}
+
+    merged = [{"label": "住宿与伙食", "query": "一线城市住宿上限 出差伙食补贴"}]
+    r = deep.make(Scripted(draft, deep=plan(field="标准", objects=merged))).ask(
+        SCOPE, "一线城市住宿上限和出差伙食补贴分别是多少？", today=TODAY)
+    assert [g["label"] for g in r.plan["groups"]] == ["一线城市住宿上限", "出差伙食补贴"] and deep.search_calls["n"] == 2
+    assert not r.abstained and "700元" in r.answer and "80元" in r.answer
+    assert split_objects("比较A类费用与B类费用的区别") == ["A类费用", "B类费用"]
+    assert split_objects("住宿、伙食以及交通的标准分别在哪个文件里规定？") == ["住宿", "伙食", "交通的标准"]
+    assert split_objects("一线城市住宿上限有什么变化？") == []
+
+
 # ---------- 多跳 ----------
 
 def test_multihop_builds_the_next_hop_from_the_first(deep):

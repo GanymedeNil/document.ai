@@ -133,5 +133,19 @@ def test_aggrefact_passes_doc_and_claim_unchanged():
             return Completion("{}", {"verdict": "supported", "confidence": 0.9, "supporting_ids": ids}, Usage(1, 1), "m")
     doc = "The quarterly report shows revenue of 4.2 billion. " * 50
     out = aggrefact.run(M(), [{"dataset": "A", "doc": doc, "claim": "Revenue was 4.2 billion.", "label": 1}])
-    assert out == [{"dataset": "A", "label": 1, "verdict": "supported", "uncited": False}]
+    assert out == [{"dataset": "A", "label": 1, "raw": "supported", "confidence": 0.9, "uncited": False, "verdict": "supported"}]
     assert doc.strip() in M.prompts[0] and "Revenue was 4.2 billion." in M.prompts[0]
+
+
+def test_aggrefact_threshold_sweep_follows_the_checker_rule():
+    """记下模型原始判断与置信度，按与语义检查相同的规则换算各阈值下的结论。"""
+    from eaer.evalrun import aggrefact
+    rs = [{"dataset": "A", "label": 1, "raw": "supported", "confidence": 0.95, "uncited": False},
+          {"dataset": "A", "label": 1, "raw": "supported", "confidence": 0.75, "uncited": False},
+          {"dataset": "A", "label": 0, "raw": "supported", "confidence": 0.85, "uncited": False},
+          {"dataset": "A", "label": 0, "raw": "unsupported", "confidence": 0.6, "uncited": False},
+          {"dataset": "A", "label": 0, "raw": None, "confidence": None, "uncited": False, "verdict": "error: X"}]
+    assert [aggrefact.at_threshold(r, 0.7) for r in rs[:4]] == ["supported", "supported", "supported", "unverified"]
+    by = {w["threshold"]: w for w in aggrefact.sweep(rs)}
+    assert by[0.7]["false_pass"] == 0.5 and by[0.7]["false_reject"] == 0.0
+    assert by[0.9]["false_pass"] == 0.0 and by[0.9]["false_reject"] == 0.5

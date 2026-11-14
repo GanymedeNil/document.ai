@@ -54,7 +54,8 @@ PLAN = {
         "field": {"type": "string"},
         "objects": {"type": "array", "items": {"type": "object", "required": ["label", "query"], "properties": {
             "label": {"type": "string"}, "query": {"type": "string"}}}}}},
-        "这是比较题。field 写要比较的字段；objects 列出被比较的对象（2 到 4 个），每个给出标签和检索词。"
+        "这是比较题。field 写要比较的字段；objects 列出被比较的对象（2 到 4 个），每个给出标签和检索词；"
+        "每个对象单独一项，不要把几个对象合在一个检索词里（“A和B分别是多少”拆成 A、B 两项）。"
         "比较的是同一制度的不同版本或不同时间点时，objects 留空。"),
     "multihop": ({"type": "object", "required": ["first_hop"], "properties": {"first_hop": {"type": "string"}}},
                  "这是需要多步检索的问题。first_hop 写回答它需要先查清的第一件事的检索词。"),
@@ -253,6 +254,20 @@ def pick_versions(vs: list[VersionInfo], spec: VersionSpec, on: date) -> list[tu
             (f"修订后（第 {after.version_no} 版）", after, _first_day(after, on))]
 
 
+_JOIN = re.compile(r"以及|和|与|跟|、")
+_COMPARE_WORDS = re.compile(r"分别|各自|有什么区别|有什么不同|有何区别|有何不同|的区别|的差异|的不同|区别|对比|比较")
+
+
+def split_objects(question: str) -> list[str]:
+    """模型没拆出两个比较对象时的退路：“A和B分别是多少”“比较A与B”按连接词拆成 A、B（最多 4 个）；拆不出两个就返回空。"""
+    for part in _COMPARE_WORDS.split(question):
+        items = [x.strip(" ，,。？?！!") for x in _JOIN.split(part)]
+        items = [x for x in items if x]
+        if len(items) >= 2:
+            return items[:4]
+    return []
+
+
 def topic(question: str) -> str:
     """模型没给检索词时的退路：去掉时间、版本、比较与疑问用语。"""
     return _STRIP.sub("", question) or question
@@ -355,6 +370,8 @@ class DeepRunner:
         spec = version_spec(ctx.question, ctx.tb, ctx.today)
         if spec is None:
             objects = [o for o in slots.get("objects", []) if (o.get("query") or "").strip()][:4]
+            if len(objects) < 2:                       # 模型把几个对象合成了一个检索词：按问题里的连接词拆
+                objects = [{"label": x, "query": x} for x in split_objects(ctx.question)]
             if len(objects) < 2:
                 return [], ["没能从问题中拆出两个以上的比较对象"], ""
             groups = [Group((o.get("label") or o["query"]).strip(), [], o["query"].strip()) for o in objects]
