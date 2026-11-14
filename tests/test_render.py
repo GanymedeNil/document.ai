@@ -97,3 +97,12 @@ def test_cli_render_and_verify(tmp_path):
     assert main(["verify-docs", str(xlsx), str(out)]) == 0
     (out / "P005-v1.docx").unlink()
     assert main(["verify-docs", str(xlsx), str(out)]) == 1
+
+
+def test_mixed_unit_charts_label_each_bar_with_its_unit():
+    """不同单位的柱子不能共用一个写着第一项单位的坐标轴：每根柱子标自己的单位，纵轴不写单位。"""
+    from factset.render import chart_labels
+
+    assert chart_labels([("Q2 总费用", 128, "万元")]) == (["128"], "万元")
+    assert chart_labels([("总费用", 509, "万元"), ("预算执行率", 54, "%"), ("报销笔数", 2770, "笔")]) == (
+        ["509万元", "54%", "2770笔"], "")

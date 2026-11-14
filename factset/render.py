@@ -177,6 +177,15 @@ def _cn_num(n: int) -> str:
     return digits[n // 10] + "十" + (digits[n % 10] if n % 10 else "")
 
 
+def chart_labels(data: list[tuple[str, float, str]]) -> tuple[list[str], str]:
+    """柱子上的标注与纵轴标题。单位都相同时纵轴写单位、柱子只写数；单位不同时每根柱子写自己的单位、纵轴不写——
+    否则不同单位的柱子共用一个写着第一项单位的坐标轴，图本身就是错的（54 会被读成 54 万元）。"""
+    units = {u or "" for _, _, u in data}
+    if len(units) == 1:
+        return [f"{v:g}" for _, v, _ in data], units.pop()
+    return [f"{v:g}{u or ''}" for _, v, u in data], ""
+
+
 def _draw_chart(b: Block, path: Path) -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -190,11 +199,11 @@ def _draw_chart(b: Block, path: Path) -> None:
             break
     labels = [d[0] for d in b.data]
     values = [d[1] for d in b.data]
-    unit = b.data[0][2]
+    bar_texts, ylabel = chart_labels(b.data)
     fig, ax = plt.subplots(figsize=(max(4, 2.2 * len(values)), 3.2), dpi=150)
     bars = ax.bar(labels, values, color="#4c78a8", width=0.5)
-    ax.bar_label(bars, labels=[f"{v:g}" for v in values], padding=3)
-    ax.set_ylabel(unit)
+    ax.bar_label(bars, labels=bar_texts, padding=3)
+    ax.set_ylabel(ylabel)
     ax.set_ylim(0, max(values) * 1.25)
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()

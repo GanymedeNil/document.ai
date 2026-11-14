@@ -217,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--split", choices=["标定", "测试"], help="只用该集合的查询（14.3：指标在测试集上报）")
     p.add_argument("--per-type", type=int, help="每类查询最多取几条（按编号哈希抽样，可复现）")
     p.add_argument("--json-out", help="把逐条结果与运行配置写成 JSON（复现检查用，AC-14-5）")
+    p.add_argument("--types", help="只问这几类查询（逗号分隔，如 图表）；文档照常全部回放")
     add_external_flag(p)
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
@@ -233,7 +234,8 @@ def main(argv: list[str] | None = None) -> int:
     embedder: Embedder = model.embedder() if model.emb is not None else HashingEmbedder()
     reranker = model if model.rr is not None else None
     from factset.subset import subset
-    fs = subset(load(args.xlsx), split=args.split, per_type=args.per_type)
+    fs = subset(load(args.xlsx), split=args.split, per_type=args.per_type,
+                types=set(args.types.split(",")) if args.types else None)
     with tempfile.TemporaryDirectory() as tmp, scratch_databases(args.admin_url) as new_db:
         import psycopg
         from psycopg.rows import dict_row
@@ -255,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
         from eaer.evalrun.repro import run_config
         cfg = run_config(args.xlsx, prov[0], engine=args.engine, model=model.gen.model, embedder=embedder.name,
                          reranker=model.rr.model if reranker else None, index="MemoryIndex", fmt=args.format,
-                         split=args.split, per_type=args.per_type)
+                         split=args.split, per_type=args.per_type,
+                         types=set(args.types.split(",")) if args.types else None)
         Path(args.json_out).write_text(json.dumps({"config": cfg, "results": [asdict(r) for r in results]},
                                                   ensure_ascii=False, indent=1), encoding="utf-8")
     return emit(text, prov, external=args.external)

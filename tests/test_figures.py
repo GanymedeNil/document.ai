@@ -97,11 +97,21 @@ def test_reader_requires_vision_and_formats_evidence():
     m = Vision(CHART)
     r = FigureReader(m).read(png(), "image/png", context="差旅费用分析报告 / 二、费用情况")
     assert "差旅费用分析报告 / 二、费用情况" in m.calls[0][0]
-    assert r.points == [("", "第一季度", "120"), ("", "第二季度", "128")]          # 没标数值的点不要
+    assert r.points == [("", "第一季度", "120", ""), ("", "第二季度", "128", "")]   # 没标数值的点不要
     texts = evidence_texts(r, 2)
     assert [t for _, t in texts] == ["图2《2026年各季度差旅费用》｜第一季度：120万元", "图2《2026年各季度差旅费用》｜第二季度：128万元"]
-    two = Reading("chart", "", "%", [("北京", "一线", "35%")])
+    two = Reading("chart", "", "%", [("北京", "一线", "35%", "")])
     assert evidence_texts(two, 1, "图1 占比")[0][1] == "图1《图1 占比》｜北京｜一线：35%"            # 单位不重复
+    # 一张图里单位不同：每个点自己的单位优先于坐标轴的单位；数值自带单位的不再加
+    mixed = Reading("chart", "2026年第三季度通讯费用", "万元",
+                    [("", "通讯总费用", "509", ""), ("", "预算执行率", "54", "%"), ("", "人均费用", "7,080元", ""),
+                     ("", "报销笔数", "2,770", "笔")])
+    assert [t for _, t in evidence_texts(mixed, 1)] == [
+        "图1《2026年第三季度通讯费用》｜通讯总费用：509万元", "图1《2026年第三季度通讯费用》｜预算执行率：54%",
+        "图1《2026年第三季度通讯费用》｜人均费用：7,080元", "图1《2026年第三季度通讯费用》｜报销笔数：2,770笔"]
+    from eaer.ingestion.figures import SCHEMA, SYSTEM, with_unit
+    assert "unit" in SCHEMA["properties"]["points"]["items"]["properties"] and "不要把坐标轴的单位硬套" in SYSTEM
+    assert with_unit("54", "%") == "54%" and with_unit("54%", "万元") == "54%" and with_unit("-1.5", "℃") == "-1.5℃"
     photo = Reading("diagram", "审批流程", "", [], "部门经理审批后报财务复核", "m")
     assert evidence_texts(photo, 3) == [({"point": "description"}, "图3《审批流程》：部门经理审批后报财务复核")]
     assert evidence_texts(Reading("photo", "", "", []), 1) == []

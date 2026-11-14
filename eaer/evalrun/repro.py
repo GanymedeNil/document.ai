@@ -32,14 +32,14 @@ ALPHA = 0.05
 
 
 def run_config(xlsx: str | Path, prov, *, engine: bool, model: str, embedder: str, reranker: str | None, index: str,
-               fmt: str, split: str | None, per_type: int | None) -> dict:
+               fmt: str, split: str | None, per_type: int | None, types: set[str] | None = None) -> dict:
     """一次评测的运行配置：复现检查要求两次完全相同。"""
     return {"engine": engine, "model": model,
             "temperature": os.environ.get("EAER_GEN_TEMPERATURE"), "thinking": os.environ.get("EAER_GEN_THINKING"),
             "embedder": embedder, "reranker": reranker, "index": index, "format": fmt,
             "dataset": {"name": prov.dataset, "modified": prov.modified, "detail": prov.detail,
                         "sha256": hashlib.sha256(Path(xlsx).read_bytes()).hexdigest()},
-            "split": split, "per_type": per_type}
+            "split": split, "per_type": per_type, **({"types": sorted(types)} if types else {})}
 
 
 def mcnemar_exact(b: int, c: int) -> float:
