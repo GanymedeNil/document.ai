@@ -52,6 +52,7 @@ DATASETS = {d.name: d for d in [
 FROZEN = {
     "036fcb2e1c7319860a78b48f6ffd0018c6938de059fedba637881d620e761231": ("自建合成集", "合成集 v1（docs/评测集/合成集-v1.xlsx）"),
     "dd53602d436179692f849fe0438628be75bead57796d4a9c67f0fb2b18fb1091": ("自建合成集", "合成集 v2（docs/评测集/合成集-v2.xlsx）"),
+    "b9831df449c79d23e75582ecadedb05ee98b4de2b5821882904b1a5c6258ef30": ("自建合成集", "事实表样例（docs/事实表样例.xlsx）"),
 }
 
 

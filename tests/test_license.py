@@ -147,4 +147,5 @@ def test_runner_output_is_stamped(conn, tmp_path, monkeypatch, capsys):
 def test_frozen_registry_is_current():
     """docs/评测集 下每个冻结的评测集都登记了（新冻结的评测集忘了登记，对外报告会被拦截）。"""
     sets = sorted(p for p in Path("docs/评测集").glob("合成集-v*.xlsx") if "抽检单" not in p.name)
-    assert sets and all(provenance_of(p).dataset == "自建合成集" for p in sets), lic.FROZEN
+    sets.append(Path("docs/事实表样例.xlsx"))
+    assert all(p.exists() for p in sets) and all(provenance_of(p).dataset == "自建合成集" for p in sets), lic.FROZEN
