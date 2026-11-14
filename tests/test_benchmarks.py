@@ -97,3 +97,40 @@ def test_vidore_picks_chart_and_table_questions_in_english():
     s = vidore.summary(rows)
     assert s["chart"]["correct"] == 0.5 and s["chart"]["cited_vision"] == 0.5 and s["table"]["abstained"] == 1.0
     assert s["all"]["n"] == 3 and abs(s["all"]["correct"] - 1 / 3) < 1e-9
+
+
+# ---------- LLM-AggreFact（原样评测验证器）----------
+
+def test_aggrefact_sampling_and_metrics():
+    from eaer.evalrun import aggrefact
+    rows = [{"dataset": d, "doc": "x", "claim": "y", "label": k % 2} for d in ("A", "B") for k in range(10)]
+    picked = aggrefact.sample(rows, 3)
+    assert len(picked) == 6 and {r["dataset"] for r in picked} == {"A", "B"}
+    assert aggrefact.sample(rows, 3) == picked                                     # 固定种子，可复现
+    res = [{"dataset": "A", "label": 1, "verdict": "supported"}, {"dataset": "A", "label": 1, "verdict": "unverified"},
+           {"dataset": "A", "label": 0, "verdict": "unsupported"}, {"dataset": "A", "label": 0, "verdict": "supported"},
+           {"dataset": "B", "label": 0, "verdict": "error: TimeoutError"}]
+    m = aggrefact.metrics(res)
+    assert m["A"]["balanced_accuracy"] == 0.5 and m["A"]["false_pass"] == 0.5 and m["A"]["false_reject"] == 0.5
+    assert m["A"]["unverified"] == 0.25 and m["all"]["errors"] == 1 and m["B"]["false_pass"] == 0.0
+
+
+def test_aggrefact_passes_doc_and_claim_unchanged():
+    """原样评测：文档整篇作为证据、结论原文作为结论交给语义检查，不改写不截断。"""
+    from eaer.adapters.model import Capabilities, Completion, Usage
+    from eaer.evalrun import aggrefact
+
+    class M:
+        prompts = []
+
+        def capabilities(self):
+            return Capabilities(True, 32000, False, 0)
+
+        def generate(self, messages, schema):
+            self.prompts.append(messages[-1].content)
+            return Completion("{}", {"verdict": "supported", "confidence": 0.9, "supporting_ids": ["ev_doc"]},
+                              Usage(1, 1), "m")
+    doc = "The quarterly report shows revenue of 4.2 billion. " * 50
+    out = aggrefact.run(M(), [{"dataset": "A", "doc": doc, "claim": "Revenue was 4.2 billion.", "label": 1}])
+    assert out == [{"dataset": "A", "label": 1, "verdict": "supported"}]
+    assert doc.strip() in M.prompts[0] and "Revenue was 4.2 billion." in M.prompts[0]

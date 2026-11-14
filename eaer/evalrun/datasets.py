@@ -2,8 +2,8 @@
 
     python -m eaer.evalrun.datasets fetch multihop-rag        # 12 MB，ODC-BY，可对外
     python -m eaer.evalrun.datasets fetch vidore-v3-hr        # 约 53 MB（PDF 原件与问题；不下载 440 MB 的页面图片），CC BY 4.0
-    python -m eaer.evalrun.datasets fetch llm-aggrefact       # 53 MB，CC BY-ND 4.0（只能原样评测）；需要先在 Hugging Face
-                                                             # 上接受数据集条款，并设置 HF_TOKEN
+    python -m eaer.evalrun.datasets fetch llm-aggrefact       # 测试集，CC BY-ND 4.0（只能原样评测）；需要先在 Hugging Face
+                                                             # 上接受数据集条款，并设置 HF_TOKEN（只放在 .env，不打印）
 
 目录：EAER_DATASETS_DIR（默认 ~/.cache/eaer/datasets）。下载的文件按 license.DATASET_FILES 登记的 SHA-256 判断来源；
 新数据集或新提交号要先在那里登记，否则评测报告记为未登记来源、不能对外。
@@ -26,18 +26,20 @@ SPECS = {
                      "files": ["corpus.json", "MultiHopRAG.json"]},
     "vidore-v3-hr": {"repo": "vidore/vidore_v3_hr", "revision": "0cdf0979f2c5a0fd3e335e6373b9da48a9fe3bc3",
                      "pattern": "pdfs/", "rows": ["queries", "documents_metadata"]},
+    # 只能原样评测（CC BY-ND 4.0）；没有 pyarrow，经 dataset viewer 接口取 JSON（需要 HF_TOKEN）
     "llm-aggrefact": {"repo": "lytang/LLM-AggreFact", "revision": "981dfd0bd8e58e7238a9ab92b2e6ea44bce918e4",
-                      "files": ["data/dev-00000-of-00001.parquet", "data/test-00000-of-00001.parquet"], "gated": True},
+                      "files": [], "rows": ["default:test"], "gated": True},
 }
 
 
-def _rows(repo: str, config: str) -> list[dict]:
-    """dataset viewer 接口的全部行（test 划分），去掉图片列。"""
+def _rows(repo: str, config: str, split: str = "test") -> list[dict]:
+    """dataset viewer 接口的全部行，去掉图片列。设置了 HF_TOKEN 时带上（需要授权的数据集）。"""
     out, offset = [], 0
+    headers = {"Authorization": f"Bearer {os.environ['HF_TOKEN']}"} if os.environ.get("HF_TOKEN") else {}
     while True:
         url = ("https://datasets-server.huggingface.co/rows?" + urllib.parse.urlencode(
-            {"dataset": repo, "config": config, "split": "test", "offset": offset, "length": 100}))
-        with urllib.request.urlopen(url, timeout=60) as r:
+            {"dataset": repo, "config": config, "split": split, "offset": offset, "length": 100}))
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as r:
             page = json.load(r)
         rows = [x["row"] for x in page.get("rows", [])]
         out += [{k: v for k, v in row.items() if k != "image"} for row in rows]
@@ -55,13 +57,16 @@ def fetch(name: str, root: Path = ROOT, log=print) -> list[Path]:
     if spec.get("gated") and not os.environ.get("HF_TOKEN"):
         raise SystemExit(f"{name} 在 Hugging Face 上需要先接受数据集条款：登录后在 https://huggingface.co/datasets/{spec['repo']} "
                          "页面同意，再把访问令牌放进环境变量 HF_TOKEN")
-    files = spec.get("files") or [f for f in list_repo_files(spec["repo"], repo_type="dataset", revision=spec["revision"])
-                                  if f.startswith(spec["pattern"]) and f.endswith(".pdf")]
+    files = spec["files"] if "files" in spec else [
+        f for f in list_repo_files(spec["repo"], repo_type="dataset", revision=spec["revision"])
+        if f.startswith(spec["pattern"]) and f.endswith(".pdf")]
     saved = [Path(hf_hub_download(spec["repo"], f, repo_type="dataset", revision=spec["revision"], local_dir=target))
              for f in files]
-    for config in spec.get("rows", []):
-        rows = sorted(_rows(spec["repo"], config), key=lambda r: json.dumps(r, sort_keys=True, ensure_ascii=False))
-        p = target / f"{config}.json"
+    for item in spec.get("rows", []):
+        config, _, split = item.partition(":")
+        rows = sorted(_rows(spec["repo"], config, split or "test"),
+                      key=lambda r: json.dumps(r, sort_keys=True, ensure_ascii=False))
+        p = target / f"{split if split else config}.json"
         p.write_text(json.dumps(rows, ensure_ascii=False, sort_keys=True, indent=1), encoding="utf-8")
         saved.append(p)
     for p in saved:
