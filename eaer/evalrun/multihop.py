@@ -9,7 +9,11 @@
 - 检索召回（Hybrid Recall@10，AC-5-4 的英文部分）：对 2,255 个有答案的问题，依据文章出现在前 10 条结果里的比例
   （按依据计）与全部依据都命中的问题比例（按问题计）；混合检索不重排、重排后各算一遍。
 - 拒答（AC-8-8）：经完整编排器（DeepSeek）回答抽样的无答案问题与有答案问题：无答案的应拒答，有答案的不应拒答，
-  答对按标准答案（多为人名、Yes/No 等短答案）是否出现在回答里算；报告拒答的准确率与召回率。
+  报告拒答的准确率与召回率。答对有两种算法：标准答案原文出现在回答里（只适用于人名、机构名这类短答案）；
+  生成模型按问题与标准答案评判（与 ViDoRe 相同的评判提示）——比较、时间两类的标准答案多是 Yes/No，系统给的是带引用的
+  陈述而不是“是/否”，只能这样判。评判模型与回答模型同一家，可能偏宽。
+  `rejudge 答案.json` 可对已有的回答重新评判，不必重新入库。
+- 重排：重排调用失败（超时等）的问题记为失败并跳过，不中断整个阶段；`--rerank-sample N` 只对抽样的 N 个问题重排。
 数据来源按下载文件的 SHA-256 判断（license.DATASET_FILES）；报告经 license.emit 加数据集标记与署名。
 """
 from __future__ import annotations
@@ -79,16 +83,25 @@ class RecallRow:
     found: int
 
 
-def recall(conn, retriever, queries: list[dict], docs: dict[str, str], tenant: str = "mh") -> list[RecallRow]:
+def recall(conn, retriever, queries: list[dict], docs: dict[str, str], tenant: str = "mh", *,
+           sample: int = 0, failed: list | None = None) -> list[RecallRow]:
+    """sample > 0 时只取固定种子抽样的这么多个问题；单个问题检索出错（重排超时等）记入 failed 并跳过。"""
     from eaer.retrieval.service import Scope
 
     scope = Scope(tenant, frozenset({ROLE}))
+    items = [(i, q) for i, q in enumerate(queries) if q["question_type"] != "null_query"]
+    if sample:
+        items = sorted(random.Random(11).sample(items, min(sample, len(items))), key=lambda x: x[0])
     rows = []
-    for i, q in enumerate(queries):
-        if q["question_type"] == "null_query":
-            continue
+    for i, q in items:
         want = {docs[e["title"]] for e in q["evidence_list"]}
-        got = {h.document_id for h in retriever.search(scope, q["query"], today=TODAY)}
+        try:
+            got = {h.document_id for h in retriever.search(scope, q["query"], today=TODAY)}
+        except Exception as e:  # noqa: BLE001 — 记下失败继续
+            if failed is None:
+                raise
+            failed.append((i, f"{type(e).__name__}: {e}"[:200]))
+            continue
         rows.append(RecallRow(i, q["question_type"], len(want), len(want & got)))
     return rows
 
@@ -130,6 +143,24 @@ def answer_sample(conn, retriever, model, queries: list[dict], n: int, *, seed: 
     return out
 
 
+def rejudge(model, rows: list[dict], log=lambda s: None) -> list[dict]:
+    """有答案的问题交给生成模型按标准答案评判（judged 为 correct / partial / incorrect；拒答与出错直接算 incorrect）。"""
+    from eaer.evalrun.vidore import judge
+    out = []
+    for k, r in enumerate(rows):
+        r = dict(r)
+        if r["type"] != "null_query":
+            if r["abstained"] is False:
+                v = judge(model, r["query"], str(r["gold"]), r["answer"])
+                r["judged"], r["judge_reason"] = v["verdict"], v.get("reason", "")
+            else:
+                r["judged"], r["judge_reason"] = "incorrect", "拒答或出错"
+        out.append(r)
+        if (k + 1) % 20 == 0:
+            log(f"已评判 {k + 1} / {len(rows)}")
+    return out
+
+
 def answer_summary(rows: list[dict]) -> dict:
     null = [r for r in rows if r["type"] == "null_query"]
     ans = [r for r in rows if r["type"] != "null_query"]
@@ -139,25 +170,72 @@ def answer_summary(rows: list[dict]) -> dict:
             "refusal_precision": round(sum(r["type"] == "null_query" for r in refused) / max(1, len(refused)), 4),
             "false_refusal": round(sum(bool(r["abstained"]) for r in ans) / max(1, len(ans)), 4),
             "answer_accuracy": round(sum(r["correct"] for r in ans) / max(1, len(ans)), 4),
+            "judged_accuracy": round(sum(r.get("judged") == "correct" for r in ans) / max(1, len(ans)), 4)
+            if any("judged" in r for r in ans) else None,
+            "by_type": {t: {"n": len(rs), "refused": sum(bool(r["abstained"]) for r in rs),
+                            "substring": sum(r["correct"] for r in rs),
+                            "judged": sum(r.get("judged") == "correct" for r in rs)}
+                        for t in sorted({r["type"] for r in ans}) for rs in [[r for r in ans if r["type"] == t]]},
             "errors": sum(r["abstained"] is None for r in rows)}
 
 
-def report(rec_hybrid: dict, rec_rerank: dict | None, ans: dict | None, *, embedder: str, model: str | None) -> str:
-    lines = [f"MultiHop-RAG 评测：609 篇英文新闻；Embedding {embedder}；分词 standard；真实 OpenSearch", "",
-             "检索召回（前 10 条，按依据计 / 全部依据都命中的问题比例）：", "",
-             "| 问题类型 | 问题数 | 混合检索 | 混合检索 + 重排 |", "| --- | --- | --- | --- |"]
-    for k, v in rec_hybrid.items():
+def report(rec_hybrid: dict, rec_rerank: dict | None, ans: dict | None, *, embedder: str, model: str | None,
+           rerank_note: str = "") -> str:
+    lines = [f"MultiHop-RAG 评测：609 篇英文新闻；Embedding {embedder}；分词 standard；真实 OpenSearch"]
+    if rec_hybrid:
+        lines += ["", "检索召回（前 10 条，按依据计 / 全部依据都命中的问题比例）：", "",
+                  "| 问题类型 | 问题数 | 混合检索 | 混合检索 + 重排 |", "| --- | --- | --- | --- |"]
+    for k, v in (rec_hybrid or {}).items():
         r = rec_rerank.get(k) if rec_rerank else None
         fmt = lambda x: f"{x['evidence_recall']:.1%} / {x['all_found']:.1%}"  # noqa: E731
         lines.append(f"| {'全部' if k == 'all' else k} | {v['queries']} | {fmt(v)} | {fmt(r) if r else '—'} |")
+    if rerank_note:
+        lines += ["", rerank_note]
     if ans:
         lines += ["", f"拒答与回答（经完整编排器，生成 {model}；抽样 无答案 {ans['null']} 个、有答案 {ans['answerable']} 个）：",
                   f"- 拒答召回（无答案的拒答了）{ans['refusal_recall']:.1%}，拒答准确率（拒答的确实无答案）{ans['refusal_precision']:.1%}；",
-                  f"- 有答案却拒答 {ans['false_refusal']:.1%}；有答案的答对（标准答案出现在回答里）{ans['answer_accuracy']:.1%}；出错 {ans['errors']} 次。"]
+                  f"- 有答案却拒答 {ans['false_refusal']:.1%}；有答案的答对：标准答案原文出现在回答里 {ans['answer_accuracy']:.1%}"
+                  + (f"，生成模型按标准答案评判 {ans['judged_accuracy']:.1%}" if ans.get("judged_accuracy") is not None else "")
+                  + f"；出错 {ans['errors']} 次。", "",
+                  "| 问题类型 | 问题数 | 拒答 | 答对（原文出现） | 答对（评判） |", "| --- | --- | --- | --- | --- |"]
+        lines += [f"| {t} | {v['n']} | {v['refused']} | {v['substring']} | {v['judged']} |" for t, v in ans["by_type"].items()]
+        lines += ["", "比较、时间两类的标准答案多是 Yes/No，原文出现的算法对它们不适用，以评判为准；评判模型与回答模型同一家，可能偏宽。"]
     return "\n".join(lines)
 
 
+def rejudge_main(argv: list[str]) -> int:
+    """对已有的回答文件（运行时 --out 旁边的 .answers.json）重新评判，结果写回该文件，报告只含拒答与回答部分。"""
+    from eaer.adapters.online import OnlineModelClient
+    from eaer.evalrun.license import add_external_flag, emit, refuse_early
+
+    p = argparse.ArgumentParser(prog="eaer.evalrun.multihop rejudge", description="MultiHop-RAG：对已有的回答重新评判")
+    p.add_argument("answers")
+    p.add_argument("--data", default=str(DATASET_DIR))
+    p.add_argument("--out")
+    add_external_flag(p)
+    args = p.parse_args(argv)
+    if os.environ.get("EAER_ENV") != "eval":
+        print("只在评测环境运行（EAER_ENV=eval）", file=sys.stderr)
+        return 2
+    _, _, prov = load(Path(args.data))
+    if (code := refuse_early(prov, external=args.external)) is not None:
+        return code
+    model = OnlineModelClient.from_env()
+    if model.gen is None:
+        print("需要生成服务（EAER_GEN_*）", file=sys.stderr)
+        return 2
+    path = Path(args.answers)
+    rows = rejudge(model, json.loads(path.read_text(encoding="utf-8")),
+                   log=lambda s: print(s, file=sys.stderr, flush=True))
+    path.write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+    text = report({}, None, answer_summary(rows), embedder="（沿用原运行）", model=model.gen.model)
+    return emit(text, prov, external=args.external, out=args.out)
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "rejudge":
+        return rejudge_main(argv[1:])
     from eaer.adapters.online import OnlineModelClient
     from eaer.evalrun.analyzers import scratch_databases
     from eaer.evalrun.license import add_external_flag, emit, refuse_early
@@ -172,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--data", default=str(DATASET_DIR))
     p.add_argument("--answer-sample", type=int, default=0, help="无答案、有答案各抽这么多个经编排器回答（调用生成服务）")
     p.add_argument("--no-rerank", action="store_true")
+    p.add_argument("--rerank-sample", type=int, default=0, help="只对抽样的这么多个问题算重排后的召回（0 为全部）")
     p.add_argument("--out")
     add_external_flag(p)
     args = p.parse_args(argv)
@@ -198,25 +277,35 @@ def main(argv: list[str] | None = None) -> int:
         log("检索召回：混合检索")
         hybrid = recall_summary(recall(conn, Retriever(conn, index, embedder), queries, docs))
         log("混合检索：" + json.dumps(hybrid["all"], ensure_ascii=False))
-        rerank = None
+        rerank, rerank_note = None, ""
         if not args.no_rerank and model.rr is not None:
             log("检索召回：混合检索 + 重排")
-            try:
-                rerank = recall_summary(recall(conn, Retriever(conn, index, embedder, model), queries, docs))
-            except Exception as e:  # noqa: BLE001 — 后一阶段失败不丢前面的结果
-                log(f"重排阶段失败，只报告混合检索：{type(e).__name__}: {e}")
+            failed: list = []
+            rows_rr = recall(conn, Retriever(conn, index, embedder, model), queries, docs,
+                             sample=args.rerank_sample, failed=failed)
+            rerank = recall_summary(rows_rr)
+            if args.rerank_sample:
+                hybrid_same = recall_summary(recall(conn, Retriever(conn, index, embedder), queries, docs,
+                                                    sample=args.rerank_sample))
+                rerank_note = (f"重排只对抽样的 {args.rerank_sample} 个问题计算；同一批问题不重排时全部 "
+                               f"{hybrid_same['all']['evidence_recall']:.1%} / {hybrid_same['all']['all_found']:.1%}。")
+            if failed:
+                rerank_note += f"重排调用失败、未计入的问题 {len(failed)} 个（如 {failed[0][1]}）。"
+                log(rerank_note)
         ans = None
         if args.answer_sample:
             log(f"拒答与回答：各抽 {args.answer_sample} 个")
             rows = answer_sample(conn, Retriever(conn, index, embedder, model if model.rr else None), model, queries,
                                  args.answer_sample)
+            rows = rejudge(model, rows, log=log)
             ans = answer_summary(rows)
             Path(tmp, "answers.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
             if args.out:
                 Path(args.out).with_suffix(".answers.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1),
                                                                       encoding="utf-8")
         conn.close()
-    text = report(hybrid, rerank, ans, embedder=embedder.name, model=model.gen.model if model.gen else None)
+    text = report(hybrid, rerank, ans, embedder=embedder.name, model=model.gen.model if model.gen else None,
+                  rerank_note=rerank_note)
     return emit(text, prov, external=args.external, out=args.out)
 
 

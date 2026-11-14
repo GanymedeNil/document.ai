@@ -82,6 +82,47 @@ def test_answer_and_refusal_arithmetic():
     s = multihop.answer_summary(rows)
     assert s["refusal_recall"] == 0.5 and s["refusal_precision"] == 0.5
     assert s["false_refusal"] == round(1 / 3, 4) and s["answer_accuracy"] == round(1 / 3, 4) and s["errors"] == 1
+    assert s["judged_accuracy"] is None and s["by_type"]["comparison_query"] == {"n": 1, "refused": 0, "substring": 1, "judged": 0}
+
+
+def test_multihop_judge_scores_yes_no_answers_and_skips_refusals():
+    """Yes/No 的标准答案原文不会出现在带引用的陈述里，交给评判；拒答与出错不调用评判，直接算错。"""
+    from eaer.adapters.model import Completion, Usage
+
+    class Judge:
+        calls = 0
+
+        def generate(self, messages, schema):
+            Judge.calls += 1
+            return Completion("{}", {"verdict": "correct", "reason": "两篇文章的说法一致"}, Usage(1, 1), "m")
+    rows = [{"type": "comparison_query", "query": "Do both say X?", "gold": "Yes", "answer": "A 说 X。B 也说 X。",
+             "abstained": False, "correct": False},
+            {"type": "temporal_query", "query": "Did it change?", "gold": "No", "answer": "没有找到", "abstained": True,
+             "correct": False},
+            {"type": "null_query", "query": "?", "gold": "Insufficient information.", "answer": "没有找到", "abstained": True,
+             "correct": True}]
+    out = multihop.rejudge(Judge(), rows)
+    assert Judge.calls == 1 and [r.get("judged") for r in out] == ["correct", "incorrect", None]
+    s = multihop.answer_summary(out)
+    assert s["judged_accuracy"] == 0.5 and s["answer_accuracy"] == 0.0
+    assert "评判 50.0%" in multihop.report({}, None, s, embedder="e", model="m")
+
+
+def test_rerank_failures_are_counted_not_fatal(ix):
+    docs = multihop.ingest(ix.conn, ix.store, ix.index, ix.emb, CORPUS)
+
+    class Flaky:
+        n = 0
+
+        def search(self, scope, q, today):
+            Flaky.n += 1
+            if Flaky.n == 1:
+                raise TimeoutError("重排超时")
+            return ix.retriever.search(scope, q, today=today)
+    failed: list = []
+    rows = multihop.recall(ix.conn, Flaky(), QUERIES, docs, failed=failed)
+    assert len(rows) == 1 and len(failed) == 1 and "TimeoutError" in failed[0][1]
+    assert len(multihop.recall(ix.conn, ix.retriever, QUERIES, docs, sample=1)) == 1
 
 
 def test_vidore_picks_chart_and_table_questions_in_english():
