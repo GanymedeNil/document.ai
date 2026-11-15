@@ -423,6 +423,31 @@ def test_value_match_accepts_metadata_from_the_evidence_label(claim, ev, labels,
     assert value_match(claim, ev, labels=labels).outcome == want
 
 
+# 不带年份的日期（2026-11-15，MultiHop-RAG 的诊断中发现）：“3月15日起施行”原先被拆成数值 3 与 15，证据写的是
+# “2024年3月15日”时判不支持。中文回答常省略上下文已知的年份，英文的 November 6 同理
+@pytest.mark.parametrize("claim, ev, labels, want", [
+    ("3月15日起施行", ["本办法自2024年3月15日起施行。"], [], "pass"),
+    ("自 11 月 6 号起停止执教", ["2023年11月6日，联盟宣布禁赛。"], [], "pass"),
+    ("自11月起施行", ["本办法自2023年11月1日起施行。"], [], "pass"),                                  # 只写月份
+    ("On November 6 the league announced a suspension", ["On November 6, 2023, the league announced it."], [], "pass"),
+    ("The report of 6th November said he was suspended", ["He was suspended."],
+     ["《Harbaugh 禁赛》第 1 版；文档日期 2023-11-06；出处 Sporting News"], "pass"),                 # 月日在标注里
+    ("3月16日起施行", ["本办法自2024年3月15日起施行。"], [], "unsupported"),                          # 日不对
+    ("11月11日的报道称他不会执教", ["He will not coach vs. Penn State."],
+     ["《Harbaugh 禁赛》第 1 版；文档日期 2023-11-06"], "unsupported"),                               # 标注里也没有
+    ("2025年3月15日起施行", ["本办法自3月15日起施行。"], [], "unsupported"),                          # 写了年份就要对上年份
+    ("3个月内办结", ["本办法自2024年3月1日起施行。"], [], "unsupported"),                             # 时长不是月份
+    ("On 7 November the ruling came", ["On November 6, 2023, the league announced it."], [], "unsupported"),
+])
+def test_value_match_dates_without_a_year(claim, ev, labels, want):
+    assert value_match(claim, ev, labels=labels).outcome == want
+
+
+def test_yearless_date_is_reported_as_month_and_day():
+    r = value_match("11月11日的报道称他不会执教", ["2023年11月6日，联盟宣布禁赛。"])
+    assert r.outcome == "unsupported" and r.reason == "证据中没有：11月11日"
+
+
 def test_label_numbers_are_not_used_to_derive_sums_or_differences():
     """差与和只由原文的数值推算：标题里的数（“10 项补贴”）与原文的 650 相加得 660，不算有依据。"""
     r = value_match("合计 660 元", ["住宿 650 元"], labels=["《关于 10 项补贴的通知》第 1 版；生效 2026-01-01"])

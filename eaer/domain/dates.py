@@ -19,6 +19,9 @@ _ORD = r"(?:st|nd|rd|th)?"
 EN_DMY = re.compile(r"(?<!\d)(\d{1,2})" + _ORD + r"\s+" + MON + r"\s+(\d{4})(?!\d)")          # 30 October 2023
 EN_MDY = re.compile(r"\b" + MON + r"\s+(\d{1,2})" + _ORD + r",?\s+(\d{4})(?!\d)")             # October 30, 2023
 EN_MY = re.compile(r"\b" + MON + r"\s+(\d{4})(?!\d)")                                        # October 2023
+# 不带年份的月日（年份由上下文或文档日期给出）：October 30、30 October。先认完整日期，剩下的才按这两种认
+EN_MD = re.compile(r"\b" + MON + r"\s+(\d{1,2})" + _ORD + r"(?![\d.,]\d)")                     # October 30
+EN_DM = re.compile(r"(?<![\d.,])(\d{1,2})" + _ORD + r"\s+" + MON)                              # 30 October
 # 完整的英文日期（年月日），不带捕获组
 EN_DATE = (r"(?:\d{1,2}" + _ORD + r"\s+" + MON_NC + r"\s+\d{4}|" + MON_NC + r"\s+\d{1,2}" + _ORD + r",?\s+\d{4})")
 

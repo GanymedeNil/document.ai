@@ -8,7 +8,9 @@
    定位的形状对该模态成立（页码、表格单元格、图表区域）；原件仍在文件存储中；
 3. value_match：结论中的数值、日期规范化后（全角半角、万与千、千分位、日期写法）都出现在所引证据中；
    英文证据另认：不写“年”的年份、英文日期（1 January 2024）、thousand / million / billion、per cent、
-   空格千分位（3 456），以及写明了百分比单位的证据里不带 % 的数值（表头“(%)”）。证据中没有、但等于所引证据中
+   空格千分位（3 456），以及写明了百分比单位的证据里不带 % 的数值（表头“(%)”）。不带年份的日期（“3月15日”
+   “11月起”“November 6”）按月日比较，证据或标注中同月同日的任一完整日期都算找到；带年份的日期仍须年份也对上。
+   证据中没有、但等于所引证据中
    两个数值之差或之和的（“相差 10 个百分点”），只核对得了算术，判 unverified 并写明算式。所引证据的标注
    （标题、版本号、记录类的文档日期、其他文档在目标时间的生效与作废日期、出处）也算证据：这些是系统记录的元数据，
    生成时与原文一起给模型看，结论复述它们（“第 1 版（文档日期 2026-10-13）显示……”）不是编造；
@@ -28,7 +30,7 @@ from typing import Any, Literal
 
 import psycopg
 
-from eaer.domain.dates import EN_DMY, EN_MDY, EN_MY, MONTHS
+from eaer.domain.dates import EN_DM, EN_DMY, EN_MD, EN_MDY, EN_MY, MONTHS
 from eaer.domain.evidence import content_hash, evidence_id
 from eaer.domain.identity import Scope
 from eaer.lifecycle.asof import validity_at
@@ -57,6 +59,10 @@ _ORDINAL = re.compile(r"第\s*[0-9一二三四五六七八九十百零〇]+\s*[�
 _YMD = re.compile(r"(?<!\d)(\d{4})\s*(?:年|-|/|\.)\s*(\d{1,2})\s*(?:月|-|/|\.)\s*(\d{1,2})\s*[日号]?")
 _YM = re.compile(r"(?<!\d)(\d{4})\s*(?:年\s*(\d{1,2})\s*月|-(\d{1,2})(?![\d-]))")
 _Y = re.compile(r"(?<!\d)(\d{4})\s*年")
+# 不带年份的月日、月份（“3月15日”“11月6号”“自11月起”）：先认带年份的写法，剩下的才按这两种认。
+# “3个月”是时长，“个”隔开了数字与“月”，不会被认成月份
+_MD = re.compile(r"(?<![\d.])(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
+_M = re.compile(r"(?<![\d.])(\d{1,2})\s*月(?!\s*\d)")
 # 英文日期：月份名首字母大写（“may”是情态动词），如 1 January 2024、January 1, 2024、Jan. 2024（eaer/domain/dates.py）
 _MONTHS, _EN_DMY, _EN_MDY, _EN_MY = MONTHS, EN_DMY, EN_MDY, EN_MY
 _NUM = re.compile(r"(?<![\dA-Za-z_.])(\d+(?:\.\d+)?)\s*(亿|万|千|thousand\b|million\b|billion\b|bn\b)?\s*"
@@ -74,7 +80,7 @@ _YEARS = range(1900, 2101)
 @dataclass(frozen=True)
 class Facts:
     quantities: frozenset[tuple[Decimal, str]]       # (数值, "num" 或 "pct")
-    dates: frozenset[tuple[int, int | None, int | None]]
+    dates: frozenset[tuple[int | None, int | None, int | None]]   # (年, 月, 日)；不带年份的日期年为 None
 
 
 def _norm_text(text: str) -> str:
@@ -85,7 +91,7 @@ def _norm_text(text: str) -> str:
 
 def extract(text: str) -> Facts:
     s = _norm_text(text)
-    dates: set[tuple[int, int | None, int | None]] = set()
+    dates: set[tuple[int | None, int | None, int | None]] = set()
 
     def take(pattern, build):
         nonlocal s
@@ -107,7 +113,11 @@ def extract(text: str) -> Facts:
         return (int(m.group(1)), mo, None) if 1 <= mo <= 12 else None
 
     def en(y, mo, d=None):
-        return (int(y), _MONTHS[mo], int(d) if d else None) if d is None or 1 <= int(d) <= 31 else None
+        return (int(y) if y else None, _MONTHS[mo], int(d) if d else None) if d is None or 1 <= int(d) <= 31 else None
+
+    def md(m):
+        mo, d = int(m.group(1)), int(m.group(2))
+        return (None, mo, d) if 1 <= mo <= 12 and 1 <= d <= 31 else None
 
     take(_YMD, ymd)
     take(_EN_DMY, lambda m: en(m.group(3), m.group(2), m.group(1)))
@@ -115,6 +125,10 @@ def extract(text: str) -> Facts:
     take(_EN_MY, lambda m: en(m.group(2), m.group(1)))
     take(_YM, ym)
     take(_Y, lambda m: (int(m.group(1)), None, None))
+    take(_MD, md)
+    take(EN_MD, lambda m: en(None, m.group(1), m.group(2)))
+    take(EN_DM, lambda m: en(None, m.group(2), m.group(1)))
+    take(_M, lambda m: (None, int(m.group(1)), None) if 1 <= int(m.group(1)) <= 12 else None)
     qs: set[tuple[Decimal, str]] = set()
     for m in _NUM.finditer(s):
         try:
@@ -145,9 +159,17 @@ def _fmt(v: Decimal) -> str:
     return s.rstrip("0").rstrip(".") if "." in s else s
 
 
-def _date_found(d: tuple[int, int | None, int | None], pool) -> bool:
+def _date_found(d: tuple[int | None, int | None, int | None], pool) -> bool:
+    """结论里的日期在 pool 中能找到：写了的部分都要对上；结论不带年份时只比月日（证据不带年份时，结论的年份对不上）。"""
     y, m, day = d
-    return any(e[0] == y and (m is None or e[1] == m) and (day is None or e[2] == day) for e in pool)
+    return any((y is None or e[0] == y) and (m is None or e[1] == m) and (day is None or e[2] == day) for e in pool)
+
+
+def _date_str(d: tuple[int | None, int | None, int | None]) -> str:
+    y, m, day = d
+    if y is None:
+        return f"{m}月{day}日" if day else f"{m}月"
+    return "-".join(str(x) for x in d if x is not None)
 
 
 def _pool(texts) -> tuple[set, set]:
@@ -162,7 +184,7 @@ def _pool(texts) -> tuple[set, set]:
         have_q |= qs
         have_d |= f.dates
     have_d |= {(y, None, None) for v, k in have_q if k == "num" and (y := _year(v)) is not None}
-    have_q |= {(Decimal(d[0]), "num") for d in have_d}
+    have_q |= {(Decimal(d[0]), "num") for d in have_d if d[0] is not None}
     return have_q, have_d
 
 
@@ -179,7 +201,7 @@ def value_match(claim: str, evidence_texts: list[str], target_dates: tuple[date,
     targets = {(t.year, t.month, t.day) for t in target_dates}
     lacking = [(v, k) for v, k in sorted(want.quantities) if (v, k) not in have_q | lab_q]
     missing = [f"{_fmt(v)}{'%' if k == 'pct' else ''}" for v, k in lacking]
-    dates = ["-".join(str(x) for x in d if x is not None) for d in sorted(want.dates, key=str)
+    dates = [_date_str(d) for d in sorted(want.dates, key=str)
              if not _date_found(d, have_d | lab_d) and not _date_found(d, targets)]
     if not missing and not dates:
         return PASS
