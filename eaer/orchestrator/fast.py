@@ -35,6 +35,7 @@ SCHEMA = {
     "properties": {
         "abstain": {"type": "boolean"},
         "missing": {"type": "string"},
+        "partial": {"type": "boolean"},
         "claims": {"type": "array", "items": {
             "type": "object", "required": ["text", "evidence_ids", "core"],
             "properties": {"text": {"type": "string"}, "evidence_ids": {"type": "array", "items": {"type": "string"}},
@@ -54,7 +55,8 @@ SYSTEM = """你是企业制度问答助手，只能依据下面给出的证据�
    （如“《差旅报销管理办法》第 3 版规定……”“《关于……的补充通知》规定……”），各自只引用支持它的那条证据（一条结论里出现的
    每个数值都必须能在它引用的证据中找到，不要在一条结论里同时写两种说法），不要替用户选择其中一种。
 6. 证据不足以回答时，abstain=true，claims 为空，并在 missing 中说明缺少哪类信息；不要猜测，不要提及证据之外的文件，
-   missing 里不要复述证据原文或其中的取值。
+   missing 里不要复述证据原文或其中的取值。证据覆盖了问题的一部分、只缺另一部分时（问题有几个要点或比较几方，
+   证据只覆盖其中一些，如两篇报道只找到一篇），另设 partial=true；证据与问题无关时不设。
 7. """ + DATA_RULE
 SYSTEM_PLAIN = """你是企业制度问答助手，只能依据下面给出的证据回答，不得使用证据以外的知识。
 用中文回答，每句话写一条结论，句末用方括号标注所依据的证据 id，例如“……为 650 元/晚。[ev_0123456789abcdef]”。
@@ -94,6 +96,7 @@ class Draft:
     conflicts: list[list[str]]
     model: str
     usage: Usage
+    partial: bool = False              # 拒答时证据覆盖了问题的一部分（转入 Deep 的信号“部分要点没有证据覆盖”）
 
 
 @dataclass
@@ -166,7 +169,8 @@ class Steps:
             out = self.model.generate([Message("system", SYSTEM), Message("user", user)], SCHEMA)
             p = out.parsed or {}
             return Draft(p.get("claims", []) if not p.get("abstain") else [], bool(p.get("abstain")), p.get("missing"),
-                         [list(c) for c in p.get("conflicts", []) if len(c) > 1], out.model, out.usage)
+                         [list(c) for c in p.get("conflicts", []) if len(c) > 1], out.model, out.usage,
+                         partial=bool(p.get("abstain") and p.get("partial")))
         out = self.model.generate([Message("system", SYSTEM_PLAIN), Message("user", user)], None)
         return self._plain(out.text, out.model, out.usage)
 

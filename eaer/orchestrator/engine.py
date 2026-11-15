@@ -4,7 +4,8 @@
 2. Router 决定入口模式；mode_hint 只升不降（8.1、AC-8-4）；
 3. 入口为 Deep：按计划模板检索与生成（deep.py）；入口为 Fast 或 Verified：首轮检索与生成，Verified 复用这些证据；
 4. 检索后再判断（8.1、8.2）：
-   - Fast 转入 Deep 的信号：重排后最高分低于阈值；引用检查失败；问题中有部分要点没有证据覆盖。
+   - Fast 转入 Deep 的信号：重排后最高分低于阈值；引用检查失败；问题中有部分要点没有证据覆盖（答了一部分，
+     或整题拒答而模型说明证据覆盖了其中一部分）。
      转入后按多跳模板，Fast 的检索结果是第一跳，Fast 已用的轮数计入 Deep 的预算；
    - Fast 或 Deep 转入 Verified 的信号：命中强制验证清单；证据之间存在冲突；命中已被取代或已过期的版本；
      结论依赖图表数值；引用的证据含疑似给模型的指令文字（10.3，由语义检查判断它是否真是事实陈述）；
@@ -423,7 +424,9 @@ class Engine:
             out.append("重排后最高分低于阈值")
         if any(c.status == "unsupported" for c in claims):
             out.append("引用检查失败")
-        if draft is not None and not draft.abstain and draft.missing:
+        # 答了一部分、另有要点没覆盖；或整题拒答但证据覆盖了一部分（比较两篇报道只找到一篇）。整题拒答且证据与问题
+        # 无关的不转入，免得无答案的问题都多走一趟 Deep
+        if draft is not None and draft.missing and (not draft.abstain or draft.partial):
             out.append("问题中有部分要点没有证据覆盖")
         return out
 

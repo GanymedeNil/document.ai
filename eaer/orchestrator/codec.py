@@ -46,7 +46,8 @@ def draft_out(d: Draft | None) -> dict | None:
 def draft_in(d: dict | None) -> Draft | None:
     if d is None:
         return None
-    return Draft(d["claims"], d["abstain"], d["missing"], d["conflicts"], d["model"], Usage(**d["usage"]))
+    return Draft(d["claims"], d["abstain"], d["missing"], d["conflicts"], d["model"], Usage(**d["usage"]),
+                 d.get("partial", False))          # 2026-11-15 前写入的检查点没有这一项
 
 
 def claims_out(claims: list[ClaimOut]) -> list[dict]:

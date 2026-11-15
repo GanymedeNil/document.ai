@@ -6,6 +6,8 @@
 - 因果模板：检索现象 → 检索变更说明与现象所在文档的上一版本 → 关联生成；
 - AC-8-2（硬性，Deep 部分）：缺口一直补不上时，检索轮数不超过 Deep 的上限（含转入前 Fast 已用的），以拒答结束；
 - AC-8-3（Deep 部分）：8.2 中 Fast → Deep 的三个信号各转入一次，mode_path 为 fast → deep（→ verified）；
+- 英文问题的比较、因果用语同样进 Deep、选对模板；Fast 整题拒答而证据覆盖了问题的一部分（partial）时按“部分要点
+  没有证据覆盖”转入，证据与问题无关的拒答不转入；
 - 12.1：模型没有结构化输出或上下文不够长时 Deep 关闭，由 Fast 回答并说明；
 - 10.3：Deep 的动作只有检索与取版本，授权范围不进入模型上下文；取版本同样只列有权查看的可搜索版本；
 - 计划、分组与动作写入 query_log（8.4 的 plan、gaps、history）。
@@ -283,6 +285,42 @@ def test_failed_citation_and_missing_points_escalate_to_deep(deep):
     assert r.retrieval_rounds == 2 and "450元" in r.answer and "上一步说明还缺：没有找到二线城市的标准" in m.prompts[1]
 
 
+def test_refusal_with_partial_evidence_escalates_to_deep(deep):
+    """Fast 整题拒答、但模型说明证据覆盖了问题的一部分（partial）：按“部分要点没有证据覆盖”转入 Deep，缺的要点作为
+    下一跳（2026-11-15，MultiHop-RAG：比较两篇报道只取到一篇就整题拒答，原先不转入）。证据与问题无关的拒答不转入，
+    无答案的问题不多走一趟 Deep。"""
+    first = iter([{"abstain": True, "partial": True, "missing": "没有找到二线城市的标准", "claims": []}])
+
+    def draft(p):
+        return next(first, None) or {"abstain": False, "claims": [
+            claim("一线城市住宿上限为每晚700元。", p, "上限为每晚700元"),
+            claim("二线城市住宿上限为每晚450元。", p, "450元", core=False)]}
+
+    hops = iter([{"closed": False, "next_query": "二线城市住宿上限", "missing": "二线城市的标准"}, {"closed": True}])
+    m = Scripted(draft, deep=lambda kind, p: next(hops))
+    r = deep.make(m).ask(SCOPE, "一线和二线城市住宿上限各是多少", today=TODAY)
+    assert r.mode_path[:2] == ["fast", "deep"] and "问题中有部分要点没有证据覆盖" in r.escalations[0]
+    assert r.retrieval_rounds == 2 and not r.abstained and "450元" in r.answer
+    assert "上一步说明还缺：没有找到二线城市的标准" in m.prompts[1]
+
+    deep.search_calls["n"] = 0
+    m = Scripted(CANNOT)                                    # 拒答、没有 partial
+    r = deep.make(m).ask(SCOPE, "三线城市住宿标准是多少", today=TODAY)
+    assert "deep" not in r.mode_path and r.abstained and deep.search_calls["n"] == 1
+    assert not any("Deep" in e for e in r.escalations) and "hop" not in m.calls
+
+
+def test_partial_flag_survives_the_checkpoint_codec():
+    from eaer.adapters.model import Usage
+    from eaer.orchestrator import codec
+    from eaer.orchestrator.fast import Draft
+
+    d = Draft([], True, "缺一篇", [], "m", Usage(1, 1), partial=True)
+    assert codec.draft_in(codec.draft_out(d)) == d
+    old = {k: v for k, v in codec.draft_out(d).items() if k != "partial"}   # 2026-11-15 前写入的检查点
+    assert codec.draft_in(old).partial is False
+
+
 def test_unsatisfiable_question_through_deep_stays_within_budget(deep):
     """AC-8-2：Fast 1 轮 + Deep 补到上限 3 轮（含 Fast 的 1 轮）+ Verified 补检索 1 轮，以拒答结束。"""
     wrong = lambda p: {"abstain": False, "claims": [claim("一线城市住宿上限为每晚999元。", p, "上限为每晚700元")]}  # noqa: E731
@@ -386,3 +424,30 @@ def test_from_to_wording_is_a_version_comparison():
     q = "《员工休假管理办法》最近一次修订把陪产假天数从多少改成了多少？"
     assert decide(q, parse(q)).mode == "deep" and choose_template(q)[0] == "compare"
     assert version_spec(q, parse(q), TODAY) == VersionSpec("latest")
+
+
+def test_english_comparison_and_causal_wording():
+    """英文问题的比较、因果用语（2026-11-15，MultiHop-RAG 的时间类问题原先都进 Fast）：Router 进 Deep，Deep 选比较或
+    因果模板；不是版本比较，由模型拆比较对象。“climate change”不算；没有这些用语的英文问题照旧进 Fast。"""
+    from eaer.orchestrator.deep import choose_template
+    from eaer.orchestrator.router import decide
+
+    compare = [
+        "Between the Sporting News report on the Minnesota Vikings' offensive performance published on November 13, "
+        "2023, and the Sporting News report published on November 27, 2023, was there a change in the effectiveness "
+        "of the Vikings' offense as reported?",
+        "Was the Zee Business report published on November 18, 2023 inconsistent with the one from November 11, 2023?",
+        "Do both TechCrunch and The Verge report that the board removed the CEO?",
+        "Which company had higher revenue, Apple vs. Microsoft?",
+        "How does the iPhone 15 compare with the Pixel 8 according to The Verge?",
+        "What is the difference between the two reports on Nvidia's earnings?",
+    ]
+    for q in compare:
+        assert decide(q, parse(q)).mode == "deep" and choose_template(q)[0] == "compare", q
+        assert version_spec(q, parse(q), TODAY) is None, q
+    for q in ["Why did the Federal Reserve hold interest rates steady, according to Fortune?",
+              "What led to the resignation of the company's CEO?"]:
+        assert decide(q, parse(q)).mode == "deep" and choose_template(q)[0] == "causal", q
+    for q in ["Which company is reported to have hired Dave Clark as its chief executive?",
+              "What does TechCrunch say about climate change and venture funding?"]:
+        assert decide(q, parse(q)).mode == "fast", q

@@ -31,6 +31,7 @@ from eaer.adapters.model import Message, ModelClient, Usage
 from eaer.domain.identity import Scope
 from eaer.domain.injection import DATA_RULE, escape
 from eaer.orchestrator.fast import SCHEMA as DRAFT_SCHEMA, Draft, Steps, evidence_block
+from eaer.orchestrator.router import EN_CAUSAL, EN_COMPARE
 from eaer.orchestrator.timeparse import TimeBasis, _dates
 from eaer.retrieval.service import Hit, Retriever, VersionInfo
 from eaer.verifier.deterministic import Target
@@ -169,9 +170,9 @@ class VersionSpec:
 
 
 def choose_template(question: str) -> tuple[str, str]:
-    if CAUSAL.search(question):
+    if CAUSAL.search(question) or EN_CAUSAL.search(question):
         return "causal", "含因果用语"
-    if COMPARE.search(question):
+    if COMPARE.search(question) or EN_COMPARE.search(question):
         return "compare", "含比较用语"
     return "multihop", "需要多步检索"
 
