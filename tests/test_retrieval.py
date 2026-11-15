@@ -265,7 +265,8 @@ def test_text_searchable_before_deep_parse_then_tables(ix):
     hits = ix.retriever.search(SCOPE, "一线城市住宿上限", today=date(2026, 3, 1))
     assert hits[0].modality == "table" and "650元/晚" in hits[0].content
     assert hits[0].locator["row"] == 1 and hits[0].valid_grade == "explicit"
-    assert reconcile(ix.conn, ix.index, "t1") == {"missing_in_index": set(), "unexpected_in_index": set()}
+    assert reconcile(ix.conn, ix.index, "t1") == {"missing_in_index": set(), "unexpected_in_index": set(),
+                                                  "incomplete_in_index": set()}
 
 
 def test_archive_acl_and_correction_flow_through_index(ix):
@@ -305,7 +306,8 @@ def test_stale_index_is_caught_by_database_recheck(ix):
     assert ix.retriever.search(SCOPE, "一线城市住宿上限", today=date(2026, 3, 1)) == []   # AC-5-5
     assert reconcile(ix.conn, ix.index, "t1")["unexpected_in_index"] == {str(r.version_id)}
     ix.worker.run_until_idle()
-    assert reconcile(ix.conn, ix.index, "t1") == {"missing_in_index": set(), "unexpected_in_index": set()}
+    assert reconcile(ix.conn, ix.index, "t1") == {"missing_in_index": set(), "unexpected_in_index": set(),
+                                                  "incomplete_in_index": set()}
 
 
 def test_time_filters_current_historical_and_backtrack(ix):

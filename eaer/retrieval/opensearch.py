@@ -186,10 +186,14 @@ class OpenSearchIndex:
                                        query={"query": {"term": {"version_id": version_id}}})}
 
     def version_ids(self, tenant_id: str) -> set[str]:
+        return set(self.evidence_counts(tenant_id))
+
+    def evidence_counts(self, tenant_id: str) -> dict[str, int]:
+        """按 version_id 的 terms 聚合：每个桶的 doc_count 就是该版本的证据条数（每条证据一个文档）。"""
         resp = self.client.search(index=self.alias, body={
             "size": 0, "query": {"term": {"tenant_id": tenant_id}},
             "aggs": {"v": {"terms": {"field": "version_id", "size": 100000}}}})
-        return {b["key"] for b in resp["aggregations"]["v"]["buckets"]}
+        return {b["key"]: b["doc_count"] for b in resp["aggregations"]["v"]["buckets"]}
 
     def search_text(self, query: str, f: Filters, k: int) -> list[tuple[str, float]]:
         q = self._seg(query)
