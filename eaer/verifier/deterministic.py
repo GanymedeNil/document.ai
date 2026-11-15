@@ -9,7 +9,9 @@
 3. value_match：结论中的数值、日期规范化后（全角半角、万与千、千分位、日期写法）都出现在所引证据中；
    英文证据另认：不写“年”的年份、英文日期（1 January 2024）、thousand / million / billion、per cent、
    空格千分位（3 456），以及写明了百分比单位的证据里不带 % 的数值（表头“(%)”）。证据中没有、但等于所引证据中
-   两个数值之差或之和的（“相差 10 个百分点”），只核对得了算术，判 unverified 并写明算式；
+   两个数值之差或之和的（“相差 10 个百分点”），只核对得了算术，判 unverified 并写明算式。所引证据的标注
+   （标题、版本号、记录类的文档日期、其他文档在目标时间的生效与作废日期、出处）也算证据：这些是系统记录的元数据，
+   生成时与原文一起给模型看，结论复述它们（“第 1 版（文档日期 2026-10-13）显示……”）不是编造；
 4. time_valid：所引版本在目标时间有效。只有起决定作用的边界是 explicit 时才判“确定无效”（unsupported）；
    有效但仅由 inferred 或空值支撑时为 unverified。一条结论引用多个版本时取最差的结果。
 
@@ -148,15 +150,11 @@ def _date_found(d: tuple[int, int | None, int | None], pool) -> bool:
     return any(e[0] == y and (m is None or e[1] == m) and (day is None or e[2] == day) for e in pool)
 
 
-def value_match(claim: str, evidence_texts: list[str], target_dates: tuple[date, ...] = ()) -> Check:
-    """target_dates：本次查询的目标日期（生效时间点、回溯时间点）。结论复述这些日期是在说明时间依据，
-    不需要出现在证据里——所引版本在目标日期是否有效由 time_valid 核对；其余日期仍须在证据中找到。"""
-    want = extract(claim)
-    if not want.quantities and not want.dates:
-        return Check("pass", "结论不含数值或日期")
+def _pool(texts) -> tuple[set, set]:
+    """一组文字里的数值与日期（证据一侧的读法：另认空格千分位、写明百分比单位时不带 % 的数、年份与数值互通）。"""
     have_q: set = set()
     have_d: set = set()
-    for t in evidence_texts:
+    for t in texts:
         f = extract(t)
         qs = set(f.quantities) | _space_grouped(t)
         if _PCT_UNIT.search(_norm_text(t)):
@@ -165,11 +163,24 @@ def value_match(claim: str, evidence_texts: list[str], target_dates: tuple[date,
         have_d |= f.dates
     have_d |= {(y, None, None) for v, k in have_q if k == "num" and (y := _year(v)) is not None}
     have_q |= {(Decimal(d[0]), "num") for d in have_d}
+    return have_q, have_d
+
+
+def value_match(claim: str, evidence_texts: list[str], target_dates: tuple[date, ...] = (),
+                labels: list[str] | tuple[str, ...] = ()) -> Check:
+    """target_dates：本次查询的目标日期（生效时间点、回溯时间点）。结论复述这些日期是在说明时间依据，
+    不需要出现在证据里——所引版本在目标日期是否有效由 time_valid 核对；其余日期仍须在证据中找到。
+    labels：所引证据的标注（label_text），其中的数值与日期同样算找到；差与和只用原文的数值推算。"""
+    want = extract(claim)
+    if not want.quantities and not want.dates:
+        return Check("pass", "结论不含数值或日期")
+    have_q, have_d = _pool(evidence_texts)
+    lab_q, lab_d = _pool(labels)
     targets = {(t.year, t.month, t.day) for t in target_dates}
-    lacking = [(v, k) for v, k in sorted(want.quantities) if (v, k) not in have_q]
+    lacking = [(v, k) for v, k in sorted(want.quantities) if (v, k) not in have_q | lab_q]
     missing = [f"{_fmt(v)}{'%' if k == 'pct' else ''}" for v, k in lacking]
     dates = ["-".join(str(x) for x in d if x is not None) for d in sorted(want.dates, key=str)
-             if not _date_found(d, have_d) and not _date_found(d, targets)]
+             if not _date_found(d, have_d | lab_d) and not _date_found(d, targets)]
     if not missing and not dates:
         return PASS
     derived = None if dates else _derivations([v for v, _ in lacking], have_q)
@@ -253,6 +264,24 @@ def locator_exists(row: dict | None, *, raw_exists: bool | None = True) -> Check
 
 # ---------------------------------------------------------------- time_valid
 
+def label_text(doc_type: str | None, title: str, version_no: int | None, doc_date: date | None,
+               validity: dict | None, publisher: str | None) -> str:
+    """一条证据的标注里给模型看的元数据（与 eaer.orchestrator.fast.evidence_block 相同的取舍）：标题与版本号；
+    记录类给文档日期，其他给目标时间的生效与作废日期；有出处时给出处。日期写成 ISO 格式。"""
+    parts = [f"《{title}》第 {version_no} 版"]
+    if doc_type == "record":
+        if doc_date is not None:
+            parts.append(f"文档日期 {doc_date.isoformat()}")
+    elif validity:
+        if validity.get("valid_from") is not None:
+            parts.append(f"生效 {validity['valid_from'].isoformat()}")
+        if validity.get("valid_to") is not None:
+            parts.append(f"作废 {validity['valid_to'].isoformat()}")
+    if publisher:
+        parts.append(f"出处 {publisher}")
+    return "；".join(parts)
+
+
 def time_valid(doc_type: str | None, doc_date: date | None, validity: dict | None, on: date) -> Check:
     """validity：目标时间点所用的有效期行（当前或回溯时刻记录的），None 表示那时没有记录。"""
     if doc_type == "record":
@@ -324,7 +353,8 @@ class DeterministicChecker:
 
         rows = {r["id"]: r for r in self.conn.execute(
             "SELECT e.id, e.version_id, e.modality, e.locator, e.content, e.content_hash, v.raw_object_uri, "
-            "  v.doc_date, v.approved_at, d.doc_type FROM evidence e JOIN document_version v ON v.id = e.version_id "
+            "  v.doc_date, v.approved_at, v.version_no, v.publisher, d.doc_type, d.title "
+            "FROM evidence e JOIN document_version v ON v.id = e.version_id "
             "JOIN document d ON d.id = v.document_id WHERE e.id = ANY(%s)", (keep,))}
         checks["locator_exists"] = worst([
             locator_exists(rows.get(i), raw_exists=(self.store.exists(rows[i]["raw_object_uri"])
@@ -334,11 +364,25 @@ class DeterministicChecker:
         for t in ([target] if target is not None else []) + [vt[str(rows[i]["version_id"])] for i in keep
                                                               if i in rows and str(rows[i]["version_id"]) in vt]:
             targets |= {t.on} | ({t.system_t.date()} if t.system_t is not None else set())
-        checks["value_match"] = value_match(claim, [rows[i]["content"] for i in keep if i in rows], tuple(targets))
-        checks["time_valid"] = self._time(rows, keep, target, vt)
+        versions = {rows[i]["version_id"]: rows[i] for i in keep if i in rows}
+        validity = {vid: self._validity(vid, vt.get(str(vid), target)) for vid in versions}
+        labels = [label_text(r["doc_type"], r["title"], r["version_no"], r["doc_date"], validity[vid], r["publisher"])
+                  for vid, r in versions.items()]
+        checks["value_match"] = value_match(claim, [rows[i]["content"] for i in keep if i in rows], tuple(targets),
+                                            labels)
+        checks["time_valid"] = self._time(rows, keep, target, vt, validity)
         return Result(worst(list(checks.values())).outcome, checks, keep, removed, alerts)
 
-    def _time(self, rows: dict, keep: list[str], default: Target | None, vt: dict[str, Target]) -> Check:
+    def _validity(self, vid, target: Target | None) -> dict | None:
+        """版本在目标时间所用的有效期行：回溯查询取当时记录的，否则取当前的；没有记录时为 None。"""
+        if target is not None and target.system_t is not None:
+            return validity_at(self.conn, vid, target.system_t)
+        return self.conn.execute(
+            "SELECT valid_from, valid_from_grade, valid_to, valid_to_grade FROM version_validity "
+            "WHERE version_id = %s AND recorded_at IS NOT NULL AND replaced_at IS NULL", (vid,)).fetchone()
+
+    def _time(self, rows: dict, keep: list[str], default: Target | None, vt: dict[str, Target],
+              validity: dict) -> Check:
         if default is None and not vt:
             return Check("pass", "不涉及目标时间")
         results = []
@@ -352,10 +396,5 @@ class DeterministicChecker:
                 if r["approved_at"] is None or r["approved_at"] > target.system_t:
                     results.append(Check("unsupported", "回溯时间点该版本尚未审核通过"))
                     continue
-                val = validity_at(self.conn, vid, target.system_t)
-            else:
-                val = self.conn.execute(
-                    "SELECT valid_from, valid_from_grade, valid_to, valid_to_grade FROM version_validity "
-                    "WHERE version_id = %s AND recorded_at IS NOT NULL AND replaced_at IS NULL", (vid,)).fetchone()
-            results.append(time_valid(r["doc_type"], r["doc_date"], val, target.on))
+            results.append(time_valid(r["doc_type"], r["doc_date"], validity[vid], target.on))
         return worst(results)

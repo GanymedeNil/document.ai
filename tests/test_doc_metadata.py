@@ -6,7 +6,9 @@
 - 接收时可带数据源给出的文档日期与出处，写入版本；数据源的文档日期优先于从正文抽取的，没有时照旧从正文抽取；
 - 证据标注：记录类给“文档日期”（原先标“生效 未知；有效期来源：不适用”），有出处时给“出处”；规范类照旧；
 - 出处与标题一样转义后放进证据区，不能构成证据区标记或证据 id；
-- 记录类有了文档日期，所引结论的时效检查通过，不再是“未验证”。
+- 记录类有了文档日期，所引结论的时效检查通过，不再是“未验证”；
+- 结论复述标注里的文档日期（“TechCrunch 2023 年 10 月 7 日的报道称……”），数值与日期核对照样通过：原文里没有这个
+  日期，原先整条结论被判不支持（合成集图表类：模型写“第 1 版（文档日期 2026-10-13）显示……”，核心结论被删、整题拒答）。
 """
 from __future__ import annotations
 
@@ -61,3 +63,20 @@ def test_evidence_header_gives_document_date_and_publisher(ix):
     assert "生效 2026-01-01；有效期来源：正文写明" in policy and "出处" not in policy
     c = a.claims[0]
     assert c.status == "supported" and c.checks["time_valid"]["outcome"] == "pass"   # 有文档日期，时效检查通过
+
+
+def test_claim_restating_the_document_date_from_the_label_is_supported(ix):
+    publish(ix, REPORT, "w.html", doc_date=date(2023, 10, 7), publisher="TechCrunch")
+    ix.worker.run_until_idle()
+
+    def decide(ids, prompt):
+        e = evid(prompt, "Dave Clark")
+        return {"abstain": False, "claims": [
+            {"text": "TechCrunch 2023 年 10 月 7 日的报道称，Dave Clark 本周表示将精简业务。", "evidence_ids": [e], "core": True},
+            {"text": "2023 年 10 月 8 日的报道称 Dave Clark 将精简业务。", "evidence_ids": [e], "core": False}]}
+
+    p, _ = pipeline(ix, decide)
+    a = p.answer(SCOPE, "TechCrunch 报道中 Dave Clark 说了什么", today=date(2026, 6, 1))
+    restated, wrong = a.claims
+    assert restated.status == "supported" and restated.checks["value_match"]["outcome"] == "pass"
+    assert wrong.status == "unsupported" and "2023-10-8" in wrong.checks["value_match"]["reason"]   # 标注里也没有的日期

@@ -15,7 +15,8 @@ from psycopg.rows import dict_row
 from eaer.adapters.authorizer import LocalAuthorizer
 from eaer.domain.evidence import content_hash, evidence_id
 from eaer.domain.identity import Scope
-from eaer.verifier.deterministic import DeterministicChecker, Target, locator_exists, time_valid, value_match
+from eaer.verifier.deterministic import (DeterministicChecker, Target, label_text, locator_exists, time_valid,
+                                         value_match)
 
 D = date.fromisoformat
 
@@ -399,3 +400,38 @@ def test_value_derived_from_cited_numbers_is_unverified(claim, ev):
 def test_value_not_derivable_stays_unsupported(claim, ev):
     r = value_match(claim, ev)
     assert r.outcome == "unsupported" and r.reason.startswith("证据中没有"), r
+
+
+# 结论复述证据标注里的元数据（2026-11-15，合成集图表类）：标注给了“第 1 版；文档日期 2026-10-13”，模型照着写进结论，
+# 原文里没有这个日期，结论原先被判不支持，Fast 与转入 Deep 后都被删掉，整个回答拒答
+CHART = "图1《2026 年第三季度通讯总费用与通讯预算执行率》｜2026 年第三季度通讯预算执行率：54%"
+REPORT_LABEL = "《2026 年第三季度通讯费用分析报告》第 1 版；文档日期 2026-10-13"
+
+
+@pytest.mark.parametrize("claim, ev, labels, want", [
+    ("《2026 年第三季度通讯费用分析报告》第 1 版（文档日期 2026-10-13）显示，2026 年第三季度通讯预算执行率为 54%。",
+     [CHART], [REPORT_LABEL], "pass"),
+    ("TechCrunch 2023 年 10 月 7 日的报道称融资额为 500 万美元", ["the round raised 500万美元"],
+     ["《Flexport 融资》第 1 版；文档日期 2023-10-07；出处 TechCrunch"], "pass"),            # 写法不同的同一日期
+    ("第 2 版自 2026-07-01 起生效，一线城市住宿上限为每晚 700 元", ["一线城市住宿上限为每晚700元"],
+     ["《差旅报销管理办法》第 2 版；生效 2026-07-01"], "pass"),                               # 规范类的生效日期
+    ("第 1 版（文档日期 2026-10-13）显示执行率为 54%", [CHART], [], "unsupported"),           # 不给标注时照旧
+    ("第 1 版（文档日期 2026-10-14）显示执行率为 54%", [CHART], [REPORT_LABEL], "unsupported"),  # 标注里也没有的日期
+    ("执行率为 60%", [CHART], [REPORT_LABEL], "unsupported"),                                    # 数值不受影响
+])
+def test_value_match_accepts_metadata_from_the_evidence_label(claim, ev, labels, want):
+    assert value_match(claim, ev, labels=labels).outcome == want
+
+
+def test_label_numbers_are_not_used_to_derive_sums_or_differences():
+    """差与和只由原文的数值推算：标题里的数（“10 项补贴”）与原文的 650 相加得 660，不算有依据。"""
+    r = value_match("合计 660 元", ["住宿 650 元"], labels=["《关于 10 项补贴的通知》第 1 版；生效 2026-01-01"])
+    assert r.outcome == "unsupported" and r.reason == "证据中没有：660"
+
+
+def test_label_text_mirrors_what_the_model_was_shown():
+    from datetime import date as d
+    assert label_text("record", "周报", 1, d(2023, 10, 7), None, "TechCrunch") == "《周报》第 1 版；文档日期 2023-10-07；出处 TechCrunch"
+    assert label_text("record", "周报", 2, None, None, None) == "《周报》第 2 版"
+    val = {"valid_from": d(2026, 1, 1), "valid_to": d(2026, 7, 1)}
+    assert label_text("normative", "办法", 3, d(2025, 12, 1), val, None) == "《办法》第 3 版；生效 2026-01-01；作废 2026-07-01"
