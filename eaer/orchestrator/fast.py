@@ -48,6 +48,8 @@ SYSTEM = """你是企业制度问答助手，只能依据下面给出的证据�
 2. 结论中出现的数值、日期、单位必须与证据原文一致，不要换算或改写数值。
 3. 把直接回答问题的那条结论标为 core=true，其余补充说明标为 core=false。
 4. 注意每条证据所属版本的有效期：只用在目标日期有效的版本回答；有效期标为“推断”或“未知”的，照常引用即可。
+   记录类文档（报告、新闻、纪要等）标的是文档日期与出处：问题按出处或日期指认某篇文档时（如“某来源某日的报道”），
+   按标注对应到那篇，不要把别的文档的内容算到它头上。
 5. 如果不同证据对所问的取值说法不一致，在 conflicts 中列出互相冲突的证据 id，并为每种说法各写一条结论，写明出自哪份文件
    （如“《差旅报销管理办法》第 3 版规定……”“《关于……的补充通知》规定……”），各自只引用支持它的那条证据（一条结论里出现的
    每个数值都必须能在它引用的证据中找到，不要在一条结论里同时写两种说法），不要替用户选择其中一种。
@@ -114,10 +116,17 @@ def _grade_text(g: str | None) -> str:
 
 
 def evidence_block(h: Hit, meta: dict) -> str:
-    vf, vt = meta.get("valid_from"), meta.get("valid_to")
-    span = f"生效 {vf or '未知'}" + (f"，作废 {vt}" if vt else "")
-    return fence(f"[{h.evidence_id}] 文档《{escape(meta['title'])}》第 {meta['version_no']} 版；{span}；"
-                 f"有效期来源：{_grade_text(h.valid_grade)}", h.content)
+    """一条证据的标注：文档标题与版本；规范类给有效期及其来源，记录类给文档日期（记录类没有有效期，原先标“生效 未知”）；
+    有出处时给出处。记录类的问题常按出处与日期指认文档（“TechCrunch 10 月 7 日那篇报道”），而正文的其余段落看不出
+    属于哪一篇，所以标在每条证据上。出处来自数据源，与标题一样转义后放在证据区内。"""
+    if meta.get("doc_type") == "record":
+        when = f"文档日期 {meta.get('doc_date') or '未知'}"
+    else:
+        vf, vt = meta.get("valid_from"), meta.get("valid_to")
+        when = (f"生效 {vf or '未知'}" + (f"，作废 {vt}" if vt else "")
+                + f"；有效期来源：{_grade_text(h.valid_grade)}")
+    source = f"；出处：{escape(meta['publisher'])}" if meta.get("publisher") else ""
+    return fence(f"[{h.evidence_id}] 文档《{escape(meta['title'])}》第 {meta['version_no']} 版；{when}{source}", h.content)
 
 
 def target_of(on: date, as_of_system: date | None) -> Target:
@@ -135,13 +144,14 @@ class Steps:
         return self.retriever.search(scope, query, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system)
 
     def meta(self, hits: list[Hit], system_t: datetime | None) -> dict[str, dict]:
-        """版本号、标题、类型与有效期；回溯查询取回溯时间点当时记录的有效期。"""
+        """版本号、标题、类型、有效期、文档日期与出处；回溯查询取回溯时间点当时记录的有效期。"""
         if not hits:
             return {}
         t_cond = ("val.recorded_at <= %(t)s AND (val.replaced_at IS NULL OR val.replaced_at > %(t)s)" if system_t
                   else "val.replaced_at IS NULL")
         rows = self.conn.execute(
-            "SELECT v.id, v.version_no, d.title, d.doc_type, val.valid_from, val.valid_to FROM document_version v "
+            "SELECT v.id, v.version_no, d.title, d.doc_type, v.doc_date, v.publisher, val.valid_from, val.valid_to "
+            "FROM document_version v "
             "JOIN document d ON d.id = v.document_id LEFT JOIN version_validity val ON val.version_id = v.id "
             f"AND val.recorded_at IS NOT NULL AND {t_cond} WHERE v.id = ANY(%(ids)s::uuid[])",
             {"ids": list({h.version_id for h in hits}), "t": system_t}).fetchall()

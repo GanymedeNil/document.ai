@@ -5,7 +5,9 @@
         [--answer-sample 50] [--out 报告.md]
 
 - 语料：609 篇英文新闻，按生产流程入库（接收、文本解析、审核通过为记录类、写入索引；真实 OpenSearch 与 Embedding）。
-  每篇写成 HTML：标题、来源与日期一行，正文按空行分段。
+  每篇写成 HTML：标题、来源与日期一行，正文按空行分段；来源与发布日期另作为数据源给出的出处与文档日期
+  （receive 的 publisher、doc_date）随文档接收，与生产中数据源给出元数据走同一条路，证据标注据此给出“文档日期”“出处”。
+  问题常按“某来源某日的报道”指认文章（比较、时间两类），2026-11-15 之前没有传，这两类大多拒答。
 - 检索召回（Hybrid Recall@10，AC-5-4 的英文部分）：对 2,255 个有答案的问题，依据文章出现在前 10 条结果里的比例
   （按依据计）与全部依据都命中的问题比例（按问题计）；混合检索不重排、重排后各算一遍。
 - 拒答（AC-8-8）：经完整编排器（DeepSeek）回答抽样的无答案问题与有答案问题：无答案的应拒答，有答案的不应拒答，
@@ -64,7 +66,7 @@ def ingest(conn, store, index, embedder, corpus: list[dict], tenant: str = "mh",
     docs = {}
     for k, a in enumerate(corpus):
         r = ing.receive(tenant, article_html(a), f"article-{k:04d}.html", acl_policy_id=acl, source_ref=f"mh-{k:04d}",
-                        title=a["title"])
+                        title=a["title"], doc_date=date.fromisoformat(a["published_at"][:10]), publisher=a["source"])
         docs[a["title"]] = str(r.document_id)
     worker.run_until_idle()
     tasks = conn.execute("SELECT id FROM review_task WHERE status = 'open'").fetchall()

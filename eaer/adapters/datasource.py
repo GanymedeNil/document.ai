@@ -15,7 +15,7 @@ import os
 import re
 import zlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -51,6 +51,10 @@ class RawDocument:
     data: bytes
     created_at: datetime | None       # 源系统创建时间；拿不到时为 None
     modified_at: datetime | None
+    # 源系统记录的文档日期（发布日、报告日）与出处（发布方、来源名称），交给 Ingestion.receive 的 doc_date、publisher；
+    # 不是上传或文件创建时间。拿不到时为 None，不推断（参考实现 LocalFolderSource 都给 None）
+    doc_date: date | None = None
+    publisher: str | None = None
 
 
 @dataclass(frozen=True)

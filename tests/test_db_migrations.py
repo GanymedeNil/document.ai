@@ -35,6 +35,12 @@ def _state(url):
     return tables - {"alembic_version"}, triggers
 
 
+def _column(url, table, column) -> bool:
+    with psycopg.connect(url) as c:
+        return c.execute("SELECT count(*) FROM information_schema.columns WHERE table_name = %s AND column_name = %s",
+                         (table, column)).fetchone()[0] == 1
+
+
 def test_upgrade_downgrade_upgrade(empty_db_url):
     full = ALL
     migrate(empty_db_url)
@@ -46,9 +52,12 @@ def test_upgrade_downgrade_upgrade(empty_db_url):
 
 
 def test_each_revision_downgrades_one_step(empty_db_url):
-    """逐个版本回滚：0011 去掉解析结果的暂存；0010 去掉频率限制的计数表；0009 去掉索引任务完成时清缓存的触发器；0008 去掉审核任务的租户与其触发器；0007 去掉准入记录；
+    """逐个版本回滚：0012 去掉版本的出处列；0011 去掉解析结果的暂存；0010 去掉频率限制的计数表；0009 去掉索引任务完成时清缓存的触发器；0008 去掉审核任务的租户与其触发器；0007 去掉准入记录；
     0006 去掉回答缓存；0005 去掉查询任务与检查点表；0004 只去掉强制验证清单的触发器。"""
     migrate(empty_db_url)
+    assert _column(empty_db_url, "document_version", "publisher")
+    downgrade(empty_db_url, "0011")
+    assert _state(empty_db_url) == ALL and not _column(empty_db_url, "document_version", "publisher")
     downgrade(empty_db_url, "0010")
     assert _state(empty_db_url) == (ALL[0] - TABLES_0011, ALL[1])                 # 0011 只去掉解析结果的暂存
     downgrade(empty_db_url, "0009")

@@ -10,7 +10,7 @@ import hashlib
 import traceback
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -54,7 +54,11 @@ class Ingestion:
     def receive(self, tenant_id: str, data: bytes, filename: str, *, acl_policy_id: uuid.UUID,
                 source_ref: str | None = None, title: str | None = None,
                 source_created_at: datetime | None = None, import_batch_id: str | None = None,
-                batch_id: uuid.UUID | None = None) -> Received:
+                batch_id: uuid.UUID | None = None, doc_date: date | None = None,
+                publisher: str | None = None) -> Received:
+        """第 1 阶段：接收。doc_date、publisher 是数据源随文档给出的文档日期（发布日、报告日，不是上传或文件创建时间）
+        与出处（发布方、来源名称）：写入版本，证据标注据此给出“文档日期”“出处”。数据源给出的文档日期与正文写明的同等
+        对待（来源等级 explicit），优先于从正文抽取的；没有时由第 3 阶段从正文抽取。"""
         parser_for(filename, self.parsers)          # 不支持的格式在接收时就拒绝
         digest = "sha256:" + hashlib.sha256(data).hexdigest()
         with self.conn.transaction():
@@ -73,7 +77,7 @@ class Ingestion:
             vid = self.lc.add_version(doc_id, content_hash=digest, raw_object_uri=uri,
                                       acl_policy_id=acl_policy_id, parser_version="pending",
                                       source_created_at=source_created_at, import_batch_id=import_batch_id,
-                                      batch_id=batch_id)
+                                      batch_id=batch_id, doc_date=doc_date, publisher=publisher)
             self._enqueue(vid, "parse_text")
         return Received(doc_id, vid, False)
 
@@ -121,7 +125,7 @@ class Ingestion:
                                   (doc_type, v["document_id"]))
             if doc_type == "record":
                 self.lc.set_draft_validity(version_id, valid_from_grade="unknown")
-                if ex.doc_date:
+                if ex.doc_date and v["doc_date"] is None:          # 数据源给了文档日期时以它为准
                     self.conn.execute("UPDATE document_version SET doc_date = %s WHERE id = %s",
                                       (ex.doc_date.value, version_id))
             else:

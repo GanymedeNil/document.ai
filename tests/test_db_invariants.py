@@ -75,6 +75,10 @@ VIOLATIONS = [
      errors.RaiseException, "与版本所属文档的租户"),
     ("修改审核任务的租户", "UPDATE review_task SET tenant_id = 't2' WHERE version_id = %(v2)s",
      errors.RaiseException, "审核任务的租户写入后不可修改"),
+    ("出处为空白", "UPDATE document_version SET publisher = '  ' WHERE id = %(v2)s",
+     errors.CheckViolation, "version_publisher_not_blank"),
+    ("出处超过 200 字", "UPDATE document_version SET publisher = repeat('x', 201) WHERE id = %(v2)s",
+     errors.CheckViolation, "version_publisher_not_blank"),
 ]
 
 

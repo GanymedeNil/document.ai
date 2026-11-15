@@ -26,6 +26,7 @@ from typing import Any, Literal
 
 import psycopg
 
+from eaer.domain.dates import EN_DMY, EN_MDY, EN_MY, MONTHS
 from eaer.domain.evidence import content_hash, evidence_id
 from eaer.domain.identity import Scope
 from eaer.lifecycle.asof import validity_at
@@ -54,15 +55,8 @@ _ORDINAL = re.compile(r"第\s*[0-9一二三四五六七八九十百零〇]+\s*[�
 _YMD = re.compile(r"(?<!\d)(\d{4})\s*(?:年|-|/|\.)\s*(\d{1,2})\s*(?:月|-|/|\.)\s*(\d{1,2})\s*[日号]?")
 _YM = re.compile(r"(?<!\d)(\d{4})\s*(?:年\s*(\d{1,2})\s*月|-(\d{1,2})(?![\d-]))")
 _Y = re.compile(r"(?<!\d)(\d{4})\s*年")
-# 英文日期：月份名首字母大写（“may”是情态动词），如 1 January 2024、January 1, 2024、Jan. 2024
-_MONTHS = {m: k + 1 for k, ms in enumerate([
-    ("January", "Jan"), ("February", "Feb"), ("March", "Mar"), ("April", "Apr"), ("May",), ("June", "Jun"),
-    ("July", "Jul"), ("August", "Aug"), ("September", "Sep", "Sept"), ("October", "Oct"), ("November", "Nov"),
-    ("December", "Dec")]) for m in ms}
-_MON = r"(" + "|".join(sorted(_MONTHS, key=len, reverse=True)) + r")\b\.?"
-_EN_DMY = re.compile(r"(?<!\d)(\d{1,2})(?:st|nd|rd|th)?\s+" + _MON + r"\s+(\d{4})(?!\d)")
-_EN_MDY = re.compile(r"\b" + _MON + r"\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?!\d)")
-_EN_MY = re.compile(r"\b" + _MON + r"\s+(\d{4})(?!\d)")
+# 英文日期：月份名首字母大写（“may”是情态动词），如 1 January 2024、January 1, 2024、Jan. 2024（eaer/domain/dates.py）
+_MONTHS, _EN_DMY, _EN_MDY, _EN_MY = MONTHS, EN_DMY, EN_MDY, EN_MY
 _NUM = re.compile(r"(?<![\dA-Za-z_.])(\d+(?:\.\d+)?)\s*(亿|万|千|thousand\b|million\b|billion\b|bn\b)?\s*"
                   r"(%|per\s*cent\b|percent\b)?")   # 紧跟字母的数字是编号（P002、v2）；percentage 不是百分号
 _MULT = {None: Decimal(1), "千": Decimal(1000), "万": Decimal(10000), "亿": Decimal(100000000),

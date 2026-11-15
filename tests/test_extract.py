@@ -17,6 +17,12 @@ from eaer.ingestion.extract import classify, extract, parse_date
     ("2026-03-01", date(2026, 3, 1)),
     ("2026/3/1", date(2026, 3, 1)),
     ("2026年2月30日", None),
+    ("October 30, 2023", date(2023, 10, 30)),
+    ("30 October 2023", date(2023, 10, 30)),
+    ("1st Feb. 2024", date(2024, 2, 1)),
+    ("Sept 9, 2023", date(2023, 9, 9)),
+    ("31 September 2023", None),
+    ("october 30, 2023", None),           # 月份名要首字母大写（“may”是情态动词）
 ])
 def test_parse_date(text, expected):
     assert parse_date(text) == expected
@@ -58,6 +64,27 @@ def test_relative_wording_is_kept_unresolved():
 def test_signature_date_as_doc_date():
     ex = extract(para("一、概述", "以上。", "2026年7月10日"))
     assert ex.doc_date.value == date(2026, 7, 10)
+
+
+@pytest.mark.parametrize("texts, expected", [
+    (("Published: October 30, 2023", "Body."), date(2023, 10, 30)),
+    (("Body.", "Issued on 5 March 2024 by the Commission."), date(2024, 3, 5)),
+    (("Report date: 2024-03-05",), date(2024, 3, 5)),
+    (("Date: 1 May 2024", "Body."), date(2024, 5, 1)),
+    (("Body.", "October 30, 2023"), date(2023, 10, 30)),                 # 落款
+    (("Annual report", "30 October 2023", "Body."), date(2023, 10, 30)),  # 标题下的日期
+    (("Due date: 1 May 2024",), None),                                    # 不是文档日期
+    (("Expiry date: 2024-03-05",), None),
+    (("Published in October 2023.",), None),                              # 只有年月，不是日期
+    (("A", "B", "C", "30 October 2023", "D"), None),                      # 不在前三段、也不是最后一段
+    (("一、概述", "2026年7月10日", "正文。"), None),                     # 中文日期在落款，标题下的不按这条
+])
+def test_english_doc_date(texts, expected):
+    """英文报告与新闻的文档日期（2026-11-15，MultiHop-RAG 与 ViDoRe 的英文文档原先一份也抽不到）：“Published/Issued/
+    Released (on)”“Dated”后、“Publication date:”“Report date:”后、段首“Date:”后的日期，落款日期，以及前三段中
+    只有一个英文日期的段落。"""
+    ex = extract(para(*texts))
+    assert (ex.doc_date and ex.doc_date.value) == expected
 
 
 def test_abolition_without_version_and_other_wording():

@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 
+from eaer.domain.dates import EN_DATE, parse_en
+
 CN_DIGITS = {"〇": 0, "零": 0, "○": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
              "六": 6, "七": 7, "八": 8, "九": 9}
 
@@ -22,6 +24,15 @@ RELATIVE = re.compile(r"自(?:发布|印发|公布)之日起\s*(?:(\d+|[一二�
 ABOLISH = re.compile(r"原?《([^》]+)》\s*(?:[（(]\s*第\s*(\d+)\s*版\s*[)）])?\s*(?:同时)?(?:废止|不再执行|停止执行)")
 DOC_DATE = re.compile(rf"(?:报告日期|日期|印发日期|发布日期)\s*[:：]\s*({DATE})")
 LONE_DATE = re.compile(rf"^\s*({DATE})\s*$")
+# 英文文档日期：标注“Published (on)”“Issued (on)”“Released (on)”“Dated”后的日期（冒号可省），“Publication date:”
+# “Report date:”后的日期（要冒号），或段首“Date:”后的日期（不在段首的“Due date:”“Expiry date:”不算）；
+# 日期可写 ISO 或英文（October 30, 2023 / 30 October 2023）
+_ANY = rf"(?:{DATE}|{EN_DATE})"
+EN_DOC_DATE = re.compile(
+    rf"\b(?i:(?:published|issued|released)(?:\s+on)?|dated)\s*[:：]?\s*({_ANY})"
+    rf"|\b(?i:publication\s+date|date\s+of\s+publication|report\s+date)\s*[:：]\s*({_ANY})"
+    rf"|^\s*(?i:date)\s*[:：]\s*({_ANY})")
+EN_LONE_DATE = re.compile(rf"^\s*({EN_DATE})\s*$")
 
 NORMATIVE_WORDS = ("办法", "规定", "制度", "规范", "标准", "细则", "合同", "协议", "规程", "守则", "准则")
 RECORD_WORDS = ("报告", "纪要", "总结", "分析", "方案", "记录", "简报", "周报", "月报")
@@ -42,6 +53,8 @@ def _cn_small(s: str) -> int:
 
 
 def parse_date(text: str) -> date | None:
+    if (d := parse_en(text)) is not None:
+        return d
     s = re.sub(r"\s+", "", text)
     m = re.fullmatch(r"(\d{4})年(\d{1,2})月(\d{1,2})日", s) or re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", s)
     try:
@@ -113,8 +126,8 @@ def extract(paragraphs: list[tuple[dict, str]]) -> Extraction:
                 ex.expires = Found(d, loc, _sentence(text, m.start(), m.end()))
         if ex.relative is None and (m := RELATIVE.search(text)):
             ex.relative = Found(m[0], loc, _sentence(text, m.start(), m.end()))
-        if ex.doc_date is None and (m := DOC_DATE.search(text)):
-            d = parse_date(m[1])
+        if ex.doc_date is None and (m := DOC_DATE.search(text) or EN_DOC_DATE.search(text)):
+            d = parse_date(next(g for g in m.groups() if g))
             if d:
                 ex.doc_date = Found(d, loc, m[0])
         for m in ABOLISH.finditer(text):
@@ -122,6 +135,12 @@ def extract(paragraphs: list[tuple[dict, str]]) -> Extraction:
     # 落款日期：最后一段只有一个日期
     if ex.doc_date is None and paragraphs:
         loc, text = paragraphs[-1]
-        if (m := LONE_DATE.match(text)) and (d := parse_date(m[1])):
+        if (m := LONE_DATE.match(text) or EN_LONE_DATE.match(text)) and (d := parse_date(m[1])):
             ex.doc_date = Found(d, loc, text.strip())
+    # 英文报告与新闻把日期写在标题下：前三段中只有一个英文日期的段落（中文公文的日期在落款，不按这条）
+    if ex.doc_date is None:
+        for loc, text in paragraphs[:3]:
+            if (m := EN_LONE_DATE.match(text)) and (d := parse_date(m[1])):
+                ex.doc_date = Found(d, loc, text.strip())
+                break
     return ex

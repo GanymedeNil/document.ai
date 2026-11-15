@@ -74,8 +74,10 @@ class Lifecycle:
     def add_version(self, document_id: uuid.UUID, *, content_hash: str, raw_object_uri: str,
                     acl_policy_id: uuid.UUID, parser_version: str, version_no: int | None = None,
                     doc_date: date | None = None, import_batch_id: str | None = None,
-                    source_created_at: datetime | None = None, batch_id: uuid.UUID | None = None) -> uuid.UUID:
-        """新增一个待审核版本，并生成审核任务。"""
+                    source_created_at: datetime | None = None, batch_id: uuid.UUID | None = None,
+                    publisher: str | None = None) -> uuid.UUID:
+        """新增一个待审核版本，并生成审核任务。doc_date、publisher 是数据源给出的文档日期与出处（迁移 0012），没有时为空。"""
+        publisher = " ".join((publisher or "").split())[:200] or None
         now = self.clock()
         vid = uuid.uuid4()
         with self.conn.transaction():
@@ -86,10 +88,10 @@ class Lifecycle:
                 version_no = row["n"]
             self.conn.execute(
                 "INSERT INTO document_version (id, document_id, version_no, status, content_hash, raw_object_uri, "
-                "acl_policy_id, uploaded_at, source_created_at, import_batch_id, doc_date, parser_version) "
-                "VALUES (%s, %s, %s, 'pending_review', %s, %s, %s, %s, %s, %s, %s, %s)",
+                "acl_policy_id, uploaded_at, source_created_at, import_batch_id, doc_date, parser_version, publisher) "
+                "VALUES (%s, %s, %s, 'pending_review', %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (vid, document_id, version_no, content_hash, raw_object_uri, acl_policy_id, now,
-                 source_created_at, import_batch_id, doc_date, parser_version))
+                 source_created_at, import_batch_id, doc_date, parser_version, publisher))
             # 任务自带租户：删除待审核版本后任务不再指向版本，仍要能按租户列出（迁移 0008）
             self.conn.execute(
                 "INSERT INTO review_task (id, tenant_id, version_id, batch_id, status) "
