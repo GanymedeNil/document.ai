@@ -66,6 +66,45 @@ def test_table_caption_prefixes_every_cell(ix):
     assert any("Switzerland" in h.content for h in hits)
 
 
+def test_multi_row_header_names_the_columns_and_is_not_data(ix):
+    """多层表头（“EU movers”下分 2021、2022）：列名是各行表头连起来，第二行表头不当作数据。原先只把第一行当表头，
+    第二行变成“表N《表题》｜｜EU movers：2021”这样只有表题、没有数值的单元格，与问题用词相近时占满检索结果
+    （ViDoRe Q22、Q80 因此拒答），数据单元格“EU-27｜EU movers：762”也看不出是哪一年。HTML 的 colspan 按跨的列数
+    重复，两行表头才对得上列。经过解析结果暂存（文本解析存、深度解析取），表头行数随暂存保留。"""
+    body = ("<h1>劳动力流动年度报告</h1><p>报告日期：2026年1月5日</p>"
+            "<table><caption>Table 18: Composition of inflows of movers (1 000s), 2021-2022</caption>"
+            "<tr><th></th><th colspan=\"2\">EU movers</th><th>Third-country nationals</th></tr>"
+            "<tr><th></th><th>2021</th><th>2022</th><th>2022</th></tr>"
+            "<tr><td>EU-27</td><td>762</td><td>860</td><td>3 324</td></tr></table>"
+            "<table><tr><th>项目</th><th>标准</th></tr><tr><td>住宿</td><td>650元/晚</td></tr></table>")
+    r = publish(ix, body.encode(), "t.html")
+    ix.worker.run_until_idle()
+    cap = "表1《Table 18: Composition of inflows of movers (1 000s), 2021-2022》｜"
+    assert table_evidence(ix, r.version_id) == sorted([
+        cap + "EU-27｜EU movers / 2021：762", cap + "EU-27｜EU movers / 2022：860",
+        cap + "EU-27｜Third-country nationals / 2022：3 324", "住宿｜标准：650元/晚"])
+
+
+def test_header_rows_and_column_names():
+    from types import SimpleNamespace as C
+
+    from eaer.ingestion.docling_parser import header_flags
+    from eaer.ingestion.parsers import header_rows
+    from eaer.ingestion.pipeline import column_names
+
+    assert header_rows([True, True, False], 3) == 2
+    assert header_rows([False, True, False], 3) == 1        # 没有标记时与原先一样，第一行当表头
+    assert header_rows([True, True], 2) == 1                # 全部标成表头时也按 1 行，不让整张表没有证据
+    assert column_names([["", "EU movers", "EU movers"], ["", "2021", "2022"]]) == ["", "EU movers / 2021",
+                                                                                   "EU movers / 2022"]
+    assert column_names([["Total"], ["Total"]]) == ["Total"]  # 跨行合并的表头只取一次
+    assert column_names([["项目", "标准"]]) == ["项目", "标准"]
+    grid = [[C(text="", column_header=False), C(text="EU movers", column_header=True)],
+            [C(text="", column_header=False), C(text="2021", column_header=True)],
+            [C(text="EU-27", column_header=False), C(text="762", column_header=False)]]
+    assert header_flags(grid) == [True, True, False]
+
+
 def test_docling_table_caption_falls_back_to_the_title_paragraph_before_it():
     from eaer.ingestion.docling_parser import table_caption
     from eaer.ingestion.parsers import Block

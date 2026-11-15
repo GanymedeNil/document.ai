@@ -146,7 +146,10 @@ class Ingestion:
         """发布后在后台解析表格与图片（6.2 第 6 阶段，不阻塞发布）。
 
         表格：每个数据单元格一条证据，内容带行名和列名；有表题时前面加“表N《表题》｜”（与图表的“图N《标题》”一致，
-        单元格要靠表题才检索得到、才知道单位），没有表题的照旧。只有第一格有内容的行（单列的清单、电子表格里一列写的条款）
+        单元格要靠表题才检索得到、才知道单位），没有表题的照旧。多层表头（解析器给出的表头行数大于 1）时，列名是
+        同一列各行表头连起来（“EU movers / 1 000s / 2021”），表头的各行都不当作数据：否则第二行表头（单位、年份）
+        会变成只有表题、没有数值的单元格占满检索结果，数据单元格也看不出是哪一年、什么单位。
+        只有第一格有内容的行（单列的清单、电子表格里一列写的条款）
         整格一条证据。图片：配置了有看图能力的模型（figure_reader）时交给它
         转写，图表每个数据点一条证据（figures.py）；没有配置时跳过。表格先写入；图片逐张读取、逐张提交，
         已有证据的图片不再读取，所以任务失败重试时不会重复读取、也不会产生重复证据。有图片读取失败时，
@@ -163,11 +166,12 @@ class Ingestion:
             for t_index, t in enumerate(tables):
                 if len(t.rows) < 2:
                     continue
-                header = t.rows[0]
+                n_head = t.header_rows if 0 < t.header_rows < len(t.rows) else 1
+                header = column_names(t.rows[:n_head])
                 head = f"表{t_index + 1}《{t.text}》｜" if t.text else ""
                 single = all(not any(x for x in row[1:]) for row in t.rows)
                 for r, row in enumerate(t.rows):
-                    if r == 0 and not single:
+                    if r < n_head and not single:
                         continue
                     if not any(x for x in row[1:]):
                         # 只有第一格有内容的行（电子表格里一列写的条款、清单，或单列的表）：整格就是一条证据，
@@ -190,7 +194,8 @@ class Ingestion:
 
     def _save_parsed(self, version_id: uuid.UUID, parsed) -> None:
         blocks = [{"kind": b.kind, "text": b.text, "level": b.level, "rows": b.rows, "section": list(b.section),
-                   "order": b.order, "page": b.page, "image_type": b.image_type if b.image else None}
+                   "order": b.order, "page": b.page, "image_type": b.image_type if b.image else None,
+                   "header_rows": b.header_rows}
                   for b in parsed.blocks]
         self.conn.execute(
             "INSERT INTO parse_cache (version_id, parser, title, blocks, created_at) VALUES (%s, %s, %s, %s, %s) "
@@ -217,7 +222,7 @@ class Ingestion:
         for d in row["blocks"]:
             mime, data = images.get(d["order"], (None, None))
             blocks.append(Block(d["kind"], d["text"], d["level"], d["rows"], tuple(d["section"]), d["order"], d["page"],
-                                image=data, image_type=mime))
+                                image=data, image_type=mime, header_rows=d.get("header_rows", 1)))
         return ParsedDocument(row["title"], blocks, row["parser"])
 
     def _read_figures(self, version_id: uuid.UUID, parsed) -> list[str]:
@@ -296,6 +301,20 @@ class Ingestion:
                 "INSERT INTO ingest_job (id, version_id, stage, status, priority, created_at, updated_at) "
                 "VALUES (%s, %s, %s, 'queued', %s, %s, %s)",
                 (uuid.uuid4(), version_id, stage, PRIORITY.get(stage, DEFAULT_PRIORITY), now, now))
+
+
+def column_names(header: list[list[str]]) -> list[str]:
+    """各列的列名：多层表头时把同一列各行的表头用“ / ”连起来（“EU movers / 1 000s / 2021”），跨行合并的表头
+    在各行重复出现，只取一次。只有一行表头时就是那一行。"""
+    names = []
+    for c in range(max((len(r) for r in header), default=0)):
+        parts: list[str] = []
+        for row in header:
+            x = row[c] if c < len(row) else ""
+            if x and (not parts or parts[-1] != x):
+                parts.append(x)
+        names.append(" / ".join(parts))
+    return names
 
 
 def _locator(b, **extra) -> dict:

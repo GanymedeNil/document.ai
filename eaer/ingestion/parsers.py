@@ -30,6 +30,7 @@ class Block:
     page: int | None = None
     image: bytes | None = field(default=None, repr=False)   # 图片块：图片内容
     image_type: str | None = None     # 图片块：image/png、image/jpeg、image/gif、image/webp
+    header_rows: int = 1              # 表格块：表头的行数（多层表头时大于 1，如“EU movers”下分“1 000s”“%”，再分年份）
 
 
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
@@ -140,6 +141,10 @@ class _HTMLCollector(HTMLParser):
         self._tag: str | None = None
         self._rows: list[list[str]] | None = None
         self._row: list[str] | None = None
+        self._row_th: list[bool] = []     # 当前行各格是不是 th
+        self._head: list[bool] = []       # 已收的各行是不是全为 th（空格不计）
+        self._is_th = False
+        self._span = 1                    # 当前格的 colspan：跨几列就在每列重复一次，多层表头才对得上列
         self._cell: list[str] | None = None
         self._caption: list[str] = []
         self._in_caption = False
@@ -149,13 +154,15 @@ class _HTMLCollector(HTMLParser):
         if tag in ("script", "style", "title", "head"):
             self._skip += 1
         elif tag == "table":
-            self._rows, self._caption = [], []
+            self._rows, self._caption, self._head = [], [], []
         elif tag == "caption" and self._rows is not None:
             self._in_caption = True
         elif tag == "tr" and self._rows is not None:
-            self._row = []
+            self._row, self._row_th = [], []
         elif tag in ("td", "th") and self._row is not None:
-            self._cell = []
+            self._cell, self._is_th = [], tag == "th"
+            span = dict(attrs).get("colspan") or "1"
+            self._span = min(max(int(span), 1), 50) if span.strip().isdigit() else 1
         elif tag == "img":
             a = dict(attrs)
             self.blocks.append(figure(a.get("alt", "") or "", _data_uri(a.get("src") or "")))
@@ -166,16 +173,20 @@ class _HTMLCollector(HTMLParser):
         if tag in ("script", "style", "title", "head"):
             self._skip = max(0, self._skip - 1)
         elif tag in ("td", "th") and self._cell is not None and self._row is not None:
-            self._row.append(" ".join("".join(self._cell).split()))
+            self._row += [" ".join("".join(self._cell).split())] * self._span
+            self._row_th += [self._is_th] * self._span
             self._cell = None
         elif tag == "tr" and self._row is not None and self._rows is not None:
+            filled = [th for x, th in zip(self._row, self._row_th) if x]
+            self._head.append(bool(filled) and all(filled))
             self._rows.append(self._row)
             self._row = None
         elif tag == "caption":
             self._in_caption = False
         elif tag == "table" and self._rows is not None:
             caption = " ".join("".join(self._caption).split())
-            self.blocks.append(Block("table", caption, rows=self._rows))     # 表格块的 text 是表题
+            self.blocks.append(Block("table", caption, rows=self._rows,       # 表格块的 text 是表题
+                                     header_rows=header_rows(self._head, len(self._rows))))
             self._rows, self._caption = None, []
         elif tag == self._tag:
             text = " ".join("".join(self._buf).split())
@@ -233,6 +244,17 @@ def _register_docling() -> None:
 
 
 _register_docling()
+
+
+def header_rows(is_header: list[bool], n_rows: int) -> int:
+    """表头行数：从第一行起连续的表头行；至少 1 行（没有标记时与原先一样把第一行当表头），
+    全部行都标成表头时也按 1 行（不能让一张表一条证据都没有）。"""
+    n = 0
+    for h in is_header:
+        if not h:
+            break
+        n += 1
+    return n if 1 <= n < n_rows else 1
 
 
 def parser_for(filename: str, parsers: list[Parser] | None = None) -> Parser:
