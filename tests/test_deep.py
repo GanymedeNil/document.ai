@@ -427,8 +427,9 @@ def test_from_to_wording_is_a_version_comparison():
 
 
 def test_english_comparison_and_causal_wording():
-    """英文问题的比较、因果用语（2026-11-15，MultiHop-RAG 的时间类问题原先都进 Fast）：Router 进 Deep，Deep 选比较或
-    因果模板；不是版本比较，由模型拆比较对象。“climate change”不算；没有这些用语的英文问题照旧进 Fast。"""
+    """英文问题的比较、因果用语（与中文同一组概念）：Router 进 Deep，Deep 选比较或因果模板；不是版本比较，由模型拆
+    比较对象。“climate change”不算；没有这些用语的英文问题照旧进 Fast，只在某个评测集问法里才有的词（both、
+    consistent）不算比较用语。"""
     from eaer.orchestrator.deep import choose_template
     from eaer.orchestrator.router import decide
 
@@ -436,8 +437,8 @@ def test_english_comparison_and_causal_wording():
         "Between the Sporting News report on the Minnesota Vikings' offensive performance published on November 13, "
         "2023, and the Sporting News report published on November 27, 2023, was there a change in the effectiveness "
         "of the Vikings' offense as reported?",
-        "Was the Zee Business report published on November 18, 2023 inconsistent with the one from November 11, 2023?",
-        "Do both TechCrunch and The Verge report that the board removed the CEO?",
+        "What changed in the travel reimbursement policy before and after the 2026 revision?",
+        "What are the hotel limits for tier-1 and tier-2 cities respectively?",
         "Which company had higher revenue, Apple vs. Microsoft?",
         "How does the iPhone 15 compare with the Pixel 8 according to The Verge?",
         "What is the difference between the two reports on Nvidia's earnings?",
@@ -449,5 +450,6 @@ def test_english_comparison_and_causal_wording():
               "What led to the resignation of the company's CEO?"]:
         assert decide(q, parse(q)).mode == "deep" and choose_template(q)[0] == "causal", q
     for q in ["Which company is reported to have hired Dave Clark as its chief executive?",
-              "What does TechCrunch say about climate change and venture funding?"]:
+              "What does TechCrunch say about climate change and venture funding?",
+              "Do both TechCrunch and The Verge report that the board removed the CEO?"]:
         assert decide(q, parse(q)).mode == "fast", q
