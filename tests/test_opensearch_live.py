@@ -69,6 +69,7 @@ def test_write_search_and_delete(live):
     ix.update_fields([d.evidence_id], {"principals": ("B",)})
     assert ix.search_text("住宿上限", f, 10) == []
     assert ix.indexed_ids("v1") == {d.evidence_id} and ix.version_ids("t1") == {"v1"}
+    assert ix.evidence_counts("t1") == {"v1": 1} and ix.evidence_counts("t2") == {}
     ix.delete_version("v1")
     assert ix.indexed_ids("v1") == set()
 
@@ -91,6 +92,7 @@ def test_large_version_is_written_in_chunks_and_listed_in_full(live):
     assert len(calls) > 5 and sum(n for n, _ in calls) == 2 * len(docs)
     assert [r for _, r in calls] == [False] * (len(calls) - 1) + [True]          # 只在最后一批刷新
     assert ix.indexed_ids("big") == {d.evidence_id for d in docs}
+    assert ix.evidence_counts("t1") == {"big": len(docs)}                        # 对账按条数比较，超过 10,000 也准
     calls.clear()
     ix.update_fields([d.evidence_id for d in docs], {"principals": ("B",)})
     assert len(calls) > 1

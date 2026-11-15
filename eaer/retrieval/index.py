@@ -101,6 +101,9 @@ class SearchIndex(Protocol):
     def delete_version(self, version_id: str) -> None: ...
     def indexed_ids(self, version_id: str) -> set[str]: ...
     def version_ids(self, tenant_id: str) -> set[str]: ...
+    def evidence_counts(self, tenant_id: str) -> dict[str, int]:
+        """租户在索引中的每个版本各有几条证据（对账用，eaer/retrieval/reconcile.py）。"""
+        ...
     def search_text(self, query: str, f: Filters, k: int) -> list[tuple[str, float]]: ...
     def search_vector(self, vector: list[float], f: Filters, k: int) -> list[tuple[str, float]]: ...
     def snapshot(self) -> "SearchIndex":
@@ -152,7 +155,10 @@ class MemoryIndex:
         return {i for i, d in self.docs.items() if d.version_id == version_id}
 
     def version_ids(self, tenant_id: str) -> set[str]:
-        return {d.version_id for d in self.docs.values() if d.tenant_id == tenant_id}
+        return set(self.evidence_counts(tenant_id))
+
+    def evidence_counts(self, tenant_id: str) -> dict[str, int]:
+        return dict(Counter(d.version_id for d in self.docs.values() if d.tenant_id == tenant_id))
 
     def search_text(self, query: str, f: Filters, k: int) -> list[tuple[str, float]]:
         pool = [d for d in self.docs.values() if f.matches(d)]

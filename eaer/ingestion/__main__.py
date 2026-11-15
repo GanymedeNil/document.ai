@@ -8,9 +8,9 @@
     python -m eaer.ingestion drop-retired    删除别名不再指向、且超过 24 小时的旧索引（应定时运行）
     python -m eaer.ingestion purge           立即做一次 Trace 清理（后台任务进程每 EAER_PURGE_SECONDS 秒自动做一次，默认 3600）
     python -m eaer.ingestion stats           入库队列与索引更新延迟（JSON，供监控采集；--since-minutes 默认 60）
-    python -m eaer.ingestion reconcile       按租户对账：数据库中可搜索的版本与索引中的版本之差（JSON，有差异时退出码 1；
-                                             --tenant 只查给定的租户）
-    python -m eaer.ingestion reconcile --repair   对账并补任务：缺的、多的版本补排 index_update，由后台任务进程执行
+    python -m eaer.ingestion reconcile       按租户对账：数据库中可搜索的版本与索引中的版本之差，以及两边都有、证据条数不同的
+                                             版本（JSON，有差异时退出码 1；--tenant 只查给定的租户）
+    python -m eaer.ingestion reconcile --repair   对账并补任务：缺的、多的、证据不全的版本补排 index_update，由后台任务进程执行
                                              （后台任务进程每 EAER_RECONCILE_SECONDS 秒自动做一次，默认 3600；见 repair.py）
 
 环境变量：EAER_DATABASE_URL、EAER_STORAGE_DIR（同接口进程）；EAER_POLL_SECONDS（空闲轮询间隔，默认 2）；
