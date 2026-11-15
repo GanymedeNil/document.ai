@@ -339,14 +339,14 @@ def run(db_url: str, client, alias: str, store_dir: Path, embedder, *, pages: in
             vids = [ing.receive("t1", data, name, acl_policy_id=acl).version_id for name, data, _ in blobs]
             st.seconds["receive"] = time.monotonic() - t
             st.docs, st.pages = len(blobs), sum(n for *_, n in blobs)
-            worker.run_until_idle()                                     # 文本解析、分类与抽取
+            worker.run_until_settled()                                   # 文本解析、分类与抽取
             tasks = conn.execute("SELECT id FROM review_task WHERE status = 'open' AND version_id = ANY(%s)",
                                  (vids,)).fetchall()
             t = time.monotonic()
             res = review.decide("t1", [{"task_id": str(r["id"]), "decision": "approve",
                                         "corrections": {"doc_type": "normative"}} for r in tasks], "tp")
             st.seconds["approve"] = time.monotonic() - t
-            worker.run_until_idle()                                     # 写入索引、深度解析、索引更新
+            worker.run_until_settled()                                   # 写入索引、深度解析、索引更新
             st.failed = conn.execute("SELECT count(*) AS n FROM ingest_job WHERE status = 'failed' AND version_id = ANY(%s)",
                                      (vids,)).fetchone()["n"] + sum(not x["ok"] for x in res)
             log(f"{fmt}：{st.docs} 份 {st.pages} 页，{st.total:.1f} 秒，每小时 {st.per_hour()} 页"

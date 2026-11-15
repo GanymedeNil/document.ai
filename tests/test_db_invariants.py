@@ -79,6 +79,10 @@ VIOLATIONS = [
      errors.CheckViolation, "version_publisher_not_blank"),
     ("出处超过 200 字", "UPDATE document_version SET publisher = repeat('x', 201) WHERE id = %(v2)s",
      errors.CheckViolation, "version_publisher_not_blank"),
+    ("后台任务的来源不认识",
+     "INSERT INTO ingest_job (id, version_id, stage, status, origin, created_at, updated_at) "
+     "VALUES (gen_random_uuid(), %(v1)s, 'index_update', 'queued', 'manual', now(), now())",
+     errors.CheckViolation, "ingest_job_origin_known"),
 ]
 
 

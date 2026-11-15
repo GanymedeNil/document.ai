@@ -52,10 +52,15 @@ def test_upgrade_downgrade_upgrade(empty_db_url):
 
 
 def test_each_revision_downgrades_one_step(empty_db_url):
-    """逐个版本回滚：0012 去掉版本的出处列；0011 去掉解析结果的暂存；0010 去掉频率限制的计数表；0009 去掉索引任务完成时清缓存的触发器；0008 去掉审核任务的租户与其触发器；0007 去掉准入记录；
+    """逐个版本回滚：0013 去掉后台任务的退避时刻与来源两列；0012 去掉版本的出处列；0011 去掉解析结果的暂存；0010 去掉频率限制的计数表；0009 去掉索引任务完成时清缓存的触发器；0008 去掉审核任务的租户与其触发器；0007 去掉准入记录；
     0006 去掉回答缓存；0005 去掉查询任务与检查点表；0004 只去掉强制验证清单的触发器。"""
     migrate(empty_db_url)
-    assert _column(empty_db_url, "document_version", "publisher")
+    assert _column(empty_db_url, "ingest_job", "not_before") and _column(empty_db_url, "ingest_job", "origin")
+    downgrade(empty_db_url, "0012")
+    assert _state(empty_db_url) == ALL and _column(empty_db_url, "document_version", "publisher")
+    assert not _column(empty_db_url, "ingest_job", "not_before") and not _column(empty_db_url, "ingest_job", "origin")
+    with psycopg.connect(empty_db_url) as c:                    # 来源的检查约束随列一起去掉
+        assert c.execute("SELECT count(*) FROM pg_constraint WHERE conname = 'ingest_job_origin_known'").fetchone()[0] == 0
     downgrade(empty_db_url, "0011")
     assert _state(empty_db_url) == ALL and not _column(empty_db_url, "document_version", "publisher")
     downgrade(empty_db_url, "0010")

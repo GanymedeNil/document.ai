@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import time as _time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -121,6 +122,11 @@ def run(conn: psycopg.Connection, fs: FactSet, corpus: Path, manifest: dict, *, 
     lc = Lifecycle(conn, clock)
     review = Review(conn, lc, store)
     worker = Worker(ing, Indexer(conn, index, embedder, build_id))
+
+    def wait(seconds: float) -> None:           # 有任务在退避：真实地等（模型服务的过载是真实的），回放时钟同步前进
+        _time.sleep(seconds)
+        clock.now += timedelta(seconds=seconds)
+
     retriever = Retriever(conn, index, embedder, reranker, top_m=top_m)
     entry = {m["version_id"]: m for m in manifest["versions"]}
 
@@ -154,7 +160,7 @@ def run(conn: psycopg.Connection, fs: FactSet, corpus: Path, manifest: dict, *, 
         else:
             results.append(ask(conn, fs, obj, retriever, ids, tenant_id) if ask else
                            _ask(conn, fs, obj, retriever, ids, tenant_id, vision=figure_reader is not None))
-        worker.run_until_idle()
+        worker.run_until_settled(sleep=wait)
     diffs = reconcile(conn, index, tenant_id)
     return Report(results, sum(len(v) for v in diffs.values()), embedder.name, top_m)
 

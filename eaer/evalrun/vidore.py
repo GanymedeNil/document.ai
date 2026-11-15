@@ -67,12 +67,12 @@ def ingest(conn, store, index, embedder, pdfs: list[Path], *, figure_reader=None
     for p in pdfs:
         ing.receive(tenant, p.read_bytes(), p.name, acl_policy_id=acl, source_ref=p.stem)
     log(f"接收 {len(pdfs)} 份，开始解析")
-    worker.run_until_idle()
+    worker.run_until_settled()
     tasks = conn.execute("SELECT id FROM review_task WHERE status = 'open'").fetchall()
     Review(conn, lc, store).decide(tenant, [{"task_id": str(t["id"]), "decision": "approve",
                                              "corrections": {"doc_type": "record"}} for t in tasks], "vd")
     log("审核通过，开始写入索引与深度解析（读取图表）")
-    worker.run_until_idle()
+    worker.run_until_settled()
     return {r["modality"]: r["n"] for r in conn.execute("SELECT modality, count(*) AS n FROM evidence GROUP BY modality")}
 
 

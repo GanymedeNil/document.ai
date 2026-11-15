@@ -172,6 +172,10 @@ def test_failure_is_retried_without_duplicates(env, monkeypatch):
     assert env.worker.run_once()
     job = env.conn.execute("SELECT * FROM ingest_job WHERE stage = 'parse_text'").fetchone()
     assert (job["status"], job["attempts"]) == ("queued", 1) and "模拟故障" in job["last_error"]
+    assert job["not_before"] - job["updated_at"] == timedelta(seconds=30)      # 退避 30 秒再试
+    env.worker.run_until_idle()                       # 没到时间不再领取它（已排好的下一阶段照常执行）
+    assert env.conn.execute("SELECT attempts FROM ingest_job WHERE stage = 'parse_text'").fetchone()["attempts"] == 1
+    env.clock.now += timedelta(seconds=30)
     env.worker.run_until_idle()
     assert _evidence(env.conn, r.version_id) == 2     # 两段正文（标题只进章节路径），没有重复
     assert {j["stage"]: j["status"] for j in env.conn.execute("SELECT stage, status FROM ingest_job")} == \
@@ -200,11 +204,21 @@ def test_stages_are_idempotent(env):
 
 
 def test_job_fails_after_max_attempts(env, monkeypatch):
+    """退避 30 秒、2 分钟、10 分钟，第 4 次仍失败标为 failed；之后时间再过去也不再领取。"""
     env.ing.receive("t1", html("报销规定", "正文。"), "r.html", acl_policy_id=env.acl)
     monkeypatch.setitem(env.worker.handlers, "parse_text", lambda vid: 1 / 0)
-    env.worker.run_until_idle()
-    job = env.conn.execute("SELECT status, attempts FROM ingest_job WHERE stage = 'parse_text'").fetchone()
-    assert (job["status"], job["attempts"]) == ("failed", 3)
+    waits = []
+    for _ in range(4):
+        assert env.worker.run_until_idle() == 1
+        job = env.conn.execute("SELECT status, attempts, not_before, updated_at FROM ingest_job "
+                               "WHERE stage = 'parse_text'").fetchone()
+        if job["not_before"] is not None:
+            waits.append(job["not_before"] - job["updated_at"])
+            env.clock.now = job["not_before"]
+    assert waits == [timedelta(seconds=30), timedelta(minutes=2), timedelta(minutes=10)]
+    assert (job["status"], job["attempts"], job["not_before"]) == ("failed", 4, None)
+    env.clock.now += timedelta(days=1)
+    assert env.worker.run_until_idle() == 0
 
 
 def test_deleted_version_leaves_no_jobs(env):
