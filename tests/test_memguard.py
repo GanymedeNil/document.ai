@@ -4,7 +4,7 @@
 - 大小的写法；本进程的物理内存占用读得到；
 - 加载前按缓存里的权重文件估算（按加载精度折算、加运行余量），本进程已占用加上估算超过预算就不加载；
 - 看门狗：合计超过上限时从占用最大的进程开始终止，只终止到回到上限以内；接近上限只记警告；--dry-run 只记录；
-  能找到命令行含 modelserver 的进程、跳过自己；
+  能找到命令行含 modelserver 的进程、跳过自己；读不到命令行的进程跳过，一轮检查出错时记下、下一轮照常查，不退出；
 - 模型服务：内存不足时这一次请求返回 503，进程照常服务下一个请求；/health 报告内存占用。
 """
 from __future__ import annotations
@@ -87,6 +87,63 @@ def test_watchdog_finds_model_server_processes():
     finally:
         child.kill()
         child.wait()
+
+
+class FakeProc:
+    def __init__(self, pid, cmd):
+        self.pid, self._cmd = pid, cmd
+
+    def cmdline(self):
+        if isinstance(self._cmd, BaseException):
+            raise self._cmd
+        return self._cmd
+
+
+def test_watchdog_skips_processes_it_cannot_read(monkeypatch):
+    """读不到命令行的进程跳过，不让看门狗退出。2026-11-15：macOS 上 psutil 读取正在退出的进程抛 SystemError，
+    看门狗因此退出，之后就没人兜底了。"""
+    import psutil
+
+    procs = [FakeProc(101, SystemError("<built-in function proc_cmdline> returned a result with an exception set")),
+             FakeProc(102, psutil.NoSuchProcess(102)), FakeProc(103, psutil.AccessDenied(103)),
+             FakeProc(104, ["python", "-m", "modelserver", "--port", "8100"]), FakeProc(105, ["bash"])]
+    monkeypatch.setattr(psutil, "process_iter", lambda *a, **k: iter(procs))
+    monkeypatch.setattr("modelserver.watchdog.footprint", lambda pid: GiB)
+    assert scan(["modelserver"], me=1) == [Proc(104, "python -m modelserver --port 8100", GiB)]
+
+
+def test_watchdog_loop_survives_a_failed_round(monkeypatch, tmp_path):
+    """一轮检查出了意外的错误：记一条、下一轮照常检查，而不是退出。"""
+    import modelserver.watchdog as wd
+
+    rounds = iter([RuntimeError("读取进程表失败"), [Proc(7, "modelserver", 30 * GiB)]])
+
+    def fake_scan(patterns):
+        r = next(rounds)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    class Stop(Exception):
+        pass
+
+    sleeps = []
+
+    def fake_sleep(s):
+        sleeps.append(s)
+        if len(sleeps) == 2:
+            raise Stop
+
+    killed = []
+    monkeypatch.setattr(wd, "scan", fake_scan)
+    monkeypatch.setattr(wd, "terminate", killed.append)
+    monkeypatch.setattr(wd.time, "sleep", fake_sleep)
+    log = tmp_path / "wd.log"
+    with pytest.raises(Stop):
+        wd.main(["--limit", "24G", "--log", str(log)])
+    text = log.read_text(encoding="utf-8")
+    assert "这一轮检查失败" in text and "RuntimeError: 读取进程表失败" in text
+    assert "超过上限" in text and killed == [7]                           # 第二轮照常检查、照常终止
 
 
 class Boom:

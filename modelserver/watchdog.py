@@ -47,18 +47,29 @@ def gpu_memory_by_pid() -> dict[int, int]:
     return usage
 
 
+def cmdline(p) -> str:
+    """进程的命令行；读不到时为空串（不计入）。除了已退出、无权限，macOS 上读取刚退出或正在退出的进程时 psutil 会抛
+    SystemError（2026-11-15 看门狗因此退出过一次），一并当作读不到。"""
+    import psutil
+
+    try:
+        return " ".join(p.cmdline() or [])
+    except (psutil.Error, SystemError, OSError):
+        return ""
+
+
 def scan(patterns: list[str], me: int | None = None) -> list[Proc]:
     import psutil
 
     me = os.getpid() if me is None else me
     gpu = gpu_memory_by_pid() if sys.platform.startswith("linux") else {}
     out = []
-    for p in psutil.process_iter(["pid", "cmdline"]):
-        cmd = " ".join(p.info.get("cmdline") or [])
-        if p.info["pid"] == me or "modelserver.watchdog" in cmd or not any(s in cmd for s in patterns):
+    for p in psutil.process_iter():
+        cmd = cmdline(p)
+        if p.pid == me or "modelserver.watchdog" in cmd or not any(s in cmd for s in patterns):
             continue
-        used = gpu.get(p.info["pid"]) if gpu else footprint(p.info["pid"])
-        out.append(Proc(p.info["pid"], cmd[:120], used or 0))
+        used = gpu.get(p.pid) if gpu else footprint(p.pid)
+        out.append(Proc(p.pid, cmd[:120], used or 0))
     return out
 
 
@@ -129,7 +140,14 @@ def main(argv: list[str] | None = None) -> int:
     log(f"看门狗启动：上限 {fmt(limit)}，计入命令行含 {patterns} 的进程，每 {args.interval:g} 秒检查"
         + ("（只记录）" if args.dry_run else ""))
     while True:
-        procs = scan(patterns)
+        try:
+            procs = scan(patterns)
+        except Exception as e:  # noqa: BLE001 — 看门狗不能因一次读取失败退出，否则之后就没人兜底了；下一轮再查
+            log(f"这一轮检查失败，{args.interval:g} 秒后重试：{type(e).__name__}: {e}")
+            if args.once:
+                return 1
+            time.sleep(args.interval)
+            continue
         if args.once:
             log(f"当前合计 {fmt(sum(x.bytes for x in procs))}：" + ("；".join(f"{x.pid} {fmt(x.bytes)} {x.name}" for x in procs)
                                                               or "没有匹配的进程"))
