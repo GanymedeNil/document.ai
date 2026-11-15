@@ -68,12 +68,12 @@ def ingest(conn, store, index, embedder, corpus: list[dict], tenant: str = "mh",
         r = ing.receive(tenant, article_html(a), f"article-{k:04d}.html", acl_policy_id=acl, source_ref=f"mh-{k:04d}",
                         title=a["title"], doc_date=date.fromisoformat(a["published_at"][:10]), publisher=a["source"])
         docs[a["title"]] = str(r.document_id)
-    worker.run_until_idle()
+    worker.run_until_settled()
     tasks = conn.execute("SELECT id FROM review_task WHERE status = 'open'").fetchall()
     Review(conn, lc, store).decide(tenant, [{"task_id": str(t["id"]), "decision": "approve",
                                              "corrections": {"doc_type": "record"}} for t in tasks], "mh")
     log(f"入库：{len(corpus)} 篇，开始写入索引")
-    worker.run_until_idle()
+    worker.run_until_settled()
     return docs
 
 

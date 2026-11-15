@@ -8,6 +8,10 @@
     python -m eaer.ingestion drop-retired    删除别名不再指向、且超过 24 小时的旧索引（应定时运行）
     python -m eaer.ingestion purge           立即做一次 Trace 清理（后台任务进程每 EAER_PURGE_SECONDS 秒自动做一次，默认 3600）
     python -m eaer.ingestion stats           入库队列与索引更新延迟（JSON，供监控采集；--since-minutes 默认 60）
+    python -m eaer.ingestion reconcile       按租户对账：数据库中可搜索的版本与索引中的版本之差（JSON，有差异时退出码 1；
+                                             --tenant 只查给定的租户）
+    python -m eaer.ingestion reconcile --repair   对账并补任务：缺的、多的版本补排 index_update，由后台任务进程执行
+                                             （后台任务进程每 EAER_RECONCILE_SECONDS 秒自动做一次，默认 3600；见 repair.py）
 
 环境变量：EAER_DATABASE_URL、EAER_STORAGE_DIR（同接口进程）；EAER_POLL_SECONDS（空闲轮询间隔，默认 2）；
 EAER_OPENSEARCH_URL、EAER_INDEX_ALIAS（默认 eaer）、EAER_TEXT_ANALYZER（standard / cjk / smartcn / icu_analyzer /
@@ -16,6 +20,7 @@ jieba，默认 standard）；Embedding 服务 EAER_EMBED_*（见 eaer/adapters/o
 也不能用测试替身向量化。
 转入后台、或执行者中断的提问（开发文档 8.5）也由本进程接着执行，需要与接口进程相同的查询配置与 EAER_TOKENS_FILE
 （见 eaer/runtime.py）；不开放提问时设置 EAER_DISABLE_QUERY=1。
+任务失败后按 30 秒、2 分钟、10 分钟退避再试，第 4 次仍失败标为 failed（pipeline.Worker）；索引任务永久失败留下的差异由对账补写（repair.py）。
 EAER_TRACE_EXPORTER none（默认）/ console / otlp：后台任务与接着执行的提问记 trace（13.3，见 eaer/observability.py）。
 图片读取（6.2 第 6 阶段）：生成服务声明了看图能力（EAER_GEN_VISION=1）时，深度解析把文档里的图片交给它转写成
 证据（eaer/ingestion/figures.py）；没有声明时跳过图片。
@@ -23,6 +28,8 @@ EAER_TRACE_EXPORTER none（默认）/ console / otlp：后台任务与接着执�
 from __future__ import annotations
 
 import argparse
+import json
+import logging
 import os
 import sys
 import time
@@ -35,6 +42,8 @@ from eaer.runtime import ConfigError, query_runner, segmenter_for
 from eaer.storage import LocalFileStore
 
 __all__ = ["ConfigError", "build_worker", "index_parts", "main", "segmenter_for"]
+
+log = logging.getLogger("eaer.ingestion")
 
 
 def index_parts(env: dict[str, str]):
@@ -83,11 +92,13 @@ def build_worker(conn: psycopg.Connection, store, env: dict[str, str], *, with_i
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="eaer.ingestion")
     p.add_argument("command", nargs="?", default="worker", choices=["worker", "rebuild", "ensure-index", "drop-retired",
-                                                                   "purge", "stats", "requeue-deep"])
+                                                                   "purge", "stats", "requeue-deep", "reconcile"])
     p.add_argument("--no-index", action="store_true", help="只做解析与抽取，不处理索引任务")
     p.add_argument("--build-id", help="rebuild：新索引的构建编号")
     p.add_argument("--retain-hours", type=float, default=24.0, help="drop-retired：旧索引保留时长")
     p.add_argument("--since-minutes", type=float, default=60.0, help="stats：统计最近多少分钟内排队的索引任务")
+    p.add_argument("--repair", action="store_true", help="reconcile：为有差异的版本补排索引任务")
+    p.add_argument("--tenant", action="append", help="reconcile：只对这个租户（可重复）；默认全部租户")
     args = p.parse_args(argv)
     env = dict(os.environ)
     try:
@@ -103,15 +114,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         conn = psycopg.connect(env["EAER_DATABASE_URL"], autocommit=True, row_factory=dict_row)
         if args.command == "stats":
-            import json
             from datetime import datetime, timedelta, timezone
 
-            from eaer.ingestion.stats import TARGET_P95_SECONDS, index_latency, queue_stats
+            from eaer.ingestion.stats import TARGET_P95_SECONDS, index_latency, queue_stats, repair_stats
             now = datetime.now(timezone.utc)
-            lat = index_latency(conn, now - timedelta(minutes=args.since_minutes))
-            print(json.dumps({"queue": queue_stats(conn, now), "index_latency": lat,
-                              "index_latency_target_p95": TARGET_P95_SECONDS}, ensure_ascii=False, indent=2))
+            since = now - timedelta(minutes=args.since_minutes)
+            print(json.dumps({"queue": queue_stats(conn, now), "index_latency": index_latency(conn, since),
+                              "index_latency_target_p95": TARGET_P95_SECONDS,
+                              "index_repair": repair_stats(conn, since)}, ensure_ascii=False, indent=2))
             return 0
+        if args.command == "reconcile":
+            return reconcile_command(conn, env, repair=args.repair, tenants=args.tenant)
         if args.command == "purge":
             from datetime import datetime, timezone
 
@@ -155,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             print(rebuild(conn, client, alias, build_id=args.build_id, embedder=embedder, analyzer=analyzer,
                           segmenter=seg))
             return 0
+        logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s：%(message)s")
         from eaer.observability import TraceConfigError, configure
         try:
             configure(env, "eaer-worker")
@@ -168,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     poll = float(env.get("EAER_POLL_SECONDS", "2"))
     purge_every, last_purge = float(env.get("EAER_PURGE_SECONDS", "3600")), 0.0
+    reconcile_every, last_reconcile = float(env.get("EAER_RECONCILE_SECONDS", "3600")), 0.0
     while True:
         done = worker.run_until_idle(limit=1000) + (runner.run_pending(limit=10) if runner else 0)
         if time.monotonic() - last_purge >= purge_every:          # Trace 清理（10.2、AC-10-10）
@@ -176,8 +191,46 @@ def main(argv: list[str] | None = None) -> int:
             from eaer.orchestrator.tasks import purge
             purge(conn, datetime.now(timezone.utc))
             last_purge = time.monotonic()
+        if worker.indexer is not None and time.monotonic() - last_reconcile >= reconcile_every:   # 对账补写（5.4）
+            periodic_repair(conn, worker.indexer.index)
+            last_reconcile = time.monotonic()
         if done == 0:
             time.sleep(poll)
+
+
+def periodic_repair(conn: psycopg.Connection, index) -> list | None:
+    """后台任务进程定期的对账补写。对账本身出错（如 OpenSearch 暂时不可用）只记日志，不影响任务处理，下一轮再做。"""
+    from eaer.ingestion.repair import repair_all
+    try:
+        return repair_all(conn, index)
+    except Exception as e:  # noqa: BLE001
+        log.error("索引对账失败，下一轮再做：%s: %s", type(e).__name__, e)
+        return None
+
+
+def reconcile_command(conn: psycopg.Connection, env: dict[str, str], *, repair: bool, tenants: list[str] | None) -> int:
+    """reconcile 命令：只读对账，或 --repair 时补任务（补的任务由后台任务进程执行）。只需要 OpenSearch，不需要模型服务。"""
+    from eaer.retrieval.opensearch import OpenSearchIndex, connect
+
+    if not env.get("EAER_OPENSEARCH_URL"):
+        raise ConfigError("未设置 EAER_OPENSEARCH_URL")
+    index = OpenSearchIndex(connect(env["EAER_OPENSEARCH_URL"]), alias=env.get("EAER_INDEX_ALIAS", "eaer"))
+    if not index.current():
+        raise ConfigError(f"别名 {index.alias} 不存在：先运行 python -m eaer.ingestion ensure-index")
+    if tenants is None:
+        tenants = [r["tenant_id"] for r in conn.execute("SELECT tenant_id FROM tenant_config ORDER BY tenant_id")]
+    if not repair:
+        from eaer.retrieval.reconcile import reconcile
+        out = {t: {k: sorted(v) for k, v in reconcile(conn, index, t).items()} for t in tenants}
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 1 if any(v for d in out.values() for v in d.values()) else 0
+    from eaer.ingestion.repair import repair_all
+    results = repair_all(conn, index, tenants=tenants)
+    if results is None:
+        print("另一个进程正在做索引对账，稍后再试", file=sys.stderr)
+        return 1
+    print(json.dumps({r.tenant_id: r.to_json() for r in results}, ensure_ascii=False, indent=2))
+    return 0
 
 
 if __name__ == "__main__":

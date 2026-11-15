@@ -4,7 +4,8 @@
 
 - 提问：各模式的请求量与 P95 耗时、模式升级比例（mode_path 多于一段）、拒答比例、失败数、验证结论分布
   （回答里各结论的 supported / unverified / unsupported 数）——取自 query_log，按提问时间统计最近一段；
-- 入库：各阶段排队中、执行中、失败的任务数，最早排队任务的等待时间，索引更新延迟（eaer/ingestion/stats.py）；
+- 入库：各阶段排队中、执行中、失败、失败后退避中的任务数，最早排队任务的等待时间，索引更新延迟（eaer/ingestion/stats.py）；
+- 对账补写（index_repair）：后台任务进程对账后补排的索引任务，最近一段补了多少、完成与失败各多少（eaer/ingestion/repair.py）；
 - 索引对账差异数（AC-5-2）：给出 --opensearch 时按租户对账，数据库中可搜索的版本与索引中的版本之差。
 只输出数量与比例，不含问题、回答等原文（10.2）。环境变量 EAER_DATABASE_URL。
 """
@@ -50,11 +51,12 @@ def query_metrics(conn: psycopg.Connection, since: datetime) -> dict:
 
 
 def collect(conn: psycopg.Connection, now: datetime, since: datetime, *, index=None) -> dict:
-    from eaer.ingestion.stats import TARGET_P95_SECONDS, index_latency, queue_stats
+    from eaer.ingestion.stats import TARGET_P95_SECONDS, index_latency, queue_stats, repair_stats
 
     out = {"window": {"since": since.isoformat(), "until": now.isoformat()},
            "queries": query_metrics(conn, since), "ingest_queue": queue_stats(conn, now),
-           "index_latency": {**index_latency(conn, since), "target_p95": TARGET_P95_SECONDS}}
+           "index_latency": {**index_latency(conn, since), "target_p95": TARGET_P95_SECONDS},
+           "index_repair": repair_stats(conn, since)}
     if index is not None:
         from eaer.retrieval.reconcile import reconcile
         tenants = [r["tenant_id"] for r in conn.execute("SELECT tenant_id FROM tenant_config ORDER BY tenant_id")]

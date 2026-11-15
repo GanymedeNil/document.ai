@@ -49,7 +49,8 @@ def test_latency_statistics(conn):
 
 def test_empty_queue(conn):
     assert index_latency(conn) == {"n": 0, "p50": None, "p95": None, "max": None, "by_stage": {}}
-    assert queue_stats(conn, T) == {"queued": {}, "running": {}, "failed": {}, "oldest_queued_seconds": {}}
+    assert queue_stats(conn, T) == {"queued": {}, "running": {}, "failed": {}, "waiting_retry": {},
+                                    "oldest_queued_seconds": {}}
 
 
 def test_index_jobs_are_claimed_first(conn, tmp_path):

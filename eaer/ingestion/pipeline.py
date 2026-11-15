@@ -1,12 +1,13 @@
 """入库流水线第 1–3 阶段（开发文档 6.2）。
 
 接收在请求内同步完成；文本解析、分类与抽取作为 ingest_job 由后台进程执行：
-用 SELECT … FOR UPDATE SKIP LOCKED 领取任务，失败重试，进程中断后租约到期即可被重新领取。
+用 SELECT … FOR UPDATE SKIP LOCKED 领取任务，失败后退避重试（Worker.backoff），进程中断后租约到期即可被重新领取。
 每个阶段都可重复执行：证据 id 稳定，重复写入不会产生重复证据；待确认值整体替换。
 """
 from __future__ import annotations
 
 import hashlib
+import time
 import traceback
 import uuid
 from dataclasses import dataclass
@@ -330,19 +331,39 @@ def _locator(b, **extra) -> dict:
     return loc
 
 
+BACKOFF = (timedelta(seconds=30), timedelta(minutes=2), timedelta(minutes=10))
+"""任务失败后再次领取前的等待：第 1 次失败后 30 秒，第 2 次 2 分钟，第 3 次 10 分钟（迁移 0013）。模型客户端在一次尝试
+里已有秒级的重试（eaer/adapters/online.py），这里应对的是更长的过载：本地 Embedding 服务在内存预算下连续几十秒返回
+503 时，立即重排会在几秒内用完全部尝试次数。不加随机抖动：任务由后台线程逐个执行，到期的任务再多，同时发出的请求
+也不超过线程数。"""
+
+
 class Worker:
-    """后台任务进程：领取本进程能处理的阶段的任务并执行。"""
+    """后台任务进程：领取本进程能处理的阶段的任务并执行。
+
+    任务出错后按 backoff 退避再排队（not_before），领取时跳过还没到时间的任务，其他任务照常按优先级领取；
+    尝试次数默认是退避次数加 1（4 次，最后一次失败约在首次失败 12.5 分钟后），用完标为 failed。
+    索引任务永久失败后由对账补写（eaer/ingestion/repair.py）。
+    """
 
     def __init__(self, ingestion: Ingestion, indexer=None, lease: timedelta = timedelta(minutes=5),
-                 max_attempts: int = 3):
+                 max_attempts: int | None = None, backoff: tuple[timedelta, ...] = BACKOFF):
         self.ing = ingestion
         self.conn = ingestion.conn
         self.lease = lease
-        self.max_attempts = max_attempts
+        self.backoff = tuple(backoff)
+        self.max_attempts = len(self.backoff) + 1 if max_attempts is None else max_attempts
+        self.indexer = indexer
         self.handlers = {"parse_text": ingestion.parse_text, "classify_extract": ingestion.classify_extract,
                          "parse_deep": ingestion.parse_deep}
         if indexer is not None:
             self.handlers |= {"publish_index": indexer.sync_version, "index_update": indexer.sync_version}
+
+    def delay_after(self, attempts: int) -> timedelta:
+        """第 attempts 次尝试失败后的等待；退避表用完后沿用最后一档。"""
+        if not self.backoff:
+            return timedelta(0)
+        return self.backoff[min(attempts, len(self.backoff)) - 1]
 
     def claim(self) -> dict | None:
         now = self.ing.clock()
@@ -352,12 +373,15 @@ class Worker:
             "last_error = coalesce(last_error, '') || '租约到期且已达最大重试次数' "
             "WHERE stage = ANY(%s) AND status = 'running' AND locked_until < %s AND attempts >= %s",
             (now, list(self.handlers), now, self.max_attempts))
+        # 退避中的任务（not_before 未到）不领取，也不占位：子查询直接越过它，取下一个可领取的
         return self.conn.execute(
-            "UPDATE ingest_job SET status = 'running', locked_until = %s, attempts = attempts + 1, updated_at = %s "
+            "UPDATE ingest_job SET status = 'running', locked_until = %s, attempts = attempts + 1, updated_at = %s, "
+            "  not_before = NULL "
             "WHERE id = (SELECT id FROM ingest_job WHERE stage = ANY(%s) AND attempts < %s AND "
-            "  (status = 'queued' OR (status = 'running' AND locked_until < %s)) "
+            "  ((status = 'queued' AND (not_before IS NULL OR not_before <= %s)) "
+            "   OR (status = 'running' AND locked_until < %s)) "
             "  ORDER BY priority, created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *",
-            (now + self.lease, now, list(self.handlers), self.max_attempts, now)).fetchone()
+            (now + self.lease, now, list(self.handlers), self.max_attempts, now, now)).fetchone()
 
     def run_once(self) -> bool:
         job = self.claim()
@@ -368,11 +392,15 @@ class Worker:
             try:
                 self.handlers[job["stage"]](job["version_id"])
             except Exception as e:  # noqa: BLE001 — 任何错误都记入任务，交给重试
-                status = "failed" if job["attempts"] >= self.max_attempts else "queued"
+                now = self.ing.clock()
+                final = job["attempts"] >= self.max_attempts
+                status, not_before = ("failed", None) if final else ("queued", now + self.delay_after(job["attempts"]))
                 self.conn.execute(
-                    "UPDATE ingest_job SET status = %s, last_error = %s, locked_until = NULL, updated_at = %s WHERE id = %s",
-                    (status, f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}", self.ing.clock(), job["id"]))
-                set_attrs(sp, {"eaer.job_status": status, "error.type": type(e).__name__})
+                    "UPDATE ingest_job SET status = %s, not_before = %s, last_error = %s, locked_until = NULL, "
+                    "updated_at = %s WHERE id = %s",
+                    (status, not_before, f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}", now, job["id"]))
+                set_attrs(sp, {"eaer.job_status": status, "error.type": type(e).__name__,
+                               **({"eaer.retry_at": not_before.isoformat()} if not_before else {})})
                 return True
             self.conn.execute("UPDATE ingest_job SET status = 'done', locked_until = NULL, updated_at = %s WHERE id = %s",
                               (self.ing.clock(), job["id"]))
@@ -380,7 +408,27 @@ class Worker:
         return True
 
     def run_until_idle(self, limit: int = 100_000) -> int:
+        """执行到没有可领取的任务为止；退避中的任务留在队列里，由之后的轮询领取（后台任务进程）。"""
         n = 0
         while n < limit and self.run_once():
             n += 1
         return n
+
+    def next_retry_at(self) -> datetime | None:
+        """本进程能处理的阶段里，退避中的任务最早什么时候到期；没有则为 None。"""
+        return self.conn.execute(
+            "SELECT min(not_before) AS t FROM ingest_job WHERE stage = ANY(%s) AND status = 'queued' "
+            "AND attempts < %s AND not_before > %s",
+            (list(self.handlers), self.max_attempts, self.ing.clock())).fetchone()["t"]
+
+    def run_until_settled(self, sleep: Callable[[float], None] = time.sleep) -> int:
+        """执行到本进程能处理的任务都结束（完成或失败）为止：退避中的任务等到期再做。供评测运行器与一次性的工具用——
+        它们入库后紧接着就要检索，用 run_until_idle 会把正在退避的任务留下、结束时随评测库一起删掉。
+        别的进程正在执行的任务不等。"""
+        n = 0
+        while True:
+            n += self.run_until_idle()
+            due = self.next_retry_at()
+            if due is None:
+                return n
+            sleep(max((due - self.ing.clock()).total_seconds(), 0.0) + 0.05)

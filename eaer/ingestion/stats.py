@@ -37,13 +37,27 @@ def index_latency(conn: psycopg.Connection, since: datetime | None = None, *,
 
 
 def queue_stats(conn: psycopg.Connection, now: datetime) -> dict:
-    """入库队列：各阶段排队中、执行中的数量，最早一个排队任务已等待的秒数，失败数（13.3）。"""
+    """入库队列：各阶段排队中、执行中的数量，最早一个排队任务已等待的秒数，失败数（13.3）；
+    waiting_retry 是排队中的任务里失败后正在退避、还没到再次领取时间的（迁移 0013），已计入 queued。"""
     rows = conn.execute(
-        "SELECT stage, status, count(*) AS n, min(created_at) AS oldest FROM ingest_job "
-        "WHERE status <> 'done' GROUP BY stage, status ORDER BY stage, status").fetchall()
-    out: dict = {"queued": {}, "running": {}, "failed": {}, "oldest_queued_seconds": {}}
+        "SELECT stage, status, count(*) AS n, min(created_at) AS oldest, "
+        "  count(*) FILTER (WHERE not_before > %s) AS waiting FROM ingest_job "
+        "WHERE status <> 'done' GROUP BY stage, status ORDER BY stage, status", (now,)).fetchall()
+    out: dict = {"queued": {}, "running": {}, "failed": {}, "waiting_retry": {}, "oldest_queued_seconds": {}}
     for r in rows:
         out[r["status"]][r["stage"]] = r["n"]
         if r["status"] == "queued":
             out["oldest_queued_seconds"][r["stage"]] = round((now - r["oldest"]).total_seconds(), 3)
+            if r["waiting"]:
+                out["waiting_retry"][r["stage"]] = r["waiting"]
     return out
+
+
+def repair_stats(conn: psycopg.Connection, since: datetime | None = None) -> dict:
+    """对账补写的索引任务（origin = 'reconcile'，eaer/ingestion/repair.py）：since 之后补了多少、各状态多少。
+    failed 不为 0 说明有版本补写后仍写不进索引，需要人工查看任务的 last_error。"""
+    rows = conn.execute(
+        "SELECT status, count(*) AS n FROM ingest_job WHERE origin = 'reconcile' "
+        "AND (%s::timestamptz IS NULL OR created_at >= %s) GROUP BY status", (since, since)).fetchall()
+    by = {r["status"]: r["n"] for r in rows}
+    return {"enqueued": sum(by.values()), **{s: by.get(s, 0) for s in ("queued", "running", "done", "failed")}}
