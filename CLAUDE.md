@@ -14,7 +14,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
    export EAER_TEST_OPENSEARCH_URL=http://localhost:9200
    python -m pytest -q
    ```
-   2026-11-12 首次在真实环境运行（macOS + OrbStack，用 `docker-compose.dev.yml` 启动 PostgreSQL 18.6 与 OpenSearch 3.9.0，Python 3.14.5）：148 个全部通过，没有跳过和警告，没有需要修复的问题。此后 OpenSearch 改用带 smartcn、icu 插件的自定义镜像（默认分词已选定内置的 standard，插件留给对比工具与选用它们的客户），AC-5-3 的“重建期间持续查询”已有真实引擎上的用例（`tests/test_rebuild_live.py`）。CI（`.github/workflows/ci.yml`）2026-11-16 推到 GitHub 后第一次运行：test 任务 16 个失败——10 个是检查点存取器与节点共用一个数据库连接（LangGraph 在后台线程写各节点的结果，与节点里的查询同时在一个连接上发命令，本机快、碰不上；改为检查点用单独的连接，`tests/test_async.py` 有对应用例），6 个是 test 任务只装 requirements.txt、缺 PyTorch、psutil、python-pptx（这些用例缺依赖时跳过，改在 docling 任务里跑）。之后跑出的问题请如实告诉用户，修复后记入 `docs/设计变更记录.md`。
+   2026-11-12 首次在真实环境运行（macOS + OrbStack，用 `docker-compose.dev.yml` 启动 PostgreSQL 18.6 与 OpenSearch 3.9.0，Python 3.14.5）：148 个全部通过，没有跳过和警告，没有需要修复的问题。此后 OpenSearch 改用带 smartcn、icu 插件的自定义镜像（默认分词已选定内置的 standard，插件留给对比工具与选用它们的客户），AC-5-3 的“重建期间持续查询”已有真实引擎上的用例（`tests/test_rebuild_live.py`）。CI（`.github/workflows/ci.yml`）2026-11-16 推到 GitHub 后第一次运行：test 任务 16 个失败——10 个是检查点存取器与节点共用一个数据库连接（LangGraph 在后台线程写各节点的结果，与节点里的查询同时在一个连接上发命令，本机快、碰不上；改为检查点用单独的连接，`tests/test_async.py` 有对应用例），6 个是 test 任务只装 requirements.txt、缺 PyTorch、psutil、python-pptx（这些用例缺依赖时跳过，改在 docling 任务里跑）。修正后第二次运行全部通过。之后跑出的问题请如实告诉用户，修复后记入 `docs/设计变更记录.md`。
 
 ## 目录
 
@@ -71,7 +71,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 | 合成语料上通过，待真实数据 | AC-6-9（分类）、AC-7-7（时间抽取）、AC-14-2 的程序检查部分（合成集 v2 全部通过，人工抽检待做） |
 | 有试跑数字，待基线（门槛与用户一起回填 16.2） | AC-6-10（入库吞吐 `python -m eaer.evalrun.throughput`：本机七种格式等量混合每小时 3,426 页，电子版 7,656 页，扫描件与图片 1,439 页）、AC-7-8（历史时点与回溯）、8-7（Router）、8-8（拒答：MultiHop-RAG 无答案 50 个全部拒答，有答案 50 个拒答 28%（加文档日期与出处前 48%、之后 40%，再加英文比较用语与整题拒答转入 Deep 后 28%，同批重跑 30%），见下文“公开评测集”）、8-9（正确率）、8-10（延迟与成本；Fast 的 P95 未单独统计）、9-3（准入检查上误通过 0%、误拒 0%（修正证据 id 提示前 22%）；LLM-AggreFact 原样评测均衡准确率 77.7%、误通过 31.8%，调阈值无效，见下文）、14-6（图表：2026-11-14 接入 DeepSeek 看图后合成集 v2 测试集图表类 10/10，原为 0/10；ViDoRe V3 HR 子集 60 问：答对 30%、部分答对 27%、拒答 38%，见下文） |
 | 已实现，待人工核对 | AC-13-1（`Dockerfile`、`docker-compose.yml`、`docs/部署说明.md`；本机演练 121 秒启动、冒烟通过，干净机器上的人工演练待做）、AC-9-5（标定与评测数据的划分记录）、AC-13-5（可观测：自动化用例已覆盖每个节点都有 span、一次查询一条 trace（跨进程续接）、原文不进 trace；人工抽查待做） |
-| 只有逻辑或流程，未在真实环境验证 | AC-3-3（CI 已配置，未运行） |
+| 部分完成（精简版一套） | AC-3-3（两套配置各跑冒烟测试集：精简版在本机部署演练中通过，集群版尚未实现。另：CI 2026-11-16 起在 GitHub 上运行全部自动化测试，test 任务 970 通过、22 跳过，docling 任务 37 通过、1 跳过） |
 | 部分完成 | AC-5-4（分词器已选定 standard；英文召回 MultiHop-RAG Recall@10 按依据：混合检索 70.1%、加重排 76.7%；Embedding 与重排的规格：0.6B 与 Qwen3-VL-2B 已对比，见下文，待用户选定）、AC-13-6（`docs/机器规格对照表.md` 第一版：本机实测 700 页，三档为外推，待目标机器实测） |
 | 需要人工或外部资源 | AC-6-1（每种格式 20 份真实样本）、9-4（人工核对的结论集）、10-8（人工红队）、12-2（第二个线上模型）、12-4（模型账单） |
 | 未开始 | （无） |
