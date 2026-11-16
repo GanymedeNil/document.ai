@@ -7,6 +7,10 @@ __pycache__/
 /eval-output/
 .env
 .DS_Store
+.ruff_cache/
+
+# Claude Code 的本地配置与工作树（每台机器各自的启动配置、并行会话的工作树）
+.claude/
 
 # 部署配置（含密钥与令牌）
 /deploy/eaer.env
