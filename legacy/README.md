@@ -1,3 +1,5 @@
+> 这是 document.ai 2023 年的版本，保留作参考，不再维护（对应标签 `msd-demo-2023`）。现在的 document.ai 是仓库根目录的 EAER：可溯源、带时效判断的企业知识库问答，见[根目录的 README](../README.md)。
+
 # document.ai
 基于向量数据库与GPT3.5的通用本地知识库方案(A universal local knowledge base solution based on vector database and GPT3.5)
 
