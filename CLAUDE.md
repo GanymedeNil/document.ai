@@ -14,7 +14,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
    export EAER_TEST_OPENSEARCH_URL=http://localhost:9200
    python -m pytest -q
    ```
-   2026-11-12 首次在真实环境运行（macOS + OrbStack，用 `docker-compose.dev.yml` 启动 PostgreSQL 18.6 与 OpenSearch 3.9.0，Python 3.14.5）：148 个全部通过，没有跳过和警告，没有需要修复的问题。此后 OpenSearch 改用带 smartcn、icu 插件的自定义镜像（默认分词已选定内置的 standard，插件留给对比工具与选用它们的客户），AC-5-3 的“重建期间持续查询”已有真实引擎上的用例（`tests/test_rebuild_live.py`）。CI（`.github/workflows/ci.yml`）在仓库推到 GitHub 之前没有运行过。之后跑出的问题请如实告诉用户，修复后记入 `docs/设计变更记录.md`。
+   2026-11-12 首次在真实环境运行（macOS + OrbStack，用 `docker-compose.dev.yml` 启动 PostgreSQL 18.6 与 OpenSearch 3.9.0，Python 3.14.5）：148 个全部通过，没有跳过和警告，没有需要修复的问题。此后 OpenSearch 改用带 smartcn、icu 插件的自定义镜像（默认分词已选定内置的 standard，插件留给对比工具与选用它们的客户），AC-5-3 的“重建期间持续查询”已有真实引擎上的用例（`tests/test_rebuild_live.py`）。CI（`.github/workflows/ci.yml`）2026-11-16 推到 GitHub 后第一次运行：test 任务 16 个失败——10 个是检查点存取器与节点共用一个数据库连接（LangGraph 在后台线程写各节点的结果，与节点里的查询同时在一个连接上发命令，本机快、碰不上；改为检查点用单独的连接，`tests/test_async.py` 有对应用例），6 个是 test 任务只装 requirements.txt、缺 PyTorch、psutil、python-pptx（这些用例缺依赖时跳过，改在 docling 任务里跑）。之后跑出的问题请如实告诉用户，修复后记入 `docs/设计变更记录.md`。
 
 ## 目录
 

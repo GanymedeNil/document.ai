@@ -19,6 +19,7 @@ OS_URL = os.environ.get("EAER_TEST_OPENSEARCH_URL")
 
 
 def test_every_format_renders_with_the_intended_pages():
+    pytest.importorskip("pptx", reason="渲染 PPTX 要 python-pptx（requirements-docling.txt；CI 的 docling 任务跑这条）")
     doc = make_doc(3, 4, chart=True)
     assert len(doc.pages) == 4 and doc.pages[-1].lines[-1] == "本办法自2026年1月1日起施行。"
     assert doc.pages[2].table and doc.chart and any(u == "%" for *_, u in doc.chart)

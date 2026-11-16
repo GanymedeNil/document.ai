@@ -177,8 +177,15 @@ class TaskRunner:
             return outcome, r
 
     def _execute_graph(self, conn, eng, task, scope: Scope, sid: str, handoff):
+        # 检查点用单独的连接。LangGraph 即使 durability="sync" 也在后台线程里写各节点的结果（put_writes），
+        # PostgresSaver 的锁只管它自己；与节点里检索、核对用的连接共用时，两边会同时在一个连接上发命令
+        # （psycopg：another command is already in progress），慢的机器上更容易碰上。
+        with self.connect() as cp:
+            return self._execute_graph_on(conn, eng, task, scope, sid, handoff, checkpointer(cp))
+
+    def _execute_graph_on(self, conn, eng, task, scope: Scope, sid: str, handoff, saver):
         qid = task["id"]
-        graph = eng.graph(checkpointer(conn))
+        graph = eng.graph(saver)
         config = {"configurable": {"thread_id": str(qid)}}
         snap = graph.get_state(config)
         if task["cancel_requested_at"]:

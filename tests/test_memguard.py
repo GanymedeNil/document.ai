@@ -53,6 +53,7 @@ def test_estimate_from_cached_weights(tmp_path, monkeypatch):
 
 
 def test_guard_refuses_a_model_that_does_not_fit():
+    pytest.importorskip("torch", reason="模型服务的依赖在 requirements-docling.txt（CI 的 docling 任务跑这条）")
     used = footprint(os.getpid())
     g = MemoryGuard(used + 2 * GiB, "cpu")
     g.admit("small", 1 * GiB)
@@ -79,6 +80,7 @@ def test_watchdog_kills_the_largest_until_under_the_limit():
 
 
 def test_watchdog_finds_model_server_processes():
+    pytest.importorskip("psutil", reason="看门狗的依赖在 requirements-docling.txt（CI 的 docling 任务跑这条）")
     child = subprocess.Popen([sys.executable, "-c", "import time, sys; sys.argv.append('modelserver-test'); time.sleep(30)",
                               "modelserver-test"])
     try:
@@ -102,7 +104,7 @@ class FakeProc:
 def test_watchdog_skips_processes_it_cannot_read(monkeypatch):
     """读不到命令行的进程跳过，不让看门狗退出。2026-11-15：macOS 上 psutil 读取正在退出的进程抛 SystemError，
     看门狗因此退出，之后就没人兜底了。"""
-    import psutil
+    psutil = pytest.importorskip("psutil", reason="看门狗的依赖在 requirements-docling.txt（CI 的 docling 任务跑这条）")
 
     procs = [FakeProc(101, SystemError("<built-in function proc_cmdline> returned a result with an exception set")),
              FakeProc(102, psutil.NoSuchProcess(102)), FakeProc(103, psutil.AccessDenied(103)),
@@ -161,6 +163,7 @@ class Boom:
 
 
 def test_out_of_memory_is_a_503_not_a_crash():
+    pytest.importorskip("torch", reason="模型服务的依赖在 requirements-docling.txt（CI 的 docling 任务跑这条）")
     from modelserver.app import create_app
 
     assert is_out_of_memory(RuntimeError("CUDA out of memory")) and not is_out_of_memory(ValueError("x"))
@@ -173,6 +176,7 @@ def test_out_of_memory_is_a_503_not_a_crash():
 
 
 def test_batches_are_split_when_memory_runs_out():
+    pytest.importorskip("torch", reason="模型服务的依赖在 requirements-docling.txt（CI 的 docling 任务跑这条）")
     """一批内存不足时对半拆开重试，结果顺序不变；拆到单条仍不够才把内存不足抛出去。"""
     from modelserver.backends import split_on_oom
 

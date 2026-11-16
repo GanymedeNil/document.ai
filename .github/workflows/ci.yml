@@ -35,7 +35,8 @@ jobs:
           docker logs opensearch; exit 1
       - run: python -m pytest -q
 
-  # Docling 依赖较重（PyTorch 与版面模型），单独一个任务：只跑解析相关的测试
+  # Docling 依赖较重（PyTorch 与版面模型），单独一个任务：只跑解析相关的测试，以及要 PyTorch、psutil、python-pptx 的
+  # 本地模型服务（内存上限与看门狗）与入库吞吐渲染的测试——这些在 test 任务里因缺依赖而跳过
   docling:
     runs-on: ubuntu-24.04
     services:
@@ -59,4 +60,4 @@ jobs:
           path: ~/.cache/huggingface
           key: docling-models-2.143.1
       - run: pip install -r requirements-docling.txt
-      - run: python -m pytest -q tests/test_docling.py tests/test_ingestion.py tests/test_api.py
+      - run: python -m pytest -q tests/test_docling.py tests/test_ingestion.py tests/test_api.py tests/test_memguard.py tests/test_throughput.py

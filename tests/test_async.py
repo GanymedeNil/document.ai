@@ -193,6 +193,23 @@ def test_fast_queries_complete_within_the_time_limit(aq):
     assert t["status"] == "completed" and not t["background"] and t["attempts"] == 1
 
 
+def test_checkpointer_does_not_share_the_engine_connection(aq, monkeypatch):
+    """检查点与节点不共用连接：LangGraph 在后台线程里写各节点的结果（put_writes），共用时两边会同时在一个连接上
+    发命令（psycopg：another command is already in progress）。2026-11-16 首次在 CI 上运行时 10 个用例因此失败，
+    本机快、碰不上。"""
+    from eaer.orchestrator.engine import Engine
+
+    seen, real = [], Engine.graph
+
+    def graph(self, checkpointer=None):
+        seen.append((self.conn, getattr(checkpointer, "conn", None)))
+        return real(self, checkpointer)
+
+    monkeypatch.setattr(Engine, "graph", graph)
+    assert ask(aq).json()["status"] == "completed"
+    assert seen and all(cp is not None and cp is not c for c, cp in seen)
+
+
 # ---------- 取消 ----------
 
 def test_cancel_a_running_query_stops_after_the_current_step(aq):
