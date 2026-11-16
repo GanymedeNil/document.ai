@@ -21,13 +21,13 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 
 | 路径 | 内容 |
 | --- | --- |
-| `eaer/db/migrations/` | Alembic 迁移，原生 SQL。12 张业务表，另有查询任务表 `query_task`、LangGraph 的 4 张检查点表（0005，按库的表结构建、不在运行时建表）、回答缓存 `query_cache`（0006，失效由触发器完成）与准入记录 `model_admission`（0007，只追加）；0008 给审核任务加所属租户 `tenant_id`；0009 让索引任务完成时也清缓存，并加每租户的失效序号 `query_cache_epoch`（写缓存前比较，堵住先算后写的竞争）；0010 频率限制的计数 `rate_limit_counter`；0011 解析结果的暂存 `parse_cache`、`parse_cache_image`（文本解析的结果留给深度解析复用，随版本删除）；0012 版本的出处 `publisher`（数据源随文档给出，证据标注里与文档日期一起给出）；0013 后台任务的退避时刻 `not_before`（失败后按 30 秒、2 分钟、10 分钟再试）与补排来源 `origin`（对账补写的任务记 `reconcile`）；0014 提问记录保存模型自身的思考过程 `reasoning`（生成服务开启思考时，按步骤；接口与会话原样返回，不进 trace）；不变量由触发器、检查约束、部分唯一索引保证 |
+| `eaer/db/migrations/` | Alembic 迁移，原生 SQL。12 张业务表，另有查询任务表 `query_task`、LangGraph 的 4 张检查点表（0005，按库的表结构建、不在运行时建表）、回答缓存 `query_cache`（0006，失效由触发器完成）与准入记录 `model_admission`（0007，只追加）；0008 给审核任务加所属租户 `tenant_id`；0009 让索引任务完成时也清缓存，并加每租户的失效序号 `query_cache_epoch`（写缓存前比较，堵住先算后写的竞争）；0010 频率限制的计数 `rate_limit_counter`；0011 解析结果的暂存 `parse_cache`、`parse_cache_image`（文本解析的结果留给深度解析复用，随版本删除）；0012 版本的出处 `publisher`（数据源随文档给出，证据标注里与文档日期一起给出）；0013 后台任务的退避时刻 `not_before`（失败后按 30 秒、2 分钟、10 分钟再试）与补排来源 `origin`（对账补写的任务记 `reconcile`）；0014 提问记录保存模型的思考过程 `reasoning`；0015 回答方式：租户默认 `tenant_config.strict_mode`（默认宽松）与每次提问实际所用 `query_log.strict`；0014 提问记录保存模型自身的思考过程 `reasoning`（生成服务开启思考时，按步骤；接口与会话原样返回，不进 trace）；不变量由触发器、检查约束、部分唯一索引保证 |
 | `eaer/lifecycle/` | 生命周期服务（唯一能改版本状态的模块）与按系统时间的回溯查询 |
 | `eaer/ingestion/` | 入库第 1–3、6 阶段，解析器接口（原生 Word/HTML 与 Docling），抽取规则，索引任务（`indexer.py`，唯一写索引的地方），后台任务进程（也接着执行转入后台的提问；任务按阶段的优先级领取，见 `eaer/domain/jobs.py`；失败后退避重试，退避中的不挡别的任务），对账补写（`repair.py`：后台任务进程每 `EAER_RECONCILE_SECONDS` 秒、默认每小时一次，为索引缺的、多的、证据条数不对的版本补排 index_update；手动 `python -m eaer.ingestion reconcile [--repair]`），队列与索引更新延迟统计（`stats.py`，`python -m eaer.ingestion stats` 输出 JSON） |
 | `eaer/review/` | 审核服务 |
 | `eaer/retrieval/` | 检索引擎接口、OpenSearch 实现与客户端工厂、内存参考实现、应用侧分词（jieba 候选）；默认分词方式 `DEFAULT_ANALYZER = "standard"`（`opensearch.py`，`EAER_TEXT_ANALYZER` 可改，改了要重建索引）、对账、检索服务（含 Deep 用的“取版本” `versions`） |
 | `eaer/verifier/` | 验证层（第 9 节）：确定性检查 `deterministic.py`（引用核对、authorized、locator_exists、value_match、time_valid，可按版本指定目标时间）与语义检查 `semantic.py` |
-| `eaer/orchestrator/` | 查询执行（第 8 节）：时间点识别 `timeparse.py`、Router `router.py`、Fast 与共用步骤 `fast.py`、Deep 计划模板 `deep.py`、编排与 Verified `engine.py`（LangGraph 图，状态只含 JSON 值，见 `codec.py`）、异步执行 `tasks.py`（同步时限、转后台、进度、取消、租约与检查点恢复、Trace 清理 `purge`）、回答缓存 `cache.py`、准入结论与模式开关 `admission.py`、强制验证清单 `forced_verify.py`（内置规则 + 租户追加的规则，只增不减） |
+| `eaer/orchestrator/` | 查询执行（第 8 节）：时间点识别 `timeparse.py`、Router `router.py`、Fast 与共用步骤 `fast.py`、Deep 计划模板 `deep.py`、编排与 Verified `engine.py`（LangGraph 图，状态只含 JSON 值，见 `codec.py`）、异步执行 `tasks.py`（同步时限、转后台、进度、取消、租约与检查点恢复、Trace 清理 `purge`）、回答缓存 `cache.py`、准入结论与模式开关 `admission.py`、强制验证清单 `forced_verify.py`（内置规则 + 租户追加的规则，只增不减）、回答方式 `answer_policy.py`（严格模式与宽松模式，见下文“关键规则速查”） |
 | `eaer/api/` | FastAPI 对外接口（提问、会话、取消、上传、审核、归档、取消归档、证据、版本全文与原件、强制验证清单）；接口的唯一定义是 `openapi.yaml`（OpenAPI 3.1，`/openapi.json` 展示的就是它，改接口先改它，契约测试 `tests/test_contract.py`）；文档权限经 `Authorizer`，未配置或不可用时 503。接口进程与后台任务进程的公共装配在 `eaer/runtime.py` |
 | `eaer/adapters/` | 对接接口（11.3）：数据源（参考实现本地文件夹 + `_acl.yaml`）、授权（参考实现本地账号）、模型（接口、测试替身，以及线上通用客户端 `online.py`：生成、Embedding、重排分别配置，配置见该文件的文档字符串；本地开发的密钥放在未纳入版本控制的 `.env`）；`conformance.py` 是客户实现交付前必跑的一致性套件 |
 | `eaer/domain/` | 证据 id 规则、身份与授权范围（`Identity`、`Scope`）、提示注入防护（`injection.py`：证据区隔离与指令型文字识别）、后台任务优先级（`jobs.py`） |
@@ -60,6 +60,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 - **三类时间查询。** 当前生效、某天实际生效（按有效期）、截至某天系统所知（回溯：按 `approved_at` 过滤，有效期取当时记录的值）。有效期与关系只追加，所以回溯可以复现。
 - **强制验证清单。** 默认为“答案引用规范类文档，或查询带时间点、版本比较”；客户只能增加，不能缩小。
 - **验证器。** 代码做确定性检查（定位存在、数值与日期一致、目标时间有效、有权限），模型只做语义判断；拿不准的标为“未验证”。
+- **严格模式与宽松模式（2026-11-16 用户决定）。** 租户默认宽松，管理员可改（`/v1/config/answer-policy`），提问可用 `strict` 按次覆盖。两种模式下制度的规定与取值都只能出自证据。宽松另外允许：按证据里的单价与问题给的数量写出算式算合计（代码核对算术与单价来历，标未验证、写出算式）；按常识判断问题中的对象属于哪一类（单列一条，不引证据，标“常识推断”）；只覆盖一部分时先答能答的部分并写明缺什么。严格只认原文：没写明归类时逐类给出规定，要合计而只有单价时写出单价、不代算。算出的数与常识推断不做语义检查。
 - **模型。** 精简版调用线上模型；客户自部署模型经同一接口接入，用自助评测工具补测，准入检查不达标就关闭 Deep 或 Verified。
 - **评测数据。** FRAMES、MultiHop-RAG、ViDoRe V3 可对外；LLM-AggreFact 只能原样评测；HoH、VersionQA、CHaystack 只在内部开发使用；RGB、DragonBall、CRUD-RAG 只借鉴任务设计与结构，内容自行合成（法务已确认）。
 

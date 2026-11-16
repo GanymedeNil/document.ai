@@ -51,7 +51,9 @@ DEV_DOC_OPERATIONS = {
     ("POST", "/v1/config/forced-verify"),
 }
 # 设计变更记录 2026-11-16：取版本全文与下载原件（查看引用所在的整份文档、审核时阅读待审核的文档）
-ADDED_OPERATIONS = {("GET", "/v1/versions/{version_id}"), ("GET", "/v1/versions/{version_id}/original")}
+ADDED_OPERATIONS = {("GET", "/v1/versions/{version_id}"), ("GET", "/v1/versions/{version_id}/original"),
+                    # 设计变更记录 2026-11-16：租户默认的回答方式（严格或宽松，迁移 0015）
+                    ("GET", "/v1/config/answer-policy"), ("PUT", "/v1/config/answer-policy")}
 
 TOKENS = {
     "tok-ed": Identity("ed", "t1", frozenset({"editor"})),
@@ -465,6 +467,24 @@ def s_add_forced_verify(e: Env):
     expect(e.client.post(url, headers=H("tok-staff"), json={"kind": "all"}), 403, "forbidden")
 
 
+def s_get_answer_policy(e: Env):
+    url = "/v1/config/answer-policy"
+    assert expect(e.client.get(url, headers=H("tok-staff")), 200).json() == {"strict": False}     # 默认宽松
+    expect(e.client.put(url, headers=H("tok-admin"), json={"strict": True}), 200)
+    assert expect(e.client.get(url, headers=H("tok-staff")), 200).json() == {"strict": True}
+    expect(e.client.get(url), 401, "unauthenticated")
+
+
+def s_set_answer_policy(e: Env):
+    url, admin = "/v1/config/answer-policy", H("tok-admin")
+    assert expect(e.client.put(url, headers=admin, json={"strict": True}), 200).json() == {"strict": True}
+    assert expect(e.client.put(url, headers=admin, json={"strict": False}), 200).json() == {"strict": False}
+    for bad in ({}, {"strict": "yes"}, {"strict": 1}, {"strict": None}, {"strict": True, "x": 1}):
+        expect(e.client.put(url, headers=admin, json=bad), 400, "invalid_request")
+    expect(e.client.put(url, json={"strict": True}), 401, "unauthenticated")
+    expect(e.client.put(url, headers=H("tok-staff"), json={"strict": True}), 403, "forbidden")
+
+
 def _pending_version(e: Env, title: str) -> str:
     task = e.pending(html(title, f"{title}的条款。"), f"{title}.html")
     return e.conn.execute("SELECT version_id FROM review_task WHERE id = %s", (task,)).fetchone()["version_id"]
@@ -514,6 +534,7 @@ SCENARIOS = {
     "uploadDocument": s_upload, "listReviewTasks": s_list_review_tasks, "submitReviewDecisions": s_review_decisions,
     "archiveDocument": s_archive, "unarchiveDocument": s_unarchive, "getForcedVerify": s_get_forced_verify,
     "addForcedVerifyRule": s_add_forced_verify, "getVersion": s_get_version, "getVersionOriginal": s_get_version_original,
+    "getAnswerPolicy": s_get_answer_policy, "setAnswerPolicy": s_set_answer_policy,
 }
 
 
@@ -645,6 +666,8 @@ VALID_EDGES = [
                "stream": False}),
     ("query", {"question": Q, "as_of_valid": "2026-03-15", "as_of_system": "2026-11-01", "mode_hint": "deep"}),
     ("query", {"question": "问" * 2000}),
+    ("query", {"question": Q, "strict": True}),
+    ("query", {"question": Q, "strict": None}),
     ("submitReviewDecisions", {"decisions": [{"task_id": "t-1", "decision": "approve", "corrections": None}]}),
     ("submitReviewDecisions", _decision(corrections={})),
     ("submitReviewDecisions", _decision(corrections={"valid_from": None, "valid_to": None, "relations": None})),

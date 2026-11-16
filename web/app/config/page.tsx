@@ -1,5 +1,6 @@
 "use client";
 
+// 租户默认的回答方式（GET /v1/config/answer-policy 任何已认证身份可读；PUT 需要 admin 角色），提问时可按次覆盖。
 // 强制验证清单（GET /v1/config/forced-verify 任何已认证身份可读；POST 追加需要 admin 角色）。
 // 只能增加，接口不提供删除或修改；命中任一规则的提问必须走 Verified，增加后下一次提问立即生效。
 
@@ -8,7 +9,7 @@ import { CircleCheckIcon, PlusIcon, ShieldCheckIcon } from "lucide-react";
 import { call, type ApiResult } from "@/lib/api";
 import { useIdentity } from "@/lib/identity";
 import { formatTime } from "@/lib/format";
-import type { ForcedVerifyList, ForcedVerifyRule } from "@/lib/types";
+import type { AnswerPolicy, ForcedVerifyList, ForcedVerifyRule } from "@/lib/types";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -27,6 +28,42 @@ const KIND_LABEL: Record<Kind, string> = {
   doc_type: "答案引用该类文档",
   all: "全部提问",
 };
+
+function AnswerPolicyCard({ token }: { token: string | null }) {
+  const [cur, setCur] = useState<ApiResult<AnswerPolicy> | null>(null);
+  const [saved, setSaved] = useState<ApiResult<AnswerPolicy> | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => setCur(await call<AnswerPolicy>(token, "GET", "/v1/config/answer-policy")), [token]);
+  useEffect(() => { load(); setSaved(null); }, [load]);
+  const save = async (strict: boolean) => {
+    setBusy(true);
+    const r = await call<AnswerPolicy>(token, "PUT", "/v1/config/answer-policy", { json: { strict } });
+    setBusy(false);
+    setSaved(r);
+    if (r.ok) load();
+  };
+  const strict = cur?.ok ? cur.data!.strict : null;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>回答方式（租户默认）</CardTitle>
+        <CardDescription>
+          宽松：可以按文件里的单价与问题给的数量写出算式算合计、按常识判断问题中的对象属于文件里的哪一类、只找到一部分时先答能答的部分，
+          这些结论都标“未验证”。严格：只认文件原文，文件没写明对象属于哪一类时逐类给出规定。两种方式下制度的规定与取值都只能出自文件。
+          提问时可以按次改。
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-wrap items-center gap-3">
+        <ApiError result={cur} title="读取失败" />
+        {strict !== null && <span className="text-sm">当前：<b>{strict ? "严格" : "宽松"}</b></span>}
+        <Button size="sm" variant={strict === false ? "secondary" : "outline"} disabled={busy || strict === false} onClick={() => save(false)}>设为宽松</Button>
+        <Button size="sm" variant={strict === true ? "secondary" : "outline"} disabled={busy || strict === true} onClick={() => save(true)}>设为严格</Button>
+        <span className="text-xs text-muted-foreground">需要 admin 角色。</span>
+      </CardContent>
+      {saved && !saved.ok && <CardFooter><ApiError result={saved} title="设置失败" /></CardFooter>}
+    </Card>
+  );
+}
 
 export default function ConfigPage() {
   const { active, ready } = useIdentity();
@@ -54,6 +91,7 @@ export default function ConfigPage() {
 
   return (
     <div className="grid gap-4">
+      {ready && <AnswerPolicyCard token={token} />}
       <PageTitle title="强制验证清单" description="命中任一规则的提问必须走 Verified。内置规则不能关闭；租户只能追加，接口不提供删除或修改。" />
       <ApiError result={list} title="读取清单失败" />
       {list?.ok && (

@@ -24,6 +24,7 @@ from eaer.api.app import TokenAuthenticator, create_app
 from eaer.domain.identity import Identity
 from eaer.ingestion.indexer import Indexer
 from eaer.ingestion.pipeline import Ingestion, Worker
+from eaer.orchestrator.answer_policy import tenant_strict
 from eaer.orchestrator.engine import Engine
 from eaer.retrieval.embed import HashingEmbedder
 from eaer.retrieval.index import MemoryIndex
@@ -59,8 +60,9 @@ def api(db_url, tmp_path):
     conn = psycopg.connect(db_url, autocommit=True, row_factory=dict_row)
     state = {"model": Scripted(ANSWER), "authz": lambda c: LocalAuthorizer(c, ACCOUNTS)}
 
-    def engine(c, tenant):
-        return Engine(c, Retriever(c, index, emb), state["model"], LocalAuthorizer(c, ACCOUNTS), store=store)
+    def engine(c, tenant):                       # 与 eaer/runtime.py 相同：租户默认的回答方式取自 tenant_config
+        return Engine(c, Retriever(c, index, emb), state["model"], LocalAuthorizer(c, ACCOUNTS), store=store,
+                      strict_default=tenant_strict(c, tenant))
 
     app = create_app(db_url, store, TokenAuthenticator(TOKENS), lambda: NOW,
                      authorizer=lambda c: state["authz"](c), engine=engine)

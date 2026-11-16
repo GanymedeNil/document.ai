@@ -77,11 +77,11 @@ def create(conn: psycopg.Connection, *, query_id: uuid.UUID, session_id: uuid.UU
     with conn.transaction():
         conn.execute(
             "INSERT INTO query_log (id, tenant_id, session_id, user_id, asked_at, question, time_basis, mode, mode_path, "
-            "status, authz_decision, model_id, index_build_id, cost) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'running', %s, %s, %s, %s)",
+            "status, authz_decision, model_id, index_build_id, cost, strict) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'running', %s, %s, %s, %s, %s)",
             (query_id, ident.tenant_id, session_id, ident.user, asked_at, question, Jsonb(prepared["tb"]),
              prepared["mode_path"][-1], prepared["mode_path"], Jsonb(authz), model_id, index_build_id,
-             Jsonb({"router": prepared["route"]})))
+             Jsonb({"router": prepared["route"]}), prepared["request"].get("strict")))
         conn.execute(
             "INSERT INTO query_task (id, tenant_id, session_id, user_id, identity, state, status, progress, locked_by, "
             "locked_until, attempts, created_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, 'running', %s, %s, %s, 1, %s, %s)",

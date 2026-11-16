@@ -228,3 +228,6 @@ class Checked:
 
     def post(self, url: str, **kw):
         return self.request("POST", url, **kw)
+
+    def put(self, url: str, **kw):
+        return self.request("PUT", url, **kw)

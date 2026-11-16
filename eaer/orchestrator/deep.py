@@ -30,7 +30,8 @@ from datetime import date, datetime, timedelta
 from eaer.adapters.model import Message, ModelClient, Usage
 from eaer.domain.identity import Scope
 from eaer.domain.injection import DATA_RULE, escape
-from eaer.orchestrator.fast import SCHEMA as DRAFT_SCHEMA, Draft, Steps, evidence_block
+from eaer.orchestrator.fast import (ABSTAIN_RULE, HEAD_LENIENT, HEAD_STRICT, PARTIAL_LENIENT, SCHEMA as DRAFT_SCHEMA,
+                                    VALUES_LENIENT, VALUES_STRICT, Draft, Steps, evidence_block, policy_rules)
 from eaer.orchestrator.router import EN_CAUSAL, EN_COMPARE
 from eaer.orchestrator.timeparse import TimeBasis, _dates
 from eaer.retrieval.service import Hit, Retriever, VersionInfo
@@ -70,15 +71,21 @@ REPLAN_SCHEMA = {"type": "object", "required": ["queries"], "properties": {"quer
     "type": "object", "required": ["label", "query"], "properties": {
         "label": {"type": "string"}, "query": {"type": "string"}}}}}}
 
-GEN_SYSTEM = """你是企业制度问答助手，只能依据下面给出的证据回答，不得使用证据以外的知识。证据按检索步骤分组，每组注明它对应的比较对象或推理步骤。
-要求：
-1. 把回答拆成若干条结论，每条结论是一句完整的陈述，并列出它所依据的证据 id（只能用给出的 id）。
-2. 结论中出现的数值、日期、单位必须与证据原文一致，不要换算或改写数值。
-3. 把直接回答问题的那条结论标为 core=true，其余标为 core=false。
-4. {rule}
-5. 证据不足以回答时，abstain=true，claims 为空，并在 missing 中说明缺少哪类信息；不要猜测，不要提及证据之外的文件，
-   missing 里不要复述证据原文或其中的取值。
-6. """ + DATA_RULE
+def gen_system(tpl: str, strict: bool) -> str:
+    """Deep 的生成提示：与 Fast 同样按严格或宽松模式取几条要求（fast.policy_rules），另加计划模板各自的写法。"""
+    rules = [
+        "把回答拆成若干条结论，每条结论是一句完整的陈述，并列出它所依据的证据 id（只能用给出的 id）。",
+        VALUES_STRICT if strict else VALUES_LENIENT,
+        "把直接回答问题的那条结论标为 core=true，其余标为 core=false。",
+        GEN_RULE[tpl],
+        ABSTAIN_RULE + ("" if strict else PARTIAL_LENIENT),
+        *policy_rules(strict),
+        DATA_RULE,
+    ]
+    return ((HEAD_STRICT if strict else HEAD_LENIENT) + "证据按检索步骤分组，每组注明它对应的比较对象或推理步骤。\n要求：\n"
+            + "\n".join(f"{i}. {r}" for i, r in enumerate(rules, 1)))
+
+
 GEN_RULE = {
     "compare": "这是比较题。先为每个比较对象各写一条结论，写明它属于哪个对象（如“修订前（第 2 版）……”），只引用该对象分组里的证据；"
                "最后写一条差异结论（如“由 X 调整为 Y”或“两者相同”），引用双方的证据，标为 core=true。"
@@ -289,7 +296,7 @@ class DeepRunner:
 
     def run(self, scope: Scope, question: str, tb: TimeBasis, *, today: date, target: Target,
             template: str | None = None, seed: list[Hit] | None = None, seed_missing: str | None = None,
-            rounds_used: int = 0) -> DeepOutcome:
+            rounds_used: int = 0, strict: bool = False) -> DeepOutcome:
         tpl, reason = (template, "由 Fast 升级") if template else choose_template(question)
         ctx = _Ctx(scope, question, tb, today, target, rounds_used)
         if tpl == "compare":
@@ -307,7 +314,7 @@ class DeepRunner:
             if ctx.unresolved:
                 header += (("\n" if header else "") + "检索预算已用尽，以下要点仍没有找到证据：" + "；".join(ctx.unresolved) +
                            "。只回答证据能支持的部分；问题的核心无法由证据回答时 abstain=true，并在 missing 中说明缺少什么。")
-            out.draft = self._generate(ctx, tpl, groups, out.meta, header, out.hits)
+            out.draft = self._generate(ctx, tpl, groups, out.meta, header, out.hits, strict=strict)
         return out
 
     # ---------- 动作 ----------
@@ -511,15 +518,15 @@ class DeepRunner:
             blocks.append(f"【{escape(g.label)}】\n" + "\n\n".join(evidence_block(h, meta[h.version_id]) for h in hs))
         return "\n\n".join(blocks)
 
-    def _generate(self, ctx: _Ctx, tpl: str, groups: list[Group], meta: dict, header: str, hits: list[Hit]) -> Draft:
+    def _generate(self, ctx: _Ctx, tpl: str, groups: list[Group], meta: dict, header: str, hits: list[Hit], *,
+                  strict: bool = False) -> Draft:
         ev = self._evidence(groups, meta, hits)
         if not ev:
             return Draft([], True, "没有检索到相关资料", [], self._model_name(), Usage(0, 0))
         on = ctx.target.on
         user = (f"目标日期：{on.isoformat()}\n" + (f"{escape(header)}\n" if header else "") +
                 f"问题：{escape(ctx.question)}\n\n证据：\n{ev}")
-        out = self.model.generate([Message("system", GEN_SYSTEM.format(rule=GEN_RULE[tpl])), Message("user", user)],
-                                  DRAFT_SCHEMA)
+        out = self.model.generate([Message("system", gen_system(tpl, strict)), Message("user", user)], DRAFT_SCHEMA)
         p = out.parsed or {}
         return Draft(p.get("claims", []) if not p.get("abstain") else [], bool(p.get("abstain")), p.get("missing"),
                      [list(c) for c in p.get("conflicts", []) if len(c) > 1], out.model, out.usage)

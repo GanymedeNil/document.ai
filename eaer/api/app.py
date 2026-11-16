@@ -29,14 +29,15 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from psycopg.rows import dict_row
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from eaer.adapters.authorizer import Authorizer, AuthorizationError, AuthorizerUnavailable, ScopeExpired
 from eaer.domain.identity import Identity, Scope
 from eaer.ingestion.parsers import UnsupportedFormat
 from eaer.ingestion.pipeline import Ingestion
 from eaer.lifecycle.service import InvalidState, Lifecycle, utcnow
-from eaer.orchestrator import forced_verify as fv
+from eaer.orchestrator import answer_policy as policy, forced_verify as fv
+from eaer.orchestrator.fast import claim_basis
 from eaer.review.service import Review
 from eaer.storage import FileStore
 
@@ -109,7 +110,13 @@ class QueryRequest(BaseModel):
     as_of_valid: date | None = None
     as_of_system: date | None = None
     mode_hint: Literal["fast", "deep", "verified"] | None = None
+    strict: StrictBool | None = None    # 严格模式；不传时取租户默认（GET /v1/config/answer-policy）
     stream: bool = False
+
+
+class AnswerPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    strict: StrictBool
 
 
 class ForcedVerifyRule(BaseModel):
@@ -324,10 +331,11 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         sid, qid, asked = body.session_id or uuid.uuid4(), uuid.uuid4(), clock()
         model_id = getattr(getattr(eng.model, "gen", None), "model", None) or "unknown"
         build_id, ttl = eng._build_id(), float(eng.budgets["cache_ttl_seconds"])
+        strict = eng.strict_default if body.strict is None else body.strict
         # 回答缓存（10.1 第 7 步）：键含租户、授权范围哈希与索引构建编号；命中后仍按当前授权范围核对所引证据
         ck = cache.key(ident.tenant_id, scope, build_id, body.question, today=asked.date(), as_of_valid=body.as_of_valid,
                        as_of_system=body.as_of_system, mode_hint=body.mode_hint, model=model_id,
-                       deep_enabled=eng.deep_enabled, verified_enabled=eng.verified_enabled)
+                       deep_enabled=eng.deep_enabled, verified_enabled=eng.verified_enabled, strict=strict)
         # 一次提问一条 trace（13.3）：根 span 在这里，执行段（本进程或后台进程）经查询状态里的 traceparent 挂在它下面
         with span("eaer.query", **{"eaer.tenant": ident.tenant_id, "eaer.session_id": str(sid),
                                    "eaer.query_id": str(qid)}) as root:
@@ -341,7 +349,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
             else:
                 try:
                     prepared = eng.prepare(body.question, today=asked.date(), as_of_valid=body.as_of_valid,
-                                           as_of_system=body.as_of_system, mode_hint=body.mode_hint)
+                                           as_of_system=body.as_of_system, mode_hint=body.mode_hint, strict=strict)
                 except ModelCallError as e:
                     failed = QueryResult(str(sid), "failed", "fast", ["fast"], {}, {}, None, [], False, [], [], [], 0,
                                          model_id, build_id)
@@ -370,7 +378,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
             else:                                    # running（含已交给后台）或 cancelled：其余字段为空（11.2）
                 resp = {"session_id": str(sid), "status": "cancelled" if outcome == "cancelled" else "running",
                         "mode": None, "mode_path": [], "time_basis": None, "answer": None, "claims": [],
-                        "abstained": None, "notices": [], "reasoning": []}
+                        "abstained": None, "notices": [], "reasoning": [], "strict": None}
             set_attrs(root, {"eaer.cache_hit": hit is not None, "eaer.outcome": outcome})
             if result is not None:
                 trace_result(root, result)
@@ -406,7 +414,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         sid = _sid(session_id)
         rows = conn.execute(
             "SELECT l.id, l.asked_at, l.question, l.time_basis, l.mode, l.mode_path, l.status, l.answer, l.claims, "
-            "l.abstained, l.reasoning, t.progress, t.background FROM query_log l LEFT JOIN query_task t ON t.id = l.id "
+            "l.abstained, l.reasoning, l.strict, t.progress, t.background FROM query_log l LEFT JOIN query_task t ON t.id = l.id "
             "WHERE l.session_id = %s AND l.tenant_id = %s AND l.user_id = %s ORDER BY l.asked_at",
             (sid, ident.tenant_id, ident.user)).fetchall()
         if not rows or not _own_session(conn, ident, sid):
@@ -415,8 +423,9 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         for r in rows:
             item = {"query_id": str(r["id"]), **{k: r[k] for k in ("asked_at", "question", "time_basis", "mode",
                                                                      "mode_path", "status", "answer", "abstained")},
-                    "background": bool(r["background"]), "reasoning": r["reasoning"],
-                    "claims": [{k: c[k] for k in ("text", "status", "core", "citations")}
+                    "background": bool(r["background"]), "reasoning": r["reasoning"], "strict": r["strict"],
+                    "claims": [{**{k: c[k] for k in ("text", "status", "core", "citations")},
+                                "basis": claim_basis(c.get("checks") or {})}
                                for c in r["claims"] if c["status"] != "unsupported"]}
             if r["status"] == "running":
                 item["progress"] = r["progress"]
@@ -450,6 +459,15 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         except fv.ForcedVerifyError as e:
             raise ApiError(400, "invalid_request", str(e))
         return JSONResponse(jsonable_encoder(rule), status_code=201 if created else 200)
+
+    # 回答方式：严格模式或宽松模式（迁移 0015）。租户默认，提问可按次覆盖
+    @app.get("/v1/config/answer-policy")
+    def answer_policy_get(conn: Conn, ident: Anyone):
+        return {"strict": policy.tenant_strict(conn, ident.tenant_id)}
+
+    @app.put("/v1/config/answer-policy")
+    def answer_policy_put(conn: Conn, ident: Admin, body: AnswerPolicy):
+        return {"strict": policy.set_strict(conn, ident.tenant_id, body.strict, clock())}
 
     @app.get("/v1/evidence/{evidence_id}")
     def evidence(conn: Conn, authz: Authz, evidence_id: str):

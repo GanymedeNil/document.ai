@@ -34,9 +34,10 @@ def scope_hash(scope: Scope) -> str:
 
 def key(tenant_id: str, scope: Scope, build_id: str, question: str, *, today: date, as_of_valid: date | None,
         as_of_system: date | None, mode_hint: str | None, model: str, deep_enabled: bool,
-        verified_enabled: bool = True) -> str:
+        verified_enabled: bool = True, strict: bool = False) -> str:
     parts = [tenant_id, scope_hash(scope), build_id, " ".join(question.split()), today.isoformat(),
-             codec.iso(as_of_valid), codec.iso(as_of_system), mode_hint, model, deep_enabled, verified_enabled]
+             codec.iso(as_of_valid), codec.iso(as_of_system), mode_hint, model, deep_enabled, verified_enabled,
+             "strict" if strict else "lenient"]          # 两种模式回答不同；加入开关前缓存的回答也不再命中
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 

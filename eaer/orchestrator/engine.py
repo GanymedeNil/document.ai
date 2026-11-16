@@ -44,7 +44,8 @@ from eaer.domain.injection import suspicious
 from eaer.observability import call_totals, set_attrs, span, traceparent
 from eaer.orchestrator import codec
 from eaer.orchestrator.deep import DeepOutcome, DeepRunner
-from eaer.orchestrator.fast import ABSTAIN, ClaimOut, Draft, Steps, evidence_block, target_of
+from eaer.orchestrator.fast import (ABSTAIN, ClaimOut, Draft, Steps, claim_basis, derived_claim, evidence_block,
+                                    target_of)
 from eaer.orchestrator.forced_verify import Cited, must_verify
 from eaer.orchestrator.router import decide
 from eaer.orchestrator.timeparse import TimeBasis, resolve
@@ -114,6 +115,7 @@ class QueryResult:
     signals: list[str] = field(default_factory=list)   # 检索后观察到的 8.2 信号（不论是否引起转换）
     plan: dict | None = None           # Deep 的计划模板、分组、缺口与动作记录（8.4 的 plan、gaps、history）
     reasoning: list[dict] = field(default_factory=list)  # 模型自身的思考文字，按步骤 [{"step", "text"}]（迁移 0014）
+    strict: bool | None = None         # 这次用的回答方式：True 严格、False 宽松（迁移 0015）；之前的缓存与记录为空
 
     @property
     def evidence_ids(self) -> list[str]:
@@ -121,11 +123,12 @@ class QueryResult:
 
     def response(self) -> dict:
         """接口响应（11.2）。"""
-        claims = [{"text": c.text, "status": c.status, "core": c.core,
+        claims = [{"text": c.text, "status": c.status, "core": c.core, "basis": claim_basis(c.checks),
                    "citations": [asdict(x) for x in c.citations]} for c in self.claims if c.status != "unsupported"]
         return {"session_id": self.session_id, "status": self.status, "mode": self.mode, "mode_path": self.mode_path,
                 "time_basis": self.time_basis, "answer": self.answer, "claims": [] if self.abstained else claims,
-                "abstained": self.abstained, "notices": self.notices, "reasoning": self.reasoning}
+                "abstained": self.abstained, "notices": self.notices, "reasoning": self.reasoning,
+                "strict": self.strict}
 
 
 def _worst(a: str, b: str) -> str:
@@ -144,7 +147,8 @@ TIME_SCHEMA = {"type": "object", "required": ["as_of_valid"],
 class Engine:
     def __init__(self, conn: psycopg.Connection, retriever: Retriever, model: ModelClient, authorizer, *,
                  store=None, thresholds: dict | None = None, budgets: dict | None = None, deep_enabled: bool = True,
-                 verified_enabled: bool = True, closed_reasons: dict[str, str] | None = None):
+                 verified_enabled: bool = True, closed_reasons: dict[str, str] | None = None,
+                 strict_default: bool = False):
         self.conn, self.retriever, self.model, self.authorizer = conn, retriever, model, authorizer
         self.steps = Steps(conn, retriever, model, authorizer, store=store)
         self.thresholds = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
@@ -152,6 +156,7 @@ class Engine:
         self.deep_enabled = deep_enabled       # 准入检查（12.3）不达标时关闭
         self.verified_enabled = verified_enabled
         self.closed_reasons = closed_reasons or {}     # 关闭的原因，写进回答的说明（如“尚未通过准入检查”）
+        self.strict_default = strict_default   # 租户的默认回答方式（tenant_config.strict_mode）；提问可按次覆盖
         self.scope: Scope | None = None        # 本次运行的授权范围：由调用方传入，不进入状态与检查点
 
     def deep_unavailable(self) -> str | None:
@@ -197,14 +202,17 @@ class Engine:
     # ---------- 主流程 ----------
 
     def prepare(self, question: str, *, today: date, as_of_valid: date | None = None,
-                as_of_system: date | None = None, mode_hint: str | None = None) -> QueryState:
-        """第 1 步：时间点（7.5）与 Router（8.1）。结果是图的输入，也决定提问记录的入口模式。"""
+                as_of_system: date | None = None, mode_hint: str | None = None,
+                strict: bool | None = None) -> QueryState:
+        """第 1 步：时间点（7.5）与 Router（8.1）。结果是图的输入，也决定提问记录的入口模式。
+        strict：这次用严格模式还是宽松模式；None 时取租户默认。记在状态里，换进程接着执行也不变。"""
         t0 = time.monotonic()
         root = traceparent()                       # 调用方的 eaer.query；后续执行段都挂在它下面
         with span("eaer.node.prepare", **{"eaer.node": "prepare"}) as sp, collect_calls() as calls, \
                 collect_reasoning() as thoughts:
             st = self._prepare(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
                                mode_hint=mode_hint, t0=t0)
+            st["request"]["strict"] = self.strict_default if strict is None else bool(strict)
             set_attrs(sp, {"eaer.mode_path": st["mode_path"], "eaer.route": st["route"].get("mode"),
                            **call_totals(calls)})
         return {**st, "calls": codec.calls_out(calls), "traceparent": root,
@@ -239,13 +247,13 @@ class Engine:
 
     def ask(self, scope: Scope, question: str, *, today: date, as_of_valid: date | None = None,
             as_of_system: date | None = None, mode_hint: str | None = None,
-            session_id: str | None = None) -> QueryResult:
+            session_id: str | None = None, strict: bool | None = None) -> QueryResult:
         """同步跑完整次提问（不接检查点）。"""
         self.scope = scope
         sid = session_id or str(uuid.uuid4())
         with span("eaer.query", **{"eaer.tenant": scope.tenant_id, "eaer.session_id": sid}) as root:
             st = self.prepare(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
-                              mode_hint=mode_hint)
+                              mode_hint=mode_hint, strict=strict)
             r = self.result(self.graph().invoke(st), sid)
             trace_result(root, r)
         return r
@@ -260,7 +268,7 @@ class Engine:
             cost=summarize(codec.calls_in(st.get("calls"))),
             seconds=round(sum(x["seconds"] for x in st.get("steps", [])), 3), alerts=st.get("alerts", []),
             signals=st.get("signals", []) + [e for e in escalations if "Deep" in e], plan=st.get("plan"),
-            reasoning=list(st.get("reasoning", [])))
+            reasoning=list(st.get("reasoning", [])), strict=st["request"].get("strict"))
 
     # ---------- 节点 ----------
 
@@ -287,9 +295,13 @@ class Engine:
         on = tb.as_of_valid or tb.as_of_system or today
         return req["question"], today, tb, on, target_of(on, tb.as_of_system)
 
-    def _deep_out(self, d: DeepOutcome, target: Target) -> dict:
+    @staticmethod
+    def _strict(st: QueryState) -> bool:
+        return bool(st["request"].get("strict", False))
+
+    def _deep_out(self, d: DeepOutcome, target: Target, strict: bool) -> dict:
         vt = d.version_targets
-        claims = self.steps.check(self.scope, d.draft.claims, d.hits, d.meta, target, vt)
+        claims = self.steps.check(self.scope, d.draft.claims, d.hits, d.meta, target, vt, strict=strict)
         return {"hits": codec.hits_out(d.hits), "meta": codec.meta_out(d.meta), "draft": codec.draft_out(d.draft),
                 "claims": codec.claims_out(claims), "rounds": d.rounds, "plan": d.trace(),
                 "version_targets": codec.targets_out(vt), "unresolved": d.unresolved}
@@ -298,11 +310,12 @@ class Engine:
         s = self.steps
         question, today, tb, on, target = self._ctx(st)
         if st["mode_path"][0] == "deep":
-            return self._deep_out(self._deep().run(self.scope, question, tb, today=today, target=target), target)
+            return self._deep_out(self._deep().run(self.scope, question, tb, today=today, target=target,
+                                                   strict=self._strict(st)), target, self._strict(st))
         hits = s.retrieve(self.scope, question, today=today, as_of_valid=tb.as_of_valid, as_of_system=tb.as_of_system)
         meta = s.meta(hits, target.system_t)
-        draft = s.generate(question, hits, meta, on) if hits else None
-        claims = s.check(self.scope, draft.claims, hits, meta, target) if draft else []
+        draft = s.generate(question, hits, meta, on, strict=self._strict(st)) if hits else None
+        claims = s.check(self.scope, draft.claims, hits, meta, target, strict=self._strict(st)) if draft else []
         return {"hits": codec.hits_out(hits), "meta": codec.meta_out(meta), "draft": codec.draft_out(draft),
                 "claims": codec.claims_out(claims), "rounds": 1, "version_targets": {}, "unresolved": []}
 
@@ -318,8 +331,9 @@ class Engine:
             return {"escalations": st["escalations"] + ["应转入 Deep：" + "、".join(signals) + f"（{st['deep_off']}）"]}
         question, today, tb, _, target = self._ctx(st)
         d = self._deep().run(self.scope, question, tb, today=today, target=target, template="multihop", seed=hits,
-                             seed_missing=draft.missing if draft else None, rounds_used=st["rounds"])
-        return {**self._deep_out(d, target), "mode_path": st["mode_path"] + ["deep"],
+                             seed_missing=draft.missing if draft else None, rounds_used=st["rounds"],
+                             strict=self._strict(st))
+        return {**self._deep_out(d, target, self._strict(st)), "mode_path": st["mode_path"] + ["deep"],
                 "escalations": st["escalations"] + ["转入 Deep：" + "、".join(signals)]}
 
     def _verify(self, st: QueryState) -> dict:
@@ -343,7 +357,8 @@ class Engine:
             if mode_path[-1] != "verified":
                 mode_path.append("verified")
                 escalations.append("转入 Verified：" + "、".join(signals))
-            rounds += self._repair(self.scope, question, claims, hits, meta, target, today, tb, vt)
+            rounds += self._repair(self.scope, question, claims, hits, meta, target, today, tb, vt,
+                                   strict=self._strict(st))
         return {"claims": codec.claims_out(claims), "meta": codec.meta_out(meta), "forced": forced, "signals": signals,
                 "mode_path": mode_path, "escalations": escalations, "notices": notices, "rounds": rounds,
                 "alerts": alerts}
@@ -421,7 +436,8 @@ class Engine:
         if not add:
             return [], conflicted
         _, _, _, _, target = self._ctx(st)
-        out = self.steps.check(self.scope, add, hits, meta, target, codec.targets_in(st.get("version_targets")))
+        out = self.steps.check(self.scope, add, hits, meta, target, codec.targets_in(st.get("version_targets")),
+                               strict=self._strict(st))
         for c in out:
             c.core = False                         # check 在没有核心结论时会把第一条设为核心；补列的永远不是
         return [c for c in out if c.status != "unsupported"], conflicted
@@ -459,7 +475,7 @@ class Engine:
         return forced, signals
 
     def _repair(self, scope, question, claims: list[ClaimOut], hits, meta, target: Target, today, tb: TimeBasis,
-                version_targets: dict[str, Target] | None = None) -> int:
+                version_targets: dict[str, Target] | None = None, *, strict: bool = False) -> int:
         """语义检查与定向补检索；返回额外用掉的检索轮数。
         version_targets（Deep 比较不同版本）：只引用同一目标时间的版本的结论，按那个时间判断与补检索。"""
         sem = SemanticChecker(self.model, float(self.thresholds["semantic_min_confidence"]))
@@ -474,7 +490,7 @@ class Engine:
             return ts.pop() if len(ts) == 1 and None not in ts else target
 
         for c in claims:
-            if c.status == "unsupported":
+            if c.status == "unsupported" or derived_claim(c):    # 算出的数与常识推断已标未验证，原文本来就没写
                 continue
             v = sem.judge(c.text, evidence([x.evidence_id for x in c.citations]), claim_target(c).on)
             c.semantic = v.to_json()
@@ -499,7 +515,8 @@ class Engine:
             if v.status == "unsupported" or not v.supporting_ids:
                 c.semantic, c.repaired = v.to_json(), True
                 continue
-            r = checker.check(c.text, v.supporting_ids, retrieved=set(by_id), target=target, version_targets=vt)
+            r = checker.check(c.text, v.supporting_ids, retrieved=set(by_id), target=target, version_targets=vt,
+                              formulas=not strict)
             det = "supported" if r.outcome == "pass" else r.outcome
             c.status, c.semantic, c.repaired = _worst(det, v.status), v.to_json(), True
             c.citations = Steps.citations(r.evidence_ids, by_id, meta)
@@ -523,7 +540,7 @@ def log_fields(r: QueryResult, scope: Scope) -> dict:
         if not value:
             raise ValueError(f"query_log 缺少必填字段 {name}")
     return {"time_basis": Jsonb(r.time_basis), "mode": r.mode, "mode_path": r.mode_path, "status": r.status,
-            "reasoning": Jsonb(r.reasoning),
+            "reasoning": Jsonb(r.reasoning), "strict": r.strict,
             "answer": r.answer, "claims": Jsonb(claims), "evidence_ids": r.evidence_ids, "abstained": r.abstained,
             "authz_decision": Jsonb(authz), "model_id": r.model, "index_build_id": r.index_build_id,
             "cost": Jsonb({**r.cost, "retrieval_rounds": r.retrieval_rounds, "seconds": r.seconds,

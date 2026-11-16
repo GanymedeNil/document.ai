@@ -68,12 +68,14 @@ def engine_factory(env: dict[str, str], accounts: dict[str, dict], store) -> Cal
     def make(conn, tenant_id):
         from eaer.orchestrator.admission import gate
 
-        row = conn.execute("SELECT thresholds, budgets FROM tenant_config WHERE tenant_id = %s", (tenant_id,)).fetchone()
+        row = conn.execute("SELECT thresholds, budgets, strict_mode FROM tenant_config WHERE tenant_id = %s",
+                           (tenant_id,)).fetchone()
         g = gate(conn, tenant_id, model.gen.model, required=admission_required)
         retriever = Retriever(conn, OpenSearchIndex(client, alias=alias, segmenter=seg), embedder, model)
         return Engine(conn, retriever, model, LocalAuthorizer(conn, accounts), store=store,
                       thresholds=row["thresholds"] if row else None, budgets=row["budgets"] if row else None,
-                      deep_enabled=deep_enabled and g.deep, verified_enabled=g.verified, closed_reasons=g.reasons)
+                      deep_enabled=deep_enabled and g.deep, verified_enabled=g.verified, closed_reasons=g.reasons,
+                      strict_default=bool(row["strict_mode"]) if row else False)
     return make
 
 

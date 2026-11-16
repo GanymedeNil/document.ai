@@ -17,8 +17,18 @@ export interface QueryRequest {
   as_of_valid?: string | null;
   as_of_system?: string | null;
   mode_hint?: Mode | null;
+  /** 严格模式（true）或宽松模式（false）；null 或不传时取租户默认 */
+  strict?: boolean | null;
   stream?: boolean;
 }
+
+/** 租户默认的回答方式（GET/PUT /v1/config/answer-policy） */
+export interface AnswerPolicy {
+  strict: boolean;
+}
+
+/** 结论的依据：证据原文；按证据里的单价写出算式算出；宽松模式下的常识推断 */
+export type ClaimBasis = "evidence" | "calculation" | "common_knowledge";
 
 export interface TimeBasis {
   as_of_valid: string | null;
@@ -40,6 +50,7 @@ export interface Claim {
   text: string;
   status: "supported" | "unverified";
   core: boolean;
+  basis: ClaimBasis;
   citations: Citation[];
 }
 
@@ -60,6 +71,8 @@ export interface QueryResponse {
   abstained: boolean | null;
   notices: string[];
   reasoning: ReasoningStep[];
+  /** 这次用的回答方式；转入后台或取消时为 null */
+  strict: boolean | null;
 }
 
 export interface Progress {
@@ -84,6 +97,8 @@ export interface SessionItem {
   background: boolean;
   claims: Claim[];
   reasoning: ReasoningStep[];
+  /** 这次用的回答方式（true 严格、false 宽松）；加入这个开关之前的提问为 null */
+  strict: boolean | null;
   progress?: Progress;
 }
 

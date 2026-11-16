@@ -442,6 +442,44 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/InvalidState'}
 
+  /v1/config/answer-policy:
+    get:
+      operationId: getAnswerPolicy
+      tags: [配置]
+      summary: 读取租户默认的回答方式
+      description: 严格模式或宽松模式（默认宽松）；提问时可用 strict 参数按次覆盖。两种模式的区别见 QueryRequest.strict。
+      responses:
+        '200':
+          description: 租户默认的回答方式
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AnswerPolicy'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+    put:
+      operationId: setAnswerPolicy
+      tags: [配置]
+      summary: 设置租户默认的回答方式
+      description: 需要 admin 角色。下一次提问立即生效；已缓存的回答按模式分开，不会串用。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AnswerPolicy'}
+            example: {strict: true}
+      responses:
+        '200':
+          description: 设置后的回答方式
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AnswerPolicy'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/RoleRequired'}
+
   /v1/config/forced-verify:
     get:
       operationId: getForcedVerify
@@ -660,6 +698,13 @@ components:
         mode_hint:
           enum: [fast, deep, verified, null]
           description: 希望使用的模式，只能提高
+        strict:
+          type: [boolean, 'null']
+          description: |
+            这次提问用严格模式（true）还是宽松模式（false）；不传或为 null 时取租户默认（GET /v1/config/answer-policy）。
+            严格模式只认证据原文，证据没写明问题中的对象属于哪一类时逐类给出规定；宽松模式另外允许按证据里的单价写出算式
+            算合计（结果为未验证、写出算式）、按常识判断对象属于哪一类（单列一条，未验证）、证据只覆盖一部分时先答能答的部分。
+            两种模式下制度的规定与取值都只能出自证据
         stream: {type: boolean, default: false}
     TimeBasis:
       type: object
@@ -693,7 +738,7 @@ components:
     Claim:
       type: object
       description: 回答中的一条结论（9.1）。判为不支持的结论不返回
-      required: [text, status, core, citations]
+      required: [text, status, core, basis, citations]
       additionalProperties: false
       properties:
         text: {type: string}
@@ -702,6 +747,12 @@ components:
           description: supported 为通过验证；unverified 为未验证（拿不准、未经 Verified，或来源等级不足）
           enum: [supported, unverified]
         core: {type: boolean, description: 是否为回答问题所必需的核心结论}
+        basis:
+          type: string
+          description: |
+            结论的依据。evidence 为证据原文；calculation 为按证据里的单价与问题给的数量写出算式算出（代码核对了算术，
+            status 为 unverified）；common_knowledge 为宽松模式下按常识判断问题中的对象属于哪一类（不引证据，status 为 unverified）
+          enum: [evidence, calculation, common_knowledge]
         citations:
           type: array
           items: {$ref: '#/components/schemas/Citation'}
@@ -718,11 +769,12 @@ components:
     QueryAnswer:
       type: object
       description: 已完成的回答
-      required: [session_id, status, mode, mode_path, time_basis, answer, claims, abstained, notices, reasoning]
+      required: [session_id, status, mode, mode_path, time_basis, answer, claims, abstained, notices, reasoning, strict]
       additionalProperties: false
       properties:
         session_id: {type: string, format: uuid}
         status: {const: completed}
+        strict: {type: boolean, description: 这次用的回答方式：true 严格模式，false 宽松模式}
         mode: {$ref: '#/components/schemas/Mode'}
         mode_path:
           type: array
@@ -750,11 +802,12 @@ components:
     QueryPending:
       type: object
       description: 超过同步时限、已转入后台（running），或执行中被取消（cancelled）；其余字段为空
-      required: [session_id, status, mode, mode_path, time_basis, answer, claims, abstained, notices, reasoning]
+      required: [session_id, status, mode, mode_path, time_basis, answer, claims, abstained, notices, reasoning, strict]
       additionalProperties: false
       properties:
         session_id: {type: string, format: uuid}
         status: {enum: [running, cancelled]}
+        strict: {type: 'null'}
         mode: {type: 'null'}
         mode_path: {type: array, maxItems: 0}
         time_basis: {type: 'null'}
@@ -801,7 +854,7 @@ components:
     SessionItem:
       type: object
       required: [query_id, asked_at, question, time_basis, mode, mode_path, status, answer, abstained, background, claims,
-                 reasoning]
+                 reasoning, strict]
       additionalProperties: false
       properties:
         query_id: {type: string, format: uuid}
@@ -822,6 +875,9 @@ components:
         answer: {type: [string, 'null']}
         abstained: {type: boolean}
         background: {type: boolean, description: 是否曾转入后台执行}
+        strict:
+          type: [boolean, 'null']
+          description: 这次用的回答方式（true 严格、false 宽松）；加入这个开关之前的提问为 null
         claims:
           type: array
           description: 历史回答的引用记录；文档归档后仍保留，点开引用得到归档提示
@@ -1227,6 +1283,12 @@ components:
         status: {const: searchable}
 
     # ---------- 强制验证清单 ----------
+    AnswerPolicy:
+      type: object
+      required: [strict]
+      additionalProperties: false
+      properties:
+        strict: {type: boolean, description: true 为严格模式，false 为宽松模式}
     ForcedVerifyList:
       type: object
       required: [builtin, rules]

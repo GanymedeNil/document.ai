@@ -83,6 +83,9 @@ export function streamLines(events: StreamEvent[]): string[] {
 function doneLines(it: SessionItem, notices: string[] | undefined): string[] {
   const out: string[] = [];
   if (it.mode_path.length) out.push(`经过的模式：${it.mode_path.map((m) => MODE_LABEL[m]).join(" → ")}${it.background ? "（曾转入后台）" : ""}`);
+  if (it.strict !== null && it.strict !== undefined) {
+    out.push(it.strict ? "回答方式：严格（只认文件原文）" : "回答方式：宽松（可以按文件里的单价算合计、按常识判断对象属于哪一类，都标未验证）");
+  }
   out.push(...timeLines(it.time_basis));
   for (const n of notices ?? []) out.push(`说明：${n}`);
   if (it.abstained) out.push("没有足够的证据，拒答（证据不足、无权或已归档时不编造）");
@@ -166,6 +169,8 @@ function Claims({ claims, onOpen }: { claims: Claim[]; onOpen: (v: SourceView) =
           <li key={i} className="flex flex-wrap items-start gap-1.5 text-sm">
             <ToneBadge tone={c.status === "supported" ? "good" : "warn"} className="mt-0.5">{c.status === "supported" ? "已验证" : "未验证"}</ToneBadge>
             {c.core && <Badge variant="outline" className="mt-0.5">核心</Badge>}
+            {c.basis === "calculation" && <Badge variant="outline" className="mt-0.5" title="按文件里的单价写出算式算出，代码核对了算术">计算</Badge>}
+            {c.basis === "common_knowledge" && <Badge variant="outline" className="mt-0.5" title="文件没有写明，由模型按常识判断">常识推断</Badge>}
             <span className="min-w-0 flex-1">
               {c.text}
               {c.citations.map((x) => (

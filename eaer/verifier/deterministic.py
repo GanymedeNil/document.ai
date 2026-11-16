@@ -10,6 +10,8 @@
    英文证据另认：不写“年”的年份、英文日期（1 January 2024）、thousand / million / billion、per cent、
    空格千分位（3 456），以及写明了百分比单位的证据里不带 % 的数值（表头“(%)”）。不带年份的日期（“3月15日”
    “11月起”“November 6”）按月日比较，证据或标注中同月同日的任一完整日期都算找到；带年份的日期仍须年份也对上。
+   宽松模式（formulas=True）另认结论里写明的算式（“每晚 680 元 × 7 晚 = 4,760 元”）：算术成立、单价在所引证据中、
+   证据以外的数只是乘除里的正整数数量（晚数、天数、人数）时判 unverified 并写出算式；算术不成立判 unsupported。
    证据中没有、但等于所引证据中
    两个数值之差或之和的（“相差 10 个百分点”），只核对得了算术，判 unverified 并写明算式。所引证据的标注
    （标题、版本号、记录类的文档日期、其他文档在目标时间的生效与作废日期、出处）也算证据：这些是系统记录的元数据，
@@ -90,6 +92,28 @@ def _norm_text(text: str) -> str:
 
 
 def extract(text: str) -> Facts:
+    s, dates = _strip_dates(text)
+    return Facts(_quantities(s), frozenset(dates))
+
+
+def _quantities(s: str) -> frozenset[tuple[Decimal, str]]:
+    qs: set[tuple[Decimal, str]] = set()
+    for m in _NUM.finditer(s):
+        if (q := _num(m)) is not None:
+            qs.add(q)
+    return frozenset(qs)
+
+
+def _num(m: re.Match) -> tuple[Decimal, str] | None:
+    try:
+        v = Decimal(m.group(1)) * _MULT[m.group(2)]
+    except InvalidOperation:
+        return None
+    return v.normalize(), "pct" if m.group(3) else "num"
+
+
+def _strip_dates(text: str) -> tuple[str, set[tuple[int | None, int | None, int | None]]]:
+    """规范化后的文字与其中的日期；日期所在的位置换成空格（日期里的数字不再当数值）。"""
     s = _norm_text(text)
     dates: set[tuple[int | None, int | None, int | None]] = set()
 
@@ -129,14 +153,7 @@ def extract(text: str) -> Facts:
     take(EN_MD, lambda m: en(None, m.group(1), m.group(2)))
     take(EN_DM, lambda m: en(None, m.group(2), m.group(1)))
     take(_M, lambda m: (None, int(m.group(1)), None) if 1 <= int(m.group(1)) <= 12 else None)
-    qs: set[tuple[Decimal, str]] = set()
-    for m in _NUM.finditer(s):
-        try:
-            v = Decimal(m.group(1)) * _MULT[m.group(2)]
-        except InvalidOperation:
-            continue
-        qs.add((v.normalize(), "pct" if m.group(3) else "num"))
-    return Facts(frozenset(qs), frozenset(dates))
+    return s, dates
 
 
 def _space_grouped(text: str) -> set[tuple[Decimal, str]]:
@@ -189,10 +206,13 @@ def _pool(texts) -> tuple[set, set]:
 
 
 def value_match(claim: str, evidence_texts: list[str], target_dates: tuple[date, ...] = (),
-                labels: list[str] | tuple[str, ...] = ()) -> Check:
+                labels: list[str] | tuple[str, ...] = (), *, formulas: bool = False,
+                derived: frozenset[Decimal] = frozenset()) -> Check:
     """target_dates：本次查询的目标日期（生效时间点、回溯时间点）。结论复述这些日期是在说明时间依据，
     不需要出现在证据里——所引版本在目标日期是否有效由 time_valid 核对；其余日期仍须在证据中找到。
-    labels：所引证据的标注（label_text），其中的数值与日期同样算找到；差与和只用原文的数值推算。"""
+    labels：所引证据的标注（label_text），其中的数值与日期同样算找到；差与和只用原文的数值推算。
+    formulas（宽松模式）：结论里写明的算式（“每晚 680 元 × 7 晚 = 4,760 元”）按 check_formulas 核对，
+    成立的判 unverified 并写出算式；不成立的判 unsupported。derived：同一回答前面的结论已由算式算出的数，可作运算数。"""
     want = extract(claim)
     if not want.quantities and not want.dates:
         return Check("pass", "结论不含数值或日期")
@@ -205,10 +225,151 @@ def value_match(claim: str, evidence_texts: list[str], target_dates: tuple[date,
              if not _date_found(d, have_d | lab_d) and not _date_found(d, targets)]
     if not missing and not dates:
         return PASS
-    derived = None if dates else _derivations([v for v, _ in lacking], have_q)
-    if derived:
-        return Check("unverified", f"数值由所引证据计算得出：{'；'.join(derived)}，代码只核对了算术，含义待核实")
+    if formulas and not dates:
+        f = check_formulas(claim, {v for v, _ in have_q} | set(derived))
+        if f.wrong:
+            return Check("unsupported", f"算式不成立：{'；'.join(f.wrong)}")
+        if f.valid and all(v in f.explained for v, _ in lacking):
+            counts = f"，其中证据以外的数量（{'、'.join(_fmt(c) for c in f.counts)}）取自问题" if f.counts else ""
+            return Check("unverified", f"{FORMULA_REASON}：{'；'.join(f.valid)}；代码核对了算术{counts}，含义待核实")
+    sums = None if dates else _derivations([v for v, _ in lacking], have_q)
+    if sums:
+        return Check("unverified", f"数值由所引证据计算得出：{'；'.join(sums)}，代码只核对了算术，含义待核实")
     return Check("unsupported", f"证据中没有：{'、'.join(missing + dates)}")
+
+
+# ---------------------------------------------------------------- 算式（宽松模式）
+
+FORMULA_REASON = "数值按算式由所引证据计算得出"
+
+# 运算符：数值之间的文字里找。“元/晚”里的斜杠是单位，不是除号：只有两数之间只隔一个“/”才算除
+_OP = re.compile(r"乘以|除以|加上|减去|[×✕*÷+\-−]|(?<![A-Za-z])[xX](?![A-Za-z])")
+_OP_OF = {"乘以": "*", "×": "*", "✕": "*", "*": "*", "x": "*", "X": "*", "除以": "/", "÷": "/", "加上": "+", "+": "+",
+          "减去": "-", "-": "-", "−": "-"}
+_OP_SHOW = {"*": "×", "/": "÷", "+": "+", "-": "−"}
+_CLAUSE = re.compile(r"[，。；;,：:！？!?\n（）()【】]")
+_EQ_SIGNS = str.maketrans({"＝": "=", "＋": "+", "＊": "*", "≈": "="})
+
+
+@dataclass
+class Formulas:
+    valid: list[str] = field(default_factory=list)       # 成立且运算数都有来历的算式（写进原因）
+    wrong: list[str] = field(default_factory=list)       # 算术不成立的算式
+    explained: set[Decimal] = field(default_factory=set)  # 由成立的算式说明了来历的数（运算数与结果）
+    counts: list[Decimal] = field(default_factory=list)   # 证据以外、作为乘除因子的数量（晚数、天数、人数）
+    results: set[Decimal] = field(default_factory=set)    # 成立的算式算出的数
+
+
+def _segment(seg: str) -> list | None:
+    """等号之间的一段：数值与运算符交替（[数, 符, 数, …]）；数值之间的文字里必须有且只有一种运算符，否则不是算式。"""
+    nums = list(_NUM.finditer(seg))
+    if not nums:
+        return None
+    out: list = []
+    for i, m in enumerate(nums):
+        q = _num(m)
+        if q is None:
+            return None
+        if i:
+            between = seg[nums[i - 1].end():m.start()]
+            ops = {"/"} if between.strip() == "/" else {_OP_OF[t] for t in _OP.findall(between)}
+            if len(ops) != 1:
+                return None
+            out.append(ops.pop())
+        out.append(q)
+    return out
+
+
+def _evaluate(items: list) -> Decimal | None:
+    """按先乘除后加减求值；乘除里的百分数按小数算（680 × 80% = 544）。"""
+    terms: list[list] = [[("+", items[0])]]
+    for op, x in zip(items[1::2], items[2::2]):
+        if op in "*/":
+            terms[-1].append((op, x))
+        else:
+            terms.append([(op, x)])
+    total = Decimal(0)
+    for t in terms:
+        product = len(t) > 1
+        val = lambda q: q[0] / 100 if product and q[1] == "pct" else q[0]   # noqa: E731
+        acc = val(t[0][1])
+        for op, x in t[1:]:
+            if op == "*":
+                acc *= val(x)
+            elif val(x) == 0:
+                return None
+            else:
+                acc /= val(x)
+        total += -acc if t[0][0] == "-" else acc
+    return total
+
+
+def _show(items: list) -> str:
+    return " ".join(_OP_SHOW[x] if isinstance(x, str) else _fmt(x[0]) + ("%" if x[1] == "pct" else "") for x in items)
+
+
+def _same(a: Decimal, b: Decimal, written: Decimal | None) -> bool:
+    """按结论写出的那个数的小数位数比较（1000 ÷ 3 = 333.33）；两边都是算式时要求相等。"""
+    if written is None:
+        return abs(a - b) < Decimal("1e-9")
+    exp = written.as_tuple().exponent
+    q = Decimal(1).scaleb(exp if isinstance(exp, int) and exp < 0 else 0)
+    return a.quantize(q) == b.quantize(q)
+
+
+def _sources_ok(items: list, available: set[Decimal]) -> tuple[bool, list[Decimal]]:
+    """运算数的来历：在所引证据中（或前面算出的）；或者是乘除式里的正整数因子（问题给的晚数、天数、人数），
+    且同一个乘除式里至少有一个数在证据中。返回 (是否都有来历, 用到的证据以外的因子)。"""
+    terms: list[list] = [[items[0]]]
+    for op, x in zip(items[1::2], items[2::2]):
+        (terms[-1].append if op in "*/" else lambda q: terms.append([q]))(x)
+    counts: list[Decimal] = []
+    for t in terms:
+        known = [q[0] in available for q in t]
+        if len(t) == 1:
+            if not known[0]:
+                return False, []
+            continue
+        if not any(known):
+            return False, []
+        for q, k in zip(t, known):
+            if not k:
+                if q[1] != "num" or q[0] <= 0 or q[0] != q[0].to_integral_value():
+                    return False, []
+                counts.append(q[0])
+    return True, counts
+
+
+def check_formulas(claim: str, available: set[Decimal]) -> Formulas:
+    """结论里写明的算式（宽松模式）：逐个分句找“表达式 = 表达式 [= …]”，核对算术与运算数的来历（见 _sources_ok）。
+    前面成立的算式算出的数，后面的算式可以接着用（“680 × 7 = 4,760，4,760 + 840 = 5,600”）。"""
+    s, _ = _strip_dates(claim)
+    out, avail = Formulas(), set(available)
+    for clause in _CLAUSE.split(s.translate(_EQ_SIGNS)):
+        if "=" not in clause:
+            continue
+        segs = [_segment(x) for x in clause.split("=")]
+        if len(segs) < 2 or any(x is None for x in segs):
+            continue
+        vals = [_evaluate(x) for x in segs]
+        if any(v is None for v in vals):
+            continue
+        written = [x[0][0] if len(x) == 1 else None for x in segs]
+        text = " = ".join(_show(x) for x in segs)
+        if not all(_same(a, b, wb if wb is not None else wa)
+                   for a, b, wa, wb in zip(vals, vals[1:], written, written[1:])):
+            out.wrong.append(f"{text}（左边算出来是 {_fmt(vals[0].normalize())}）")
+            continue
+        ok, counts = _sources_ok(segs[0], avail)
+        if not ok:
+            continue
+        out.valid.append(text)
+        out.counts += [c for c in dict.fromkeys(counts) if c not in out.counts]
+        nums = {q[0] for x in segs for q in x if not isinstance(q, str)}
+        out.explained |= nums
+        out.results |= {w for w in written[1:] if w is not None} | {v.normalize() for v in vals}
+        avail |= out.results
+    return out
 
 
 def _derivations(values: list[Decimal], have_q: set) -> list[str] | None:
@@ -228,6 +389,13 @@ def _derivations(values: list[Decimal], have_q: set) -> list[str] | None:
             return None
         out.append(hit)
     return out
+
+
+def formula_results(claim: str) -> set[Decimal]:
+    """结论里算术成立的算式算出的数（不论运算数的来历）。只用于已通过 value_match 的结论：同一回答后面的结论
+    可以接着用这些数（“住宿 4,760 元、伙食 840 元，合计 4,760 + 840 = 5,600 元”分在两条结论里写）。"""
+    s, _ = _strip_dates(claim)
+    return check_formulas(claim, {q[0] for q in _quantities(s)}).results
 
 
 # ---------------------------------------------------------------- locator_exists
@@ -353,9 +521,11 @@ class DeterministicChecker:
         self.conn, self.authorizer, self.scope, self.store = conn, authorizer, scope, store
 
     def check(self, claim: str, evidence_ids: list[str], *, retrieved: set[str], target: Target | None,
-              version_targets: dict[str, Target] | None = None) -> Result:
+              version_targets: dict[str, Target] | None = None, formulas: bool = False,
+              derived: frozenset[Decimal] = frozenset()) -> Result:
         """version_targets：版本 id → 该版本的目标时间。Deep 的版本比较里，“修订前”的结论引用旧版本，
-        要按旧版本有效期内的日期核对 time_valid，而不是按提问日；没有列出的版本用 target。"""
+        要按旧版本有效期内的日期核对 time_valid，而不是按提问日；没有列出的版本用 target。
+        formulas、derived：宽松模式核对结论里写明的算式（见 value_match）。"""
         checks: dict[str, Check] = {}
         vt = version_targets or {}
         foreign = [i for i in evidence_ids if i not in retrieved]
@@ -391,7 +561,7 @@ class DeterministicChecker:
         labels = [label_text(r["doc_type"], r["title"], r["version_no"], r["doc_date"], validity[vid], r["publisher"])
                   for vid, r in versions.items()]
         checks["value_match"] = value_match(claim, [rows[i]["content"] for i in keep if i in rows], tuple(targets),
-                                            labels)
+                                            labels, formulas=formulas, derived=derived)
         checks["time_valid"] = self._time(rows, keep, target, vt, validity)
         return Result(worst(list(checks.values())).outcome, checks, keep, removed, alerts)
 

@@ -116,8 +116,9 @@ def verify_claim(conn, retriever, model, tenant_id: str, q) -> tuple[str, str]:
 
 
 def run_engine(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelClient, store, index: SearchIndex,
-               embedder: Embedder, reranker=None, figure_reader=None) -> list[FastResult]:
-    """经完整的编排器回答（Router、升级、Deep、Verified）；不传时间参数，时间点由编排器从问题中识别（7.5）。"""
+               embedder: Embedder, reranker=None, figure_reader=None, strict: bool = False) -> list[FastResult]:
+    """经完整的编排器回答（Router、升级、Deep、Verified）；不传时间参数，时间点由编排器从问题中识别（7.5）。
+    strict：用严格模式回答（默认与产品默认相同，为宽松模式）。"""
     from eaer.orchestrator.engine import Engine
     calc = Calculator(fs)
 
@@ -132,7 +133,7 @@ def run_engine(conn, fs: FactSet, corpus: Path, manifest: dict, *, model: ModelC
             return FastResult(q.id, q.type, q.question, exp.answer, f"{status}：{reason}"[:200],
                               "correct" if ok else "wrong", False, False, [], 0.0, 0,
                               expected_mode=q.expected_mode)
-        eng = Engine(conn, retriever, model, LocalAuthorizer(conn, {}), store=store)
+        eng = Engine(conn, retriever, model, LocalAuthorizer(conn, {}), store=store, strict_default=strict)
         try:
             r = eng.ask(Scope(tenant_id, frozenset({q.role})), q.question, today=q.asked_on)
         except Exception as e:  # noqa: BLE001
@@ -218,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--per-type", type=int, help="每类查询最多取几条（按编号哈希抽样，可复现）")
     p.add_argument("--json-out", help="把逐条结果与运行配置写成 JSON（复现检查用，AC-14-5）")
     p.add_argument("--types", help="只问这几类查询（逗号分隔，如 图表）；文档照常全部回放")
+    p.add_argument("--strict", action="store_true", help="经编排器时用严格模式回答（默认宽松，与产品默认相同）")
     add_external_flag(p)
     args = p.parse_args(argv)
     if os.environ.get("EAER_ENV") != "eval":
@@ -243,9 +245,11 @@ def main(argv: list[str] | None = None) -> int:
         work = Path(tmp)
         manifest = Renderer(fs).render(work / "corpus", args.format)
         conn = psycopg.connect(new_db(), autocommit=True, row_factory=dict_row)
+        kw = {"strict": args.strict} if args.engine else {}
         runner = run_engine if args.engine else run_fast
         results = runner(conn, fs, work / "corpus", manifest, model=model, store=LocalFileStore(work / "files"),
-                         index=MemoryIndex(), embedder=embedder, reranker=reranker, figure_reader=figure_reader_of(model))
+                         index=MemoryIndex(), embedder=embedder, reranker=reranker, figure_reader=figure_reader_of(model),
+                         **kw)
         conn.close()
     text = report(results, model=model.gen.model,
                   embedder=embedder.name + (f"，重排 {model.rr.model}" if reranker else "，不重排"))

@@ -12,7 +12,7 @@ import { call, streamQuery, type ApiResult, type StreamEvent } from "@/lib/api";
 import { identityKey, useIdentity } from "@/lib/identity";
 import { forgetSession, listSessions, rememberSession, type SessionRecord } from "@/lib/storage";
 import { formatTime, uuid } from "@/lib/format";
-import type { CancelResult, Mode, QueryRequest, QueryResponse, Session, SessionItem } from "@/lib/types";
+import type { AnswerPolicy, CancelResult, Mode, QueryRequest, QueryResponse, Session, SessionItem } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -30,6 +30,7 @@ const SAMPLES = [
   "一线城市的住宿报销上限是多少？",
   "2026 年 3 月 15 日，一线城市的住宿报销上限是多少？",
   "住宿报销上限从多少改成了多少？",
+  "我在北京住一周最高能报销多少？",
 ];
 
 interface Pending { question: string; startedAt: number; events: StreamEvent[] }
@@ -61,6 +62,9 @@ function ChatPage() {
 
   const [text, setText] = useState("");
   const [mode, setMode] = useState<"" | Mode>("");
+  // 回答方式：空为租户默认；宽松可以按单价算合计、按常识归类，严格只认证据原文
+  const [policy, setPolicy] = useState<"" | "lenient" | "strict">("");
+  const [tenantStrict, setTenantStrict] = useState<boolean | null>(null);
   const [asOfValid, setAsOfValid] = useState("");
   const [asOfSystem, setAsOfSystem] = useState("");
   const [showTime, setShowTime] = useState(false);
@@ -114,6 +118,12 @@ function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, who]);
 
+  // 租户默认的回答方式，显示在“回答方式”的默认项上
+  useEffect(() => {
+    if (!ready || !token) { setTenantStrict(null); return; }
+    call<AnswerPolicy>(token, "GET", "/v1/config/answer-policy").then((r) => setTenantStrict(r.ok ? r.data!.strict : null));
+  }, [ready, token]);
+
   // 地址栏里的会话（点左边的会话、刷新页面、从别处链接过来）
   useEffect(() => {
     if (!ready || urlSession === sessionRef.current) return;
@@ -151,7 +161,7 @@ function ChatPage() {
     setPending({ question: q, startedAt, events: [] });
     const body: QueryRequest = {
       question: q, session_id: sid, as_of_valid: asOfValid || null, as_of_system: asOfSystem || null,
-      mode_hint: mode || null, stream,
+      mode_hint: mode || null, strict: policy ? policy === "strict" : null, stream,
     };
     abort.current = new AbortController();
     let r: ApiResult<QueryResponse>;
@@ -307,6 +317,12 @@ function ChatPage() {
                   <NativeSelectOption value="fast">Fast</NativeSelectOption>
                   <NativeSelectOption value="deep">Deep</NativeSelectOption>
                   <NativeSelectOption value="verified">Verified</NativeSelectOption>
+                </NativeSelect>
+                <NativeSelect size="sm" aria-label="回答方式" value={policy} onChange={(e) => setPolicy(e.target.value as "" | "lenient" | "strict")}
+                  title="宽松：可以按文件里的单价算合计、按常识判断对象属于哪一类（都标未验证）；严格：只认文件原文">
+                  <NativeSelectOption value="">默认（{tenantStrict === null ? "租户设置" : tenantStrict ? "严格" : "宽松"}）</NativeSelectOption>
+                  <NativeSelectOption value="lenient">宽松</NativeSelectOption>
+                  <NativeSelectOption value="strict">严格</NativeSelectOption>
                 </NativeSelect>
                 <Button type="button" size="sm" variant={showTime || asOfValid || asOfSystem ? "secondary" : "ghost"} onClick={() => setShowTime((v) => !v)}>
                   <CalendarIcon />时间点
