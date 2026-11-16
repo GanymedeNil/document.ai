@@ -7,8 +7,10 @@ DeterministicTestModel 是测试替身：结果可复现、不联网，只用来
 """
 from __future__ import annotations
 
+import contextvars
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Iterator, Literal, Protocol
 
 from eaer.retrieval.embed import HashingEmbedder
 from eaer.retrieval.index import tokens
@@ -44,6 +46,32 @@ class Completion:
     parsed: dict[str, Any] | None      # 传了 schema 时为解析后的对象
     usage: Usage
     model: str
+    reasoning: str | None = None       # 模型自身的思考文字（开启思考时有），实现也应经 report_reasoning 报给编排器
+
+
+# ---------- 模型的思考过程（2026-11-16，设计变更记录；query_log.reasoning） ----------
+
+_REASONING: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar("eaer_model_reasoning", default=None)
+
+
+def report_reasoning(text: str | None) -> None:
+    """ModelClient 的实现在一次生成给出思考文字时调用（如 OpenAI 兼容接口的 message.reasoning_content）；
+    编排器按步骤收集，随回答返回并写进 query_log。没有人收集时什么都不做。"""
+    if text and text.strip():
+        sink = _REASONING.get()
+        if sink is not None:
+            sink.append(text.strip())
+
+
+@contextmanager
+def collect_reasoning() -> Iterator[list[str]]:
+    """收集这段代码里模型报告的思考文字（按发生顺序）。"""
+    sink: list[str] = []
+    token = _REASONING.set(sink)
+    try:
+        yield sink
+    finally:
+        _REASONING.reset(token)
 
 
 @dataclass(frozen=True)

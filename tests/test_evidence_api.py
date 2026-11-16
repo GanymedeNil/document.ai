@@ -101,6 +101,35 @@ def test_evidence_carries_document_date_and_publisher(env):
     assert b["version"]["doc_date"] == "2025-12-20" and b["version"]["publisher"] == "财务部"
 
 
+def test_version_content_follows_the_evidence_rules(env):
+    """版本全文（GET /v1/versions/{id}）与证据接口同一套可见规则：无权、其他租户、待审核（非审核人）、不存在一律 404
+    且响应体相同；本租户的审核人能读待审核的版本，其他租户的审核人不能；已归档只给提示、不给原件。"""
+    client, conn, doc, _ = env
+    fin_doc, fin_ev = doc("部门经理单笔采购审批上限10万元。", "R_FIN")
+    _, pending_ev = doc("待审核文件中的条款。", "R_STAFF", approve=False)
+    version_of = lambda ev: str(conn.execute("SELECT version_id FROM evidence WHERE id = %s", (ev,)).fetchone()["version_id"])  # noqa: E731
+    fin_v, pending_v = version_of(fin_ev), version_of(pending_ev)
+
+    def body(token, vid):
+        r = client.get(f"/v1/versions/{vid}", headers=H(token))
+        return r.status_code, {k: v for k, v in r.json().items() if k != "request_id"}
+
+    ok = client.get(f"/v1/versions/{fin_v}", headers=H("tok-fin")).json()
+    assert ok["access"] == "permission" and [e["evidence_id"] for e in ok["evidence"]].count(fin_ev) == 1
+    missing = body("tok-staff", "00000000-0000-0000-0000-000000000000")
+    assert missing[0] == 404
+    assert body("tok-staff", fin_v) == missing                     # 无权
+    assert body("tok-staff", pending_v) == missing                 # 待审核，非审核人
+    assert body("tok-other", pending_v)[0] == 404                  # 其他租户的审核人
+    review = client.get(f"/v1/versions/{pending_v}", headers=H("tok-rv")).json()
+    assert review["status"] == "pending_review" and review["access"] == "review"
+    assert client.get(f"/v1/versions/{pending_v}/original", headers=H("tok-rv")).content.startswith(b"<h1>")
+    assert client.post(f"/v1/documents/{fin_doc}/archive", headers=H("tok-ed")).status_code == 200
+    archived = client.get(f"/v1/versions/{fin_v}", headers=H("tok-fin")).json()
+    assert archived["status"] == "archived" and "evidence" not in archived
+    assert client.get(f"/v1/versions/{fin_v}/original", headers=H("tok-fin")).status_code == 404
+
+
 def test_unauthorized_and_nonexistent_are_indistinguishable(env):
     client, conn, doc, _ = env
     _, fin_only = doc("部门经理单笔采购审批上限10万元。", "R_FIN")

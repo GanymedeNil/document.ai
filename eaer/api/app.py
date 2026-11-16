@@ -1,4 +1,4 @@
-"""对外接口：提问、会话、上传、审核、归档、取消归档、证据、强制验证清单（开发文档 11.1、11.2）。
+"""对外接口：提问、会话、上传、审核、归档、取消归档、证据、版本全文与原件、强制验证清单（开发文档 11.1、11.2）。
 
 接口的唯一定义是同目录的 openapi.yaml，/openapi.json 与 /docs 展示的就是它；实现与它的一致性由契约测试
 tests/test_contract.py 检查（AC-11-1）。改接口时先改 openapi.yaml。
@@ -12,19 +12,21 @@ tests/test_contract.py 检查（AC-11-1）。改接口时先改 openapi.yaml。
 
 import functools
 import json
+import mimetypes
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Any, Callable, Iterator, Literal, Protocol
+from urllib.parse import quote, unquote
 
 import psycopg
 import yaml
 from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
@@ -368,7 +370,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
             else:                                    # running（含已交给后台）或 cancelled：其余字段为空（11.2）
                 resp = {"session_id": str(sid), "status": "cancelled" if outcome == "cancelled" else "running",
                         "mode": None, "mode_path": [], "time_basis": None, "answer": None, "claims": [],
-                        "abstained": None, "notices": []}
+                        "abstained": None, "notices": [], "reasoning": []}
             set_attrs(root, {"eaer.cache_hit": hit is not None, "eaer.outcome": outcome})
             if result is not None:
                 trace_result(root, result)
@@ -388,6 +390,8 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
                 yield ev("mode", {"mode": m})
             for n in result.notices:
                 yield ev("notice", {"text": n})
+            for x in resp["reasoning"]:                      # 模型自身的思考文字，按步骤，先于回答
+                yield ev("reasoning", x)
             text = result.answer or ""
             for i in range(0, len(text), 40):
                 yield ev("delta", {"text": text[i:i + 40]})
@@ -402,7 +406,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         sid = _sid(session_id)
         rows = conn.execute(
             "SELECT l.id, l.asked_at, l.question, l.time_basis, l.mode, l.mode_path, l.status, l.answer, l.claims, "
-            "l.abstained, t.progress, t.background FROM query_log l LEFT JOIN query_task t ON t.id = l.id "
+            "l.abstained, l.reasoning, t.progress, t.background FROM query_log l LEFT JOIN query_task t ON t.id = l.id "
             "WHERE l.session_id = %s AND l.tenant_id = %s AND l.user_id = %s ORDER BY l.asked_at",
             (sid, ident.tenant_id, ident.user)).fetchall()
         if not rows or not _own_session(conn, ident, sid):
@@ -411,7 +415,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         for r in rows:
             item = {"query_id": str(r["id"]), **{k: r[k] for k in ("asked_at", "question", "time_basis", "mode",
                                                                      "mode_path", "status", "answer", "abstained")},
-                    "background": bool(r["background"]),
+                    "background": bool(r["background"]), "reasoning": r["reasoning"],
                     "claims": [{k: c[k] for k in ("text", "status", "core", "citations")}
                                for c in r["claims"] if c["status"] != "unsupported"]}
             if r["status"] == "running":
@@ -485,5 +489,86 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
                 "document": {"id": r["document_id"], "title": r["title"]},
                 "version": {"id": r["version_id"], "version_no": r["version_no"]}})
         raise ApiError(*EVIDENCE_404)
+
+    # ---------- 版本全文与原件（证据接口的同一套可见规则） ----------
+
+    VERSION_404 = (404, "not_found", "版本不存在")
+
+    def version_access(conn, ident: Identity, version_id: str) -> tuple[str, dict]:
+        """返回 (access, 版本行)。access：review 为审核人看待审核的版本；permission 为按文档权限可见的可搜索版本；
+        archived 为有权但已归档（只给提示）。其余一律 404，不区分不存在、无权、待审核、已删除与其他租户（10.2）。
+        审核人看待审核的版本不经授权范围：审核需要阅读内容，审核任务列表本来就对本租户的审核人开放。
+        其余情况先解析授权范围（与证据接口相同，无法确定时 403、授权服务不可用时 503），再查版本，
+        以免从“403 还是 404”看出某个待审核版本是否存在。"""
+        try:
+            vid = uuid.UUID(version_id)
+        except ValueError:
+            vid = None
+        row = conn.execute(
+            "SELECT v.id, v.version_no, v.status, v.uploaded_at, v.approved_at, v.doc_date, v.publisher, "
+            "  v.raw_object_uri, p.principals, d.id AS document_id, d.tenant_id, d.title, d.doc_type "
+            "FROM document_version v JOIN document d ON d.id = v.document_id JOIN acl_policy p ON p.id = v.acl_policy_id "
+            "WHERE v.id = %s AND d.tenant_id = %s", (vid, ident.tenant_id)).fetchone() if vid else None
+        if row is not None and row["status"] == "pending_review" and "reviewer" in ident.roles:
+            return "review", row
+        a, scope = authorize(conn, ident)
+        if row is None or row["status"] == "pending_review" or row["tenant_id"] != scope.tenant_id \
+                or not set(row["principals"]) & scope.principals:
+            raise ApiError(*VERSION_404)
+        ids = [r["id"] for r in conn.execute("SELECT id FROM evidence WHERE version_id = %s", (row["id"],))]
+        try:
+            allowed = all(a.check(scope, ids)) if ids else True     # 授权接口逐条核对（可搜索、同租户、角色有交集）
+        except AuthorizerUnavailable:
+            raise ApiError(503, "authz_unavailable", "授权服务不可用")
+        except ScopeExpired:
+            raise ApiError(401, "unauthenticated", "授权范围已过期，请重新登录")
+        if row["status"] == "archived":
+            return "archived", row
+        if not allowed:
+            raise ApiError(*VERSION_404)
+        return "permission", row
+
+    def original_name(row: dict) -> str:
+        """原件的文件名：存储地址的最后一段（本地存储为 local://租户/哈希/文件名）。"""
+        return unquote(row["raw_object_uri"].rstrip("/").rsplit("/", 1)[-1]) or "original"
+
+    @app.get("/v1/versions/{version_id}")
+    def version_content(conn: Conn, ident: Anyone, version_id: str):
+        """版本全文：全部证据按页、正文段落、表格、图表排列；已归档只给提示（6.6）。"""
+        access, row = version_access(conn, ident, version_id)
+        document = {"id": row["document_id"], "title": row["title"]}
+        version = {"id": row["id"], "version_no": row["version_no"]}
+        if access == "archived":
+            return jsonable_encoder({"status": "archived", "notice": "该资料已归档", "document": document,
+                                     "version": version})
+        evidence = conn.execute(
+            "SELECT id AS evidence_id, modality, content, locator, parse_stage FROM evidence WHERE version_id = %s "
+            "ORDER BY locator->'page' NULLS FIRST, CASE modality WHEN 'text' THEN 0 WHEN 'table' THEN 1 ELSE 2 END, "
+            "  locator->'para', locator->'table', locator->'row', locator->'column', locator->'figure', id",
+            (row["id"],)).fetchall()
+        validity = conn.execute(
+            "SELECT valid_from, valid_from_grade, valid_to, valid_to_grade FROM version_validity "
+            "WHERE version_id = %s AND recorded_at IS NOT NULL AND replaced_at IS NULL", (row["id"],)).fetchone()
+        name = original_name(row)
+        return jsonable_encoder({
+            "status": row["status"], "access": access,
+            "document": {**document, "doc_type": row["doc_type"]},
+            "version": {**version, "uploaded_at": row["uploaded_at"], "approved_at": row["approved_at"],
+                        "doc_date": row["doc_date"], "publisher": row["publisher"]},
+            "validity": validity,
+            "original": {"filename": name, "content_type": mimetypes.guess_type(name)[0] or "application/octet-stream"},
+            "evidence": evidence})
+
+    @app.get("/v1/versions/{version_id}/original")
+    def version_original(conn: Conn, ident: Anyone, version_id: str):
+        """下载原件；已归档的版本不给原件（6.6）。一律作为附件、禁止嗅探与执行：上传的 HTML 若按网页打开，
+        会在接口所在的源（经前端代理时即前端的源）里执行。"""
+        access, row = version_access(conn, ident, version_id)
+        if access == "archived":
+            raise ApiError(*VERSION_404)
+        name = original_name(row)
+        return Response(store.get(row["raw_object_uri"]), media_type="application/octet-stream", headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}",
+            "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"})
 
     return app

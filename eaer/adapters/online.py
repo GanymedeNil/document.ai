@@ -12,7 +12,8 @@
 错误信息中不出现密钥。
 
 配置来自部署环境变量（13.2“模型服务地址与密钥”，部署时必填）：
-  EAER_GEN_BASE_URL / EAER_GEN_API_KEY / EAER_GEN_MODEL     生成服务；EAER_GEN_THINKING=disabled 关闭推理过程
+  EAER_GEN_BASE_URL / EAER_GEN_API_KEY / EAER_GEN_MODEL     生成服务；EAER_GEN_THINKING=disabled 关闭推理过程、enabled 开启
+                                                             （开启时 message.reasoning_content 经 report_reasoning 交给编排器）
   EAER_GEN_CONTEXT_TOKENS / EAER_GEN_VISION=1                上下文长度、是否支持图像输入
   EAER_GEN_TEMPERATURE                                       采样温度；问答与评测建议 0，便于复现（AC-14-5）
   EAER_EMBED_BASE_URL / EAER_EMBED_API_KEY / EAER_EMBED_MODEL / EAER_EMBED_DIMS
@@ -33,7 +34,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
-from eaer.adapters.model import Capabilities, CapabilityNotSupported, Completion, Message, Usage
+from eaer.adapters.model import Capabilities, CapabilityNotSupported, Completion, Message, Usage, report_reasoning
 
 RETRYABLE = {408, 409, 429, 500, 502, 503, 504}
 EMBED_BATCH = 64
@@ -189,8 +190,10 @@ class OnlineModelClient:
         out, rec = self._post("generate", self.gen, "/chat/completions", body)
         try:
             text = out["choices"][0]["message"].get("content") or ""
-        except (KeyError, IndexError, TypeError):
+            reasoning = out["choices"][0]["message"].get("reasoning_content") or None
+        except (KeyError, IndexError, TypeError, AttributeError):
             raise ModelCallError("生成服务返回格式无法识别")
+        report_reasoning(reasoning)          # 开启思考（EAER_GEN_THINKING=enabled）时的思考文字，按步骤收集
         if not text.strip():
             raise ModelCallError("生成服务返回了空内容")
         parsed = None
@@ -204,7 +207,8 @@ class OnlineModelClient:
             problem = validate(parsed, schema)
             if problem:
                 raise StructuredOutputError(f"结构化输出不符合 schema：{problem}")
-        return Completion(text, parsed, Usage(rec.input_tokens, rec.output_tokens), out.get("model") or self.gen.model)
+        return Completion(text, parsed, Usage(rec.input_tokens, rec.output_tokens), out.get("model") or self.gen.model,
+                          reasoning=reasoning)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if self.emb is None:

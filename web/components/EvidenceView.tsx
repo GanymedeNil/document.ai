@@ -3,8 +3,9 @@
 // 证据详情（GET /v1/evidence/{id}）：可搜索且有权时给原文、定位、有效期、文档日期与出处；
 // 已归档且有权时只给归档提示；其余（不存在、无权、待审核、已删除）一律 404，响应体除 request_id 外相同。
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
-import { UsersIcon } from "lucide-react";
+import { BookOpenIcon, UsersIcon } from "lucide-react";
 import type { ApiResult } from "@/lib/api";
 import { useIdentity, type Identity } from "@/lib/identity";
 import { fetchEvidence } from "@/lib/useEvidence";
@@ -12,7 +13,7 @@ import { DOC_TYPE_LABEL, formatLocator, formatTime, GRADE_LABEL } from "@/lib/fo
 import type { Evidence } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ApiError } from "./ApiError";
@@ -27,7 +28,10 @@ function Row({ k, children }: { k: string; children: React.ReactNode }) {
   );
 }
 
-export function EvidenceDetail({ r }: { r: ApiResult<Evidence> }) {
+/** onOpenFullText：在抽屉里展示时由调用方切到全文；不给时用链接打开全文页面。 */
+export function EvidenceDetail({ r, onOpenFullText }: {
+  r: ApiResult<Evidence>; onOpenFullText?: (versionId: string, evidenceId: string) => void;
+}) {
   if (!r.ok) return <ApiError result={r} title="读取证据失败" />;
   const e = r.data!;
   if (e.status === "archived") {
@@ -49,6 +53,17 @@ export function EvidenceDetail({ r }: { r: ApiResult<Evidence> }) {
   return (
     <Card>
       <CardHeader>
+        <CardAction>
+          {onOpenFullText ? (
+            <Button size="sm" variant="outline" onClick={() => onOpenFullText(e.version.id, e.evidence_id)}>
+              <BookOpenIcon />查看全文（定位到这一处）
+            </Button>
+          ) : (
+            <Button size="sm" variant="outline" asChild>
+              <Link href={`/versions/${e.version.id}?ev=${e.evidence_id}`}><BookOpenIcon />查看全文（定位到这一处）</Link>
+            </Button>
+          )}
+        </CardAction>
         <CardTitle className="flex flex-wrap items-center gap-2">
           <ToneBadge tone="good">可搜索</ToneBadge>
           <Badge variant="outline">{{ text: "文字", table: "表格", figure: "图表" }[e.modality]}</Badge>
@@ -81,6 +96,23 @@ export function EvidenceDetail({ r }: { r: ApiResult<Evidence> }) {
       </CardContent>
     </Card>
   );
+}
+
+/** 按当前身份读取并展示一条证据（抽屉与证据页共用）。 */
+export function EvidenceLoader({ id, onOpenFullText }: {
+  id: string; onOpenFullText?: (versionId: string, evidenceId: string) => void;
+}) {
+  const { active, ready } = useIdentity();
+  const [r, setR] = useState<ApiResult<Evidence> | null>(null);
+  useEffect(() => {
+    if (!ready) return;
+    let alive = true;
+    setR(null);
+    fetchEvidence(active?.token ?? null, id, true).then((x) => { if (alive) setR(x); });
+    return () => { alive = false; };
+  }, [ready, active?.token, id]);
+  if (!r) return <p className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />读取证据…</p>;
+  return <EvidenceDetail r={r} onOpenFullText={onOpenFullText} />;
 }
 
 /** 用每个已设置的身份各取一次同一条证据，对比状态码：无权与不存在都是 404。 */

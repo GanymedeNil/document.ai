@@ -6,7 +6,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Fragment, Suspense, useCallback, useEffect, useState } from "react";
-import { CheckIcon, PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { BookOpenIcon, CheckIcon, PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { call, type ApiResult } from "@/lib/api";
 import { useIdentity } from "@/lib/identity";
 import { DOC_TYPE_LABEL, EXTRACTION_LABEL, formatTime, GRADE_SHORT, TASK_STATUS_LABEL } from "@/lib/format";
@@ -363,7 +363,14 @@ function ReviewPage() {
                           </TableCell>
                         )}
                         <TableCell className="align-top whitespace-normal">
-                          <div className="font-medium">{t.title ?? <span className="text-muted-foreground">（已删除，不保留内容）</span>}</div>
+                          <div className="font-medium">
+                            {t.title ?? <span className="text-muted-foreground">（已删除，不保留内容）</span>}
+                            {t.version_id && (
+                              <Link href={`/versions/${t.version_id}`} className="ml-2 inline-flex items-center gap-0.5 text-xs font-normal text-primary hover:underline">
+                                <BookOpenIcon className="size-3" />全文
+                              </Link>
+                            )}
+                          </div>
                           <div className="text-xs text-muted-foreground">
                             任务 <Mono>{t.task_id.slice(0, 8)}</Mono>
                             {t.document_id && <> · 文档 <Mono>{t.document_id}</Mono></>}

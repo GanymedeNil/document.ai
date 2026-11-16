@@ -128,3 +128,33 @@ export async function streamQuery(
     error: { code: "stream_incomplete", message: "流式响应在 done 事件之前结束", request_id: requestId ?? "" },
   };
 }
+
+/** 下载原件（GET /v1/versions/{id}/original）：要带令牌，不能用普通链接，取回后在本地存为文件。
+ *  原件一律当附件保存，不在页面里打开（上传的 HTML 在本源打开会读到 localStorage 里的令牌）。 */
+export async function downloadOriginal(token: string | null, versionId: string, fallbackName: string): Promise<ApiResult<null>> {
+  let resp: Response;
+  try {
+    resp = await fetch(`${API_BASE}/v1/versions/${encodeURIComponent(versionId)}/original`, {
+      headers: headers(token), cache: "no-store",
+    });
+  } catch (e) {
+    return {
+      ok: false, status: 0, data: null, requestId: null, retryAfter: null,
+      error: { code: "network_error", message: `无法连接：${(e as Error).message}`, request_id: "" },
+    };
+  }
+  if (!resp.ok) return parse<null>(resp);
+  const cd = resp.headers.get("Content-Disposition") ?? "";
+  const m = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+  const name = m ? decodeURIComponent(m[1]) : fallbackName;
+  const blob = await resp.blob();
+  const url = URL.createObjectURL(new Blob([blob], { type: "application/octet-stream" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { ok: true, status: resp.status, data: null, error: null, requestId: resp.headers.get("X-Request-Id"), retryAfter: null };
+}

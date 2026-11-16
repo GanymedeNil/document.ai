@@ -247,6 +247,15 @@ def test_query_task_lease_must_match_status(qt):
     conn.execute("UPDATE query_log SET status = 'cancelled' WHERE id = %(run)s", ids)       # 运行中 → 已取消：允许
 
 
+@pytest.mark.parametrize("bad", ['{"step": "first"}', '"思考"', "null"])
+def test_query_log_reasoning_must_be_an_array(qt, bad):
+    """迁移 0014：模型的思考过程是按步骤的数组；运行中的记录可以写入，但不能写成别的类型。"""
+    conn, ids = qt
+    conn.execute("UPDATE query_log SET reasoning = '[{\"step\": \"first\", \"text\": \"想\"}]' WHERE id = %(run)s", ids)
+    with pytest.raises((errors.CheckViolation, errors.NotNullViolation)):
+        conn.execute(f"UPDATE query_log SET reasoning = '{bad}'::jsonb WHERE id = %(run)s", ids)
+
+
 # ---------- AC-12-3（数据库部分）：准入记录只追加 ----------
 
 @pytest.mark.parametrize("sql", ["UPDATE model_admission SET verified_ok = true",

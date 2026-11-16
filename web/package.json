@@ -17,7 +17,10 @@
     "radix-ui": "1.8.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
-    "tailwind-merge": "3.7.0"
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "tailwind-merge": "3.7.0",
+    "vaul": "1.1.2"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.3.3",

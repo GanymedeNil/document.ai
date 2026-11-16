@@ -132,3 +132,26 @@
     @apply font-sans;
     }
 }
+
+/* Markdown（模型的思考过程）：紧凑排版，跟随周围的字号与颜色 */
+@layer components {
+  .md { @apply leading-relaxed break-words; }
+  .md > * + * { @apply mt-2; }
+  .md h1, .md h2, .md h3, .md h4 { @apply font-semibold text-foreground; }
+  .md h1 { @apply text-base; }
+  .md h2 { @apply text-sm; }
+  .md h3, .md h4 { @apply text-xs; }
+  .md ul { @apply list-disc pl-5; }
+  .md ol { @apply list-decimal pl-5; }
+  .md li + li { @apply mt-0.5; }
+  .md strong { @apply font-semibold text-foreground; }
+  .md a { @apply text-primary underline underline-offset-2; }
+  .md code { @apply rounded bg-muted px-1 py-0.5 font-mono text-[0.92em]; }
+  .md pre { @apply overflow-x-auto rounded-md bg-muted p-2; }
+  .md pre code { @apply bg-transparent p-0; }
+  .md blockquote { @apply border-l-2 pl-3; }
+  .md hr { @apply border-border; }
+  .md table { @apply w-full border-collapse text-left; }
+  .md th, .md td { @apply border border-border px-2 py-1 align-top; }
+  .md th { @apply bg-muted font-medium; }
+}

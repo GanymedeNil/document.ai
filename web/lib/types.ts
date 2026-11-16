@@ -43,6 +43,12 @@ export interface Claim {
   citations: Citation[];
 }
 
+/** 模型自身的思考文字（生成服务开启思考时），按编排步骤。 */
+export interface ReasoningStep {
+  step: "prepare" | "first" | "escalate" | "verify" | "assemble";
+  text: string;
+}
+
 export interface QueryResponse {
   session_id: string;
   status: "completed" | "running" | "cancelled";
@@ -53,6 +59,7 @@ export interface QueryResponse {
   claims: Claim[];
   abstained: boolean | null;
   notices: string[];
+  reasoning: ReasoningStep[];
 }
 
 export interface Progress {
@@ -76,6 +83,7 @@ export interface SessionItem {
   abstained: boolean;
   background: boolean;
   claims: Claim[];
+  reasoning: ReasoningStep[];
   progress?: Progress;
 }
 
@@ -198,3 +206,33 @@ export interface ForcedVerifyList {
   builtin: { id: string; kind: "builtin"; description: string }[];
   rules: ForcedVerifyRule[];
 }
+
+export interface VersionEvidence {
+  evidence_id: string;
+  modality: "text" | "table" | "figure";
+  content: string;
+  locator: Locator;
+  parse_stage: "text" | "deep";
+}
+
+export interface VersionContent {
+  status: "searchable" | "pending_review";
+  access: "permission" | "review";
+  document: { id: string; title: string; doc_type: DocType | null };
+  version: {
+    id: string; version_no: number; uploaded_at: string; approved_at: string | null;
+    doc_date: string | null; publisher: string | null;
+  };
+  validity: Validity | null;
+  original: { filename: string; content_type: string };
+  evidence: VersionEvidence[];
+}
+
+export interface ArchivedVersion {
+  status: "archived";
+  notice: string;
+  document: { id: string; title: string };
+  version: { id: string; version_no: number };
+}
+
+export type VersionView = VersionContent | ArchivedVersion;

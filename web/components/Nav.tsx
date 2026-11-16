@@ -8,8 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ToneBadge } from "./common";
 
 const LINKS: [string, string][] = [
-  ["/", "提问"],
-  ["/sessions", "会话"],
+  ["/", "对话"],
   ["/upload", "上传"],
   ["/review", "审核"],
   ["/documents", "文档"],

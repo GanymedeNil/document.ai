@@ -1,6 +1,7 @@
 """契约测试（开发文档 11；AC-11-1）：实现与 OpenAPI 文件 eaer/api/openapi.yaml 一致。
 
-- 文件本身：OpenAPI 3.1，$ref 全部能解析，schema 都是合法的 JSON Schema；操作与开发文档 11.2 的 11 个一致；
+- 文件本身：OpenAPI 3.1，$ref 全部能解析，schema 都是合法的 JSON Schema；操作与开发文档 11.2 的 11 个、
+  加上设计变更记录里新增的操作一致；
   每个操作至少声明一个成功、一个错误响应；每个响应声明 X-Request-Id，错误响应都是 {code, message, request_id}；
   接口进程的 /openapi.json 就是这份文件。
 - 路由与参数：实现的路由与文件中的操作一一对应；路径参数、查询参数与请求体字段（名称、是否必填，逐层）
@@ -49,6 +50,8 @@ DEV_DOC_OPERATIONS = {
     ("POST", "/v1/documents/{document_id}/unarchive"), ("GET", "/v1/config/forced-verify"),
     ("POST", "/v1/config/forced-verify"),
 }
+# 设计变更记录 2026-11-16：取版本全文与下载原件（查看引用所在的整份文档、审核时阅读待审核的文档）
+ADDED_OPERATIONS = {("GET", "/v1/versions/{version_id}"), ("GET", "/v1/versions/{version_id}/original")}
 
 TOKENS = {
     "tok-ed": Identity("ed", "t1", frozenset({"editor"})),
@@ -95,9 +98,9 @@ class Env:
         self.worker = Worker(Ingestion(self.conn, self.store, lambda: NOW),
                              Indexer(self.conn, self.index, self.emb, "b1"))
         self.client = self.app()
-        self.doc, version = self.publish(NORM, "p.html")
+        self.doc, self.version = self.publish(NORM, "p.html")
         self.ev = self.conn.execute("SELECT id FROM evidence WHERE version_id = %s AND content LIKE '%%650元%%'",
-                                    (version,)).fetchone()["id"]
+                                    (self.version,)).fetchone()["id"]
 
     def engine(self, c, tenant):
         return Engine(c, Retriever(c, self.index, self.emb), self.st["model"], LocalAuthorizer(c, ACCOUNTS),
@@ -199,8 +202,8 @@ def test_spec_is_well_formed():
                 assert r["content"]["text/event-stream"].get("x-events"), op.id
 
 
-def test_operations_are_the_eleven_in_the_dev_doc():
-    assert {(o.method, o.template) for o in Contract().operations} == DEV_DOC_OPERATIONS
+def test_operations_are_the_dev_doc_ones_plus_recorded_additions():
+    assert {(o.method, o.template) for o in Contract().operations} == DEV_DOC_OPERATIONS | ADDED_OPERATIONS
 
 
 def test_served_openapi_is_the_file(env):
@@ -462,11 +465,55 @@ def s_add_forced_verify(e: Env):
     expect(e.client.post(url, headers=H("tok-staff"), json={"kind": "all"}), 403, "forbidden")
 
 
+def _pending_version(e: Env, title: str) -> str:
+    task = e.pending(html(title, f"{title}的条款。"), f"{title}.html")
+    return e.conn.execute("SELECT version_id FROM review_task WHERE id = %s", (task,)).fetchone()["version_id"]
+
+
+def s_get_version(e: Env):
+    url = f"/v1/versions/{e.version}"
+    b = expect(e.client.get(url, headers=H("tok-staff")), 200).json()
+    assert b["status"] == "searchable" and b["access"] == "permission" and b["original"]["filename"] == "p.html"
+    assert e.ev in [x["evidence_id"] for x in b["evidence"]] and "650元" in "".join(x["content"] for x in b["evidence"])
+    expect(e.client.post(f"/v1/documents/{e.doc}/archive", headers=H("tok-ed")), 200)
+    archived = expect(e.client.get(url, headers=H("tok-staff")), 200).json()
+    assert archived["status"] == "archived" and "evidence" not in archived
+    expect(e.client.post(f"/v1/documents/{e.doc}/unarchive", headers=H("tok-ed")), 200)
+    pending = f"/v1/versions/{_pending_version(e, '待审核制度')}"
+    review = expect(e.client.get(pending, headers=H("tok-rv")), 200).json()
+    assert review["status"] == "pending_review" and review["access"] == "review" and review["version"]["approved_at"] is None
+    expect(e.client.get(url), 401, "unauthenticated")
+    expired = e.app(authorizer=lambda c: LocalAuthorizer(c, ACCOUNTS, ttl_seconds=0))
+    expect(expired.get(url, headers=H("tok-staff")), 401, "unauthenticated")
+    expect(e.client.get(url, headers=H("tok-nobody")), 403, "forbidden")
+    a = expect(e.client.get(url, headers=H("tok-fin")), 404, "not_found").json()
+    b = expect(e.client.get(f"/v1/versions/{uuid.uuid4()}", headers=H("tok-staff")), 404, "not_found").json()
+    c = expect(e.client.get(pending, headers=H("tok-staff")), 404, "not_found").json()  # 非审核人看待审核的版本
+    d = expect(e.client.get("/v1/versions/abc", headers=H("tok-staff")), 404, "not_found").json()
+    assert {**a, "request_id": ""} == {**b, "request_id": ""} == {**c, "request_id": ""} == {**d, "request_id": ""}
+    expect(e.app(authorizer=lambda c: Down()).get(url, headers=H("tok-staff")), 503, "authz_unavailable")
+
+
+def s_get_version_original(e: Env):
+    url = f"/v1/versions/{e.version}/original"
+    r = expect(e.client.get(url, headers=H("tok-staff")), 200)
+    assert r.content == NORM.encode() and r.headers["content-disposition"].startswith("attachment;")
+    assert r.headers["x-content-type-options"] == "nosniff" and r.headers["content-security-policy"] == "sandbox"
+    expect(e.client.get(f"/v1/versions/{_pending_version(e, '待审核规定')}/original", headers=H("tok-rv")), 200)
+    expect(e.client.post(f"/v1/documents/{e.doc}/archive", headers=H("tok-ed")), 200)
+    expect(e.client.get(url, headers=H("tok-staff")), 404, "not_found")             # 已归档不给原件
+    expect(e.client.post(f"/v1/documents/{e.doc}/unarchive", headers=H("tok-ed")), 200)
+    expect(e.client.get(url), 401, "unauthenticated")
+    expect(e.client.get(url, headers=H("tok-nobody")), 403, "forbidden")
+    expect(e.client.get(url, headers=H("tok-fin")), 404, "not_found")
+    expect(e.app(authorizer=lambda c: Down()).get(url, headers=H("tok-staff")), 503, "authz_unavailable")
+
+
 SCENARIOS = {
     "query": s_query, "getSession": s_get_session, "cancelSession": s_cancel_session, "getEvidence": s_get_evidence,
     "uploadDocument": s_upload, "listReviewTasks": s_list_review_tasks, "submitReviewDecisions": s_review_decisions,
     "archiveDocument": s_archive, "unarchiveDocument": s_unarchive, "getForcedVerify": s_get_forced_verify,
-    "addForcedVerifyRule": s_add_forced_verify,
+    "addForcedVerifyRule": s_add_forced_verify, "getVersion": s_get_version, "getVersionOriginal": s_get_version_original,
 }
 
 

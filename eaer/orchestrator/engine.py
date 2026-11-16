@@ -37,6 +37,7 @@ from langgraph.graph import END, START, StateGraph
 from psycopg.types.json import Jsonb
 
 from eaer.adapters.model import Message, ModelClient
+from eaer.adapters.model import collect_reasoning
 from eaer.adapters.online import collect_calls, summarize
 from eaer.domain.identity import Scope
 from eaer.domain.injection import suspicious
@@ -87,6 +88,7 @@ class QueryState(TypedDict, total=False):
     traceparent: str | None            # 这次提问的 trace（W3C），后台进程接着执行时续上同一条（13.3）
     calls: Annotated[list[dict], operator.add]     # 模型调用记录，跨节点、跨进程累加
     steps: Annotated[list[dict], operator.add]     # 已完成的步骤与耗时
+    reasoning: Annotated[list[dict], operator.add]  # 模型自身的思考文字 [{"step", "text"}]，跨节点、跨进程累加
 
 
 @dataclass
@@ -111,6 +113,7 @@ class QueryResult:
     alerts: list[str] = field(default_factory=list)
     signals: list[str] = field(default_factory=list)   # 检索后观察到的 8.2 信号（不论是否引起转换）
     plan: dict | None = None           # Deep 的计划模板、分组、缺口与动作记录（8.4 的 plan、gaps、history）
+    reasoning: list[dict] = field(default_factory=list)  # 模型自身的思考文字，按步骤 [{"step", "text"}]（迁移 0014）
 
     @property
     def evidence_ids(self) -> list[str]:
@@ -122,7 +125,7 @@ class QueryResult:
                    "citations": [asdict(x) for x in c.citations]} for c in self.claims if c.status != "unsupported"]
         return {"session_id": self.session_id, "status": self.status, "mode": self.mode, "mode_path": self.mode_path,
                 "time_basis": self.time_basis, "answer": self.answer, "claims": [] if self.abstained else claims,
-                "abstained": self.abstained, "notices": self.notices}
+                "abstained": self.abstained, "notices": self.notices, "reasoning": self.reasoning}
 
 
 def _worst(a: str, b: str) -> str:
@@ -198,12 +201,14 @@ class Engine:
         """第 1 步：时间点（7.5）与 Router（8.1）。结果是图的输入，也决定提问记录的入口模式。"""
         t0 = time.monotonic()
         root = traceparent()                       # 调用方的 eaer.query；后续执行段都挂在它下面
-        with span("eaer.node.prepare", **{"eaer.node": "prepare"}) as sp, collect_calls() as calls:
+        with span("eaer.node.prepare", **{"eaer.node": "prepare"}) as sp, collect_calls() as calls, \
+                collect_reasoning() as thoughts:
             st = self._prepare(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
                                mode_hint=mode_hint, t0=t0)
             set_attrs(sp, {"eaer.mode_path": st["mode_path"], "eaer.route": st["route"].get("mode"),
                            **call_totals(calls)})
-        return {**st, "calls": codec.calls_out(calls), "traceparent": root}
+        return {**st, "calls": codec.calls_out(calls), "traceparent": root,
+                "reasoning": [{"step": "prepare", "text": t} for t in thoughts]}
 
     def _prepare(self, question: str, *, today: date, as_of_valid, as_of_system, mode_hint, t0) -> QueryState:
         tb = resolve(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
@@ -254,21 +259,24 @@ class Engine:
             escalations, st.get("rounds", 0), draft.model if draft else model_id(self.model), self._build_id(),
             cost=summarize(codec.calls_in(st.get("calls"))),
             seconds=round(sum(x["seconds"] for x in st.get("steps", [])), 3), alerts=st.get("alerts", []),
-            signals=st.get("signals", []) + [e for e in escalations if "Deep" in e], plan=st.get("plan"))
+            signals=st.get("signals", []) + [e for e in escalations if "Deep" in e], plan=st.get("plan"),
+            reasoning=list(st.get("reasoning", [])))
 
     # ---------- 节点 ----------
 
     def _node(self, name: str, fn):
         def run(st: QueryState) -> dict:
             t0 = time.monotonic()
-            with span(f"eaer.node.{name}", **{"eaer.node": name}) as sp, collect_calls() as calls:
+            with span(f"eaer.node.{name}", **{"eaer.node": name}) as sp, collect_calls() as calls, \
+                    collect_reasoning() as thoughts:
                 out = fn(st)
                 hits = out.get("hits", st.get("hits"))
                 set_attrs(sp, {"eaer.mode_path": out.get("mode_path", st.get("mode_path")),
                                "eaer.candidates": len(hits) if hits is not None else None,
                                "eaer.rounds": out.get("rounds", st.get("rounds")),
                                "eaer.claims": len(out["claims"]) if "claims" in out else None, **call_totals(calls)})
-            return {**out, "calls": codec.calls_out(calls),
+            # 思考文字只进图的状态（随检查点保存、换进程接着执行也不丢），不进 span：原文不进 trace（13.3）
+            return {**out, "calls": codec.calls_out(calls), "reasoning": [{"step": name, "text": t} for t in thoughts],
                     "steps": [{"node": name, "seconds": round(time.monotonic() - t0, 3)}]}
         return run
 
@@ -515,6 +523,7 @@ def log_fields(r: QueryResult, scope: Scope) -> dict:
         if not value:
             raise ValueError(f"query_log 缺少必填字段 {name}")
     return {"time_basis": Jsonb(r.time_basis), "mode": r.mode, "mode_path": r.mode_path, "status": r.status,
+            "reasoning": Jsonb(r.reasoning),
             "answer": r.answer, "claims": Jsonb(claims), "evidence_ids": r.evidence_ids, "abstained": r.abstained,
             "authz_decision": Jsonb(authz), "model_id": r.model, "index_build_id": r.index_build_id,
             "cost": Jsonb({**r.cost, "retrieval_rounds": r.retrieval_rounds, "seconds": r.seconds,
