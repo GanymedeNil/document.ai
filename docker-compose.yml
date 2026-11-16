@@ -1,0 +1,100 @@
+# 精简版（开发文档 13.1）：一台机器上 2 个应用进程（接口、后台任务）和 2 个基础组件（PostgreSQL、OpenSearch），
+# 一个编排文件启动全部。步骤见 docs/部署说明.md：
+#
+#   cp deploy/eaer.env.example deploy/eaer.env          # 填写口令与模型服务
+#   cp deploy/tokens.example.json deploy/tokens.json    # 换成随机令牌（参考身份实现；客户现场换成 SSO）
+#   docker compose --env-file deploy/eaer.env up -d --build
+#   python -m eaer.smoke --api http://localhost:8000 --editor … --reviewer … --user …
+#
+# 启动顺序：PostgreSQL 就绪 → 迁移（migrate）→ OpenSearch 就绪 → 建索引（init-index，别名已存在则跳过）→ 接口、后台任务。
+# PostgreSQL 与 OpenSearch 只在编排网络内可访问，不对外开放端口。项目名 eaer-lite，与开发用的 docker-compose.dev.yml 互不影响。
+name: eaer-lite
+
+x-app: &app
+  image: eaer-app:${EAER_VERSION:-dev}
+  build: .
+  env_file: deploy/eaer.env
+  environment:
+    EAER_DATABASE_URL: postgresql://eaer:${EAER_DB_PASSWORD:?在 deploy/eaer.env 中设置 EAER_DB_PASSWORD}@postgres:5432/eaer
+    EAER_OPENSEARCH_URL: http://opensearch:9200
+    EAER_INDEX_ALIAS: eaer
+    EAER_STORAGE_DIR: /data/files
+    EAER_TOKENS_FILE: /etc/eaer/tokens.json
+  volumes:
+    - files:/data/files
+    - ./deploy/tokens.json:/etc/eaer/tokens.json:ro
+  extra_hosts:
+    - host.docker.internal:host-gateway
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:18.6
+    environment:
+      POSTGRES_USER: eaer
+      POSTGRES_PASSWORD: ${EAER_DB_PASSWORD:?在 deploy/eaer.env 中设置 EAER_DB_PASSWORD}
+      POSTGRES_DB: eaer
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "eaer", "-d", "eaer"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  opensearch:
+    build: docker/opensearch
+    image: eaer-opensearch:3.9.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"          # 只在编排网络内可访问
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms${EAER_OPENSEARCH_HEAP:-1g} -Xmx${EAER_OPENSEARCH_HEAP:-1g}"
+    ulimits:
+      memlock: {soft: -1, hard: -1}
+      nofile: {soft: 65536, hard: 65536}
+    volumes:
+      - osdata:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health"]
+      interval: 10s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    <<: *app
+    command: ["python", "-m", "eaer.db", "upgrade"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  init-index:
+    <<: *app
+    command: ["python", "-m", "eaer.ingestion", "ensure-index"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      opensearch: {condition: service_healthy}
+    restart: "no"
+
+  api:
+    <<: *app
+    command: ["uvicorn", "eaer.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${EAER_API_PORT:-8000}:8000"
+    depends_on:
+      init-index: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json', timeout=3)"]
+      interval: 10s
+      retries: 12
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "eaer.ingestion"]
+    depends_on:
+      init-index: {condition: service_completed_successfully}
+
+volumes:
+  pgdata:
+  osdata:
+  files:

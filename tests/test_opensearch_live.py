@@ -1,0 +1,119 @@
+"""OpenSearch 集成测试：设置 EAER_TEST_OPENSEARCH_URL 时运行，否则跳过。
+
+需要 docker/opensearch/Dockerfile 构建的镜像（带 smartcn 与 icu 中文分词插件），
+docker-compose.dev.yml 与 CI 都用它。
+
+在真实引擎上验证：同一组过滤条件下，OpenSearch 返回的证据集合与内存实现的判断完全一致；
+写入、更新、按版本删除、别名切换和两路检索都能正常执行；大文档（超过 1 万条证据）的批量写入按大小分批，
+已写入的证据 id 能取全；
+检索评测在真实引擎上按日期回放，越权与对账差异为 0。
+"""
+from __future__ import annotations
+
+import os
+import random
+import uuid
+from dataclasses import replace
+
+import pytest
+
+from eaer.retrieval.index import MemoryIndex
+from eaer.retrieval.opensearch import OpenSearchIndex
+from test_retrieval import random_doc, random_filters
+
+URL = os.environ.get("EAER_TEST_OPENSEARCH_URL")
+pytestmark = pytest.mark.skipif(not URL, reason="未设置 EAER_TEST_OPENSEARCH_URL")
+
+
+@pytest.fixture
+def live():
+    from opensearchpy import OpenSearch
+
+    client = OpenSearch(URL)
+    alias = f"eaer-test-{uuid.uuid4().hex[:8]}"
+    ix = OpenSearchIndex(client, alias=alias)
+    name = ix.create("b1", dims=4, analyzer=os.environ.get("EAER_TEST_OPENSEARCH_ANALYZER", "smartcn"))
+    ix.switch_alias(name)
+    yield client, ix, alias
+    client.indices.delete(index=f"{alias}-*", ignore_unavailable=True)
+
+
+def test_filters_match_memory_implementation(live):
+    client, ix, alias = live
+    rng = random.Random(7)
+    docs = []
+    for i in range(300):
+        d = random_doc(rng)
+        docs.append(replace(d, evidence_id=f"ev_{i:016x}", version_id=f"v{i % 30}",
+                            embedding=tuple(rng.uniform(-1, 1) for _ in range(4))))
+    ix.upsert(docs)
+    mem = MemoryIndex()
+    mem.upsert(docs)
+    for _ in range(60):
+        f = random_filters(rng)
+        resp = client.search(index=alias, body={"size": 1000, "_source": False, "query": f.to_dsl()})
+        got = {h["_id"] for h in resp["hits"]["hits"]}
+        assert got == {d.evidence_id for d in docs if f.matches(d)}
+
+
+def test_write_search_and_delete(live):
+    client, ix, alias = live
+    d = replace(random_doc(random.Random(3)), evidence_id="ev_" + "a" * 16, version_id="v1", tenant_id="t1",
+                principals=("A",), doc_type="normative", valid_from=None, valid_to=None,
+                text="一线城市住宿上限 650", embedding=(1.0, 0.0, 0.0, 0.0))
+    ix.upsert([d])
+    f = random_filters(random.Random(5))
+    f = replace(f, tenant_id="t1", principals=frozenset({"A"}), system_t=None)
+    assert ix.search_text("住宿上限", f, 10)[0][0] == d.evidence_id
+    assert ix.search_vector([1.0, 0.0, 0.0, 0.0], f, 10)[0][0] == d.evidence_id
+    ix.update_fields([d.evidence_id], {"principals": ("B",)})
+    assert ix.search_text("住宿上限", f, 10) == []
+    assert ix.indexed_ids("v1") == {d.evidence_id} and ix.version_ids("t1") == {"v1"}
+    assert ix.evidence_counts("t1") == {"v1": 1} and ix.evidence_counts("t2") == {}
+    ix.delete_version("v1")
+    assert ix.indexed_ids("v1") == set()
+
+
+def test_large_version_is_written_in_chunks_and_listed_in_full(live):
+    """2026-11-14 ViDoRe 入库发现：一份报告 16,413 条证据，一次批量写入数百 MB，被 413 / 429 拒绝；
+    已写入的证据 id 只取到前 10,000 条。"""
+    client, ix, alias = live
+    base = replace(random_doc(random.Random(9)), version_id="big", tenant_id="t1", embedding=(0.1, 0.2, 0.3, 0.4))
+    docs = [replace(base, evidence_id=f"ev_{i:016x}", text=f"表格单元格 {i}") for i in range(10_500)]
+    calls = []
+    real = client.bulk
+
+    def counting(**kw):
+        calls.append((len(kw["body"]), kw["refresh"]))
+        return real(**kw)
+    client.bulk = counting
+    ix.max_bulk_bytes = 400_000
+    ix.upsert(docs)
+    assert len(calls) > 5 and sum(n for n, _ in calls) == 2 * len(docs)
+    assert [r for _, r in calls] == [False] * (len(calls) - 1) + [True]          # 只在最后一批刷新
+    assert ix.indexed_ids("big") == {d.evidence_id for d in docs}
+    assert ix.evidence_counts("t1") == {"big": len(docs)}                        # 对账按条数比较，超过 10,000 也准
+    calls.clear()
+    ix.update_fields([d.evidence_id for d in docs], {"principals": ("B",)})
+    assert len(calls) > 1
+
+
+def test_evaluation_replays_on_real_engine(make_db, tmp_path, monkeypatch):
+    """检索评测在真实 OpenSearch 上回放（每种候选分词器各一次）：越权 0、对账差异 0、拒答类全部正确。"""
+    from opensearchpy import OpenSearch
+
+    from eaer.evalrun.analyzers import DEFAULT_ANALYZERS, compare
+    from factset import load
+    from factset.render import Renderer
+    from fixture import sample, write
+
+    monkeypatch.setenv("EAER_ENV", "eval")
+    fs = load(write(sample(), tmp_path / "s.xlsx"))
+    manifest = Renderer(fs).render(tmp_path / "corpus", "html")
+    rows = compare(fs, tmp_path / "corpus", manifest, client=OpenSearch(URL), new_db=make_db,
+                   analyzers=DEFAULT_ANALYZERS, work_dir=tmp_path)
+    assert len(rows) == 2 * len(DEFAULT_ANALYZERS)
+    for r in rows:
+        assert r.report.leaks == 0 and r.report.reconcile_diffs == 0, (r.analyzer, r.mode)
+        assert r.refused_ok == r.refusals == 3, (r.analyzer, r.mode)
+        assert r.scored == 12 and r.hits >= 11, (r.analyzer, r.mode, r.misses)

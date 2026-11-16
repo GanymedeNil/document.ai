@@ -1,0 +1,1364 @@
+# EAER 对外接口的唯一定义（开发文档第 11 节）。
+# 改接口时先改本文件；实现与它的一致性由 tests/test_contract.py 检查（AC-11-1）。
+# 接口进程的 /openapi.json 与 /docs 展示的就是本文件。
+# 注意：YAML 里的日期、状态码一律加引号，否则会被读成日期对象或整数。
+openapi: 3.1.0
+info:
+  title: EAER 对外接口
+  version: 1.0.0
+  summary: 带出处、版本与有效期的企业问答，以及文档的上传、审核与归档
+  description: |
+    通用约定（11.1）：
+
+    - 路径前缀 `/v1`。请求与响应为 JSON；上传用 `multipart/form-data`，流式提问用 `text/event-stream`。
+    - 身份令牌放在 `Authorization: Bearer` 头中。
+    - 每个响应带 `X-Request-Id` 头。错误响应体为 `{code, message, request_id}`，`request_id` 与该头相同。
+    - 无权访问与不存在不区分，一律 404 `not_found`；格式不对的 id 也按不存在处理。
+    - 列表接口用游标分页：`cursor` 与 `limit`，返回 `next_cursor`（为 null 表示没有下一页）。
+    - 需要文档权限的接口经授权服务解析授权范围；授权服务不可用时返回 503 `authz_unavailable`，不退化为放行。
+    - 请求里未定义的字段被忽略。
+
+    - 频率限制（11.1 的 429 `rate_limited`）：每个用户每分钟的提问、上传次数有上限（部署环境变量
+      `EAER_RATE_QUERY_PER_MINUTE`、`EAER_RATE_UPLOAD_PER_MINUTE`，默认 30、120），超过时返回 429 与 `Retry-After`。
+servers:
+  - url: /
+security:
+  - bearer: []
+tags:
+  - name: 提问与会话
+  - name: 证据
+  - name: 文档与审核
+  - name: 配置
+
+paths:
+  /v1/query:
+    post:
+      operationId: query
+      tags: [提问与会话]
+      summary: 提问
+      description: |
+        按授权范围检索并回答，回答中的每条结论附引用（文档、版本、定位、有效期来源等级）。
+
+        - 时间点：`as_of_valid`（某天实际生效）与 `as_of_system`（截至某天系统所知）优先于从问题中识别的结果；
+          两者都不传时按问题里的时间点，没有则按当前生效。
+        - `mode_hint` 只能把模式提高，不能降低（8.1）。
+        - 多轮记忆：接着已有会话提问时，追问（“那二类呢？”“这个规定什么时候生效？”）先结合同一用户在这个会话里
+          最近几次已完成的提问改写成完整的问题，之后的时间点识别、路由、检索与核对都用改写后的问题，回答的
+          `standalone_question` 给出改写结果，`notices` 里说明“结合上文，问题理解为……”。给模型的上文只有之前提问的原话
+          与那些回答引用的、当前仍有权可搜索的文档标题，不含之前回答的正文。强制验证的关键词规则按原话与改写后的问题一起判断。
+        - 同步时限（`budgets.sync_seconds`，初值 30 秒）内完成的返回 `completed`；超过时限返回 `running`，
+          其余字段为空，查询在当前步骤结束后转入后台，客户端轮询会话接口（8.5）。
+        - `stream` 为 true 时以 SSE 返回，事件依次为 `mode`（每个经过的模式各一次）、`notice`、`reasoning`
+          （模型自身的思考文字，每个步骤每次生成一条；生成服务未开启思考时没有）、`delta`（回答文本增量）、
+          `claim`（每条结论）、`done`（与非流式响应相同的完整响应）。转入后台时依次为 `mode`、`notice`、`done`
+          （status 为 running）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/QueryRequest'}
+            example:
+              question: 2026 年 3 月 15 日，一线城市的住宿报销上限是多少？
+              session_id: null
+              as_of_valid: null
+              as_of_system: null
+              mode_hint: null
+              stream: false
+      responses:
+        '200':
+          description: 回答；或转入后台（running）、已被取消（cancelled）
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/QueryResponse'}
+            text/event-stream:
+              description: |
+                每个事件为 `event: <名称>` 与 `data: <JSON>` 两行，后接空行。各事件 data 的结构见 `x-events`。
+                `error` 事件为保留：当前实现在开始推送前已完成全部计算，出错时直接返回错误响应。
+              schema: {type: string}
+              x-events:
+                mode: {$ref: '#/components/schemas/StreamMode'}
+                notice: {$ref: '#/components/schemas/StreamText'}
+                reasoning: {$ref: '#/components/schemas/ReasoningStep'}
+                delta: {$ref: '#/components/schemas/StreamText'}
+                claim: {$ref: '#/components/schemas/Claim'}
+                done: {$ref: '#/components/schemas/QueryResponse'}
+                error: {$ref: '#/components/schemas/Error'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/ScopeUndetermined'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '404':
+          description: session_id 是其他用户的会话
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/NotFoundError'}
+        '502':
+          description: 模型服务最终调用失败（已按配置重试），不返回空答案；该次提问仍记入 query_log（status=failed）
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/Error'}
+                  - properties: {code: {const: model_error}}
+        '503':
+          description: 授权服务不可用（authz_unavailable），或未配置提问服务（query_unavailable）
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/Error'}
+                  - properties: {code: {enum: [authz_unavailable, query_unavailable]}}
+
+  /v1/sessions/{session_id}:
+    get:
+      operationId: getSession
+      tags: [提问与会话]
+      summary: 会话历史、引用记录与进行中查询的进度
+      description: 会话只属于发起它的用户；别人的会话与不存在的会话不区分（404）。被判为不支持的结论不返回。
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+      responses:
+        '200':
+          description: 按提问时间排列的记录
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Session'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '404': {$ref: '#/components/responses/NotFound'}
+
+  /v1/sessions/{session_id}/cancel:
+    post:
+      operationId: cancelSession
+      tags: [提问与会话]
+      summary: 取消会话中进行中的查询
+      description: 排队中的立即取消（cancelled）；执行中的在当前步骤结束后停止（cancelling）。
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+      responses:
+        '200':
+          description: 每个被取消的查询及其状态
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CancelResult'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409':
+          description: 会话中没有进行中的查询
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/Error'}
+                  - properties: {code: {const: not_running}}
+
+  /v1/evidence/{evidence_id}:
+    get:
+      operationId: getEvidence
+      tags: [证据]
+      summary: 取证据原文与定位
+      description: |
+        可搜索且有权：返回原文、定位、有效期，以及所在版本的文档日期与出处。已归档且有权：只返回归档提示，不返回原文（6.6）。
+        其余一律 404，不论不存在、无权、待审核还是已删除，响应体除 request_id 外逐字相同（10.2、AC-10-6）。
+      parameters:
+        - name: evidence_id
+          in: path
+          required: true
+          description: 证据 id（4.3）。格式不对按不存在处理
+          schema: {type: string, pattern: '^ev_[0-9a-f]{16}$'}
+      responses:
+        '200':
+          description: 证据（status 为 searchable 或 archived）
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - {$ref: '#/components/schemas/Evidence'}
+                  - {$ref: '#/components/schemas/ArchivedEvidence'}
+                discriminator:
+                  propertyName: status
+                  mapping:
+                    searchable: '#/components/schemas/Evidence'
+                    archived: '#/components/schemas/ArchivedEvidence'
+        '401':
+          description: 缺少或无效的身份令牌，或授权范围已过期（需要重新登录）
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UnauthenticatedError'}
+        '403': {$ref: '#/components/responses/ScopeUndetermined'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/AuthzUnavailable'}
+
+  /v1/versions/{version_id}:
+    get:
+      operationId: getVersion
+      tags: [证据]
+      summary: 取一个版本的全文（全部证据）
+      description: |
+        查看引用所在文档的全文，或审核时阅读待审核的文档。全文即该版本的全部证据，按页、段落、表格、图表排列。
+        可访问的条件与证据接口相同（10.2、AC-10-6）：
+
+        - 可搜索且有权：授权接口核对该版本的证据，库中核对租户、状态与角色；返回全部证据，access 为 permission。
+        - 已归档且有权：只返回归档提示，不返回原文（6.6）。
+        - 待审核：只对本租户有 reviewer 角色的身份返回全部证据（审核需要阅读内容），access 为 review。
+        - 其余一律 404，不论不存在、无权、待审核（非审核人）、已删除还是其他租户，响应体除 request_id 外逐字相同。
+      parameters:
+        - {$ref: '#/components/parameters/VersionId'}
+      responses:
+        '200':
+          description: 版本全文（searchable、pending_review）或归档提示（archived）
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - {$ref: '#/components/schemas/VersionContent'}
+                  - {$ref: '#/components/schemas/ArchivedVersion'}
+                discriminator:
+                  propertyName: status
+                  mapping:
+                    searchable: '#/components/schemas/VersionContent'
+                    pending_review: '#/components/schemas/VersionContent'
+                    archived: '#/components/schemas/ArchivedVersion'
+        '401':
+          description: 缺少或无效的身份令牌，或授权范围已过期（需要重新登录）
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UnauthenticatedError'}
+        '403': {$ref: '#/components/responses/ScopeUndetermined'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/AuthzUnavailable'}
+
+  /v1/versions/{version_id}/original:
+    get:
+      operationId: getVersionOriginal
+      tags: [证据]
+      summary: 下载版本的原件
+      description: |
+        可访问的条件与 getVersion 相同；已归档的版本不给原件（404，与不存在相同）。
+        原件一律作为附件下载（Content-Disposition: attachment，Content-Type 为 application/octet-stream），
+        并带 X-Content-Type-Options: nosniff 与 Content-Security-Policy: sandbox，不在浏览器中直接打开
+        （上传的 HTML 原件若按网页打开，会在接口所在的源里执行）。
+      parameters:
+        - {$ref: '#/components/parameters/VersionId'}
+      responses:
+        '200':
+          description: 原件
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+            Content-Disposition:
+              description: attachment，filename* 为 UTF-8 编码的原文件名
+              required: true
+              schema: {type: string}
+          content:
+            application/octet-stream:
+              schema: {type: string, contentMediaType: application/octet-stream}
+        '401':
+          description: 缺少或无效的身份令牌，或授权范围已过期（需要重新登录）
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UnauthenticatedError'}
+        '403': {$ref: '#/components/responses/ScopeUndetermined'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/AuthzUnavailable'}
+
+  /v1/documents:
+    post:
+      operationId: uploadDocument
+      tags: [文档与审核]
+      summary: 上传文档，进入待审核
+      description: |
+        需要 editor 角色。同一租户内已有内容完全相同的版本时不重复入库，返回已有的版本（200，duplicate 为 true）。
+        支持的格式见 6.1；不支持的格式返回 400。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, principals]
+              properties:
+                file:
+                  type: string
+                  contentMediaType: application/octet-stream
+                  description: 原始文件
+                principals:
+                  type: string
+                  minLength: 1
+                  description: 可访问的角色，分号或逗号分隔（全角分号亦可），至少一个
+                source_ref: {type: string, description: 来源标识，同一来源的后续上传成为该文档的新版本；不传时取去掉扩展名的文件名}
+                title: {type: string, description: 标题；不传时用解析出的文档标题}
+                import_batch_id: {type: string, description: 批量导入批次；同一批次的版本时间来源等级为 unknown}
+                batch_id: {type: string, format: uuid, description: 审核批次，审核任务可按它筛选}
+      responses:
+        '201':
+          description: 已接收，等待解析与审核
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UploadResult'}
+        '200':
+          description: 内容相同的版本已存在，未重复入库
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UploadResult'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/RoleRequired'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+
+  /v1/review/tasks:
+    get:
+      operationId: listReviewTasks
+      tags: [文档与审核]
+      summary: 列出审核任务
+      description: |
+        需要 reviewer 角色。只列出本租户的任务，按任务 id 排序，游标分页。
+        status=deleted 列出已删除的待审核版本留下的审核记录（谁在何时删除，不含内容）。
+      parameters:
+        - name: status
+          in: query
+          schema: {type: string, enum: [open, approved, deleted], default: open}
+        - name: batch_id
+          in: query
+          schema: {type: string, format: uuid}
+        - name: cursor
+          in: query
+          description: 上一页响应的 next_cursor
+          schema: {type: string}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+      responses:
+        '200':
+          description: 一页审核任务
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReviewTaskPage'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/RoleRequired'}
+
+  /v1/review/decisions:
+    post:
+      operationId: submitReviewDecisions
+      tags: [文档与审核]
+      summary: 提交审核决定，支持一次多份
+      description: |
+        需要 reviewer 角色。每份单独成事务，逐份返回结果；一份失败不影响其他份（6.3）。
+        业务上不能执行的决定（任务不存在或已处理、抽取未完成、文档类型未确认、关系指向的版本不存在等）
+        在该份的结果中返回 ok=false 与原因；请求格式不对（含 corrections 的格式）则整个请求 400。
+        不做按规则自动通过。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Decisions'}
+            example:
+              decisions:
+                - task_id: 7f1c2a52-3c0b-4d7e-9a51-2f7d1b3e8c10
+                  decision: approve
+                  corrections:
+                    doc_type: normative
+                    valid_from: {value: '2025-03-01', grade: explicit}
+                    valid_to: null
+                    relations:
+                      - {relation: supersedes, to_document_id: 0b6f3d1e-8f2a-4c55-b1e4-6a9d2c7e5f30, to_version_no: 1}
+                - {task_id: 2d9e4b7a-1f63-4a08-8c2e-5b7a9d3f1e64, decision: delete}
+      responses:
+        '200':
+          description: 逐份结果，顺序与请求相同
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DecisionResults'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/RoleRequired'}
+
+  /v1/documents/{document_id}/archive:
+    post:
+      operationId: archiveDocument
+      tags: [文档与审核]
+      summary: 归档文档
+      description: 需要 editor 角色。以文档为单位，归档全部可搜索版本；归档后的提问一律查不到，回溯查询也不例外（6.6）。
+      parameters:
+        - {$ref: '#/components/parameters/DocumentId'}
+      responses:
+        '200':
+          description: 已归档
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ArchiveResult'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/RoleRequired'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/InvalidState'}
+
+  /v1/documents/{document_id}/unarchive:
+    post:
+      operationId: unarchiveDocument
+      tags: [文档与审核]
+      summary: 取消归档
+      description: 需要 editor 角色。恢复为可搜索，不重新审核，approved_at 不变（6.6）。
+      parameters:
+        - {$ref: '#/components/parameters/DocumentId'}
+      responses:
+        '200':
+          description: 已恢复为可搜索
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UnarchiveResult'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/RoleRequired'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/InvalidState'}
+
+  /v1/config/answer-policy:
+    get:
+      operationId: getAnswerPolicy
+      tags: [配置]
+      summary: 读取租户默认的回答方式
+      description: 严格模式或宽松模式（默认宽松）；提问时可用 strict 参数按次覆盖。两种模式的区别见 QueryRequest.strict。
+      responses:
+        '200':
+          description: 租户默认的回答方式
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AnswerPolicy'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+    put:
+      operationId: setAnswerPolicy
+      tags: [配置]
+      summary: 设置租户默认的回答方式
+      description: 需要 admin 角色。下一次提问立即生效；已缓存的回答按模式分开，不会串用。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AnswerPolicy'}
+            example: {strict: true}
+      responses:
+        '200':
+          description: 设置后的回答方式
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AnswerPolicy'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/RoleRequired'}
+
+  /v1/config/forced-verify:
+    get:
+      operationId: getForcedVerify
+      tags: [配置]
+      summary: 读取强制验证清单
+      description: 内置规则与租户追加的规则。命中任一规则的提问必须走 Verified（8.1）。
+      responses:
+        '200':
+          description: 强制验证清单
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ForcedVerifyList'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+    post:
+      operationId: addForcedVerifyRule
+      tags: [配置]
+      summary: 增加强制验证规则
+      description: |
+        需要 admin 角色。只能增加，不提供删除或修改的接口（AC-11-5）；增加后下一次提问立即生效。
+        同种类、同取值的规则已存在时原样返回（200）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ForcedVerifyRuleRequest'}
+            example: {kind: keyword, value: 安全生产, description: 涉及安全生产的提问一律验证}
+      responses:
+        '201':
+          description: 已增加
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ForcedVerifyRule'}
+        '200':
+          description: 同样的规则已存在
+          headers:
+            X-Request-Id: {$ref: '#/components/headers/RequestId'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ForcedVerifyRule'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthenticated'}
+        '403': {$ref: '#/components/responses/RoleRequired'}
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: 身份令牌。参考实现是配置好的令牌表，客户现场换成 SSO
+
+  headers:
+    RequestId:
+      description: 本次请求的编号，错误响应体中的 request_id 与它相同
+      required: true
+      schema: {type: string, pattern: '^req_[0-9a-f]{16}$'}
+
+  parameters:
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      description: 会话 id。格式不对按不存在处理
+      schema: {type: string, format: uuid}
+    DocumentId:
+      name: document_id
+      in: path
+      required: true
+      description: 文档 id。格式不对按不存在处理
+      schema: {type: string, format: uuid}
+    VersionId:
+      name: version_id
+      in: path
+      required: true
+      description: 版本 id（引用中的 version_id、审核任务中的 version_id）。格式不对按不存在处理
+      schema: {type: string, format: uuid}
+
+  responses:
+    InvalidRequest:
+      description: 参数缺失或格式错误（invalid_request）
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: '#/components/schemas/Error'}
+              - properties: {code: {const: invalid_request}}
+    Unauthenticated:
+      description: 缺少身份令牌，或令牌无效、已过期（unauthenticated）
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/UnauthenticatedError'}
+    RoleRequired:
+      description: 身份没有该操作需要的角色（forbidden）
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ForbiddenError'}
+    ScopeUndetermined:
+      description: 授权服务无法为该身份确定授权范围（forbidden）
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ForbiddenError'}
+    NotFound:
+      description: 不存在，或无权查看（两者不区分）
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/NotFoundError'}
+    InvalidState:
+      description: 当前状态不允许该操作（invalid_state），如归档没有可搜索版本的文档、取消归档没有已归档版本的文档
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: '#/components/schemas/Error'}
+              - properties: {code: {const: invalid_state}}
+    RateLimited:
+      description: |
+        超过频率限制（rate_limited）：每个用户每分钟的提问、上传次数有上限（部署时配置，默认 30、120）。
+        Retry-After 给出到下一分钟的秒数；多个接口实例共用同一份计数。
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+        Retry-After:
+          description: 需要等待的秒数
+          required: true
+          schema: {type: string, pattern: '^[1-9][0-9]*$'}
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: '#/components/schemas/Error'}
+              - properties: {code: {const: rate_limited}}
+    AuthzUnavailable:
+      description: 授权服务不可用（authz_unavailable）
+      headers:
+        X-Request-Id: {$ref: '#/components/headers/RequestId'}
+      content:
+        application/json:
+          schema:
+            allOf:
+              - {$ref: '#/components/schemas/Error'}
+              - properties: {code: {const: authz_unavailable}}
+
+  schemas:
+    # ---------- 通用 ----------
+    Error:
+      type: object
+      description: 错误响应（11.1）
+      required: [code, message, request_id]
+      additionalProperties: false
+      properties:
+        code: {type: string, pattern: '^[a-z_]+$', description: 机器可读的错误码}
+        message: {type: string, minLength: 1, description: 给人看的说明}
+        request_id: {type: string, pattern: '^req_[0-9a-f]{16}$'}
+    UnauthenticatedError:
+      allOf:
+        - {$ref: '#/components/schemas/Error'}
+        - properties: {code: {const: unauthenticated}}
+    ForbiddenError:
+      allOf:
+        - {$ref: '#/components/schemas/Error'}
+        - properties: {code: {const: forbidden}}
+    NotFoundError:
+      allOf:
+        - {$ref: '#/components/schemas/Error'}
+        - properties: {code: {const: not_found}}
+    Mode:
+      type: string
+      enum: [fast, deep, verified]
+    ValidGrade:
+      type: string
+      description: 有效期的来源等级（7.1）
+      enum: [explicit, inferred, unknown]
+    DocType:
+      type: string
+      description: 规范类（normative）或记录类（record）
+      enum: [normative, record]
+    EvidenceId:
+      type: string
+      pattern: '^ev_[0-9a-f]{16}$'
+    Locator:
+      type: object
+      description: 证据在原文中的位置，如段落、页码、表格的行列
+
+    # ---------- 提问 ----------
+    QueryRequest:
+      type: object
+      required: [question]
+      properties:
+        question: {type: string, minLength: 1, maxLength: 2000}
+        session_id:
+          type: [string, 'null']
+          format: uuid
+          description: 接着已有会话提问，或用客户端生成的新 id 开始会话；不传则由服务端生成。其他用户的会话按不存在处理（404）
+        as_of_valid:
+          type: [string, 'null']
+          format: date
+          description: 按这一天实际生效的版本回答
+        as_of_system:
+          type: [string, 'null']
+          format: date
+          description: 按截至这一天系统所知的记录回答（回溯）
+        mode_hint:
+          enum: [fast, deep, verified, null]
+          description: 希望使用的模式，只能提高
+        strict:
+          type: [boolean, 'null']
+          description: |
+            这次提问用严格模式（true）还是宽松模式（false）；不传或为 null 时取租户默认（GET /v1/config/answer-policy）。
+            严格模式只认证据原文，证据没写明问题中的对象属于哪一类时逐类给出规定；宽松模式另外允许按证据里的单价写出算式
+            算合计（结果为未验证、写出算式）、按常识判断对象属于哪一类（单列一条，未验证）、证据只覆盖一部分时先答能答的部分。
+            两种模式下制度的规定与取值都只能出自证据
+        stream: {type: boolean, default: false}
+    TimeBasis:
+      type: object
+      description: 回答所依据的时间点及其来源（7.5）
+      required: [as_of_valid, as_of_system, source]
+      additionalProperties: false
+      properties:
+        as_of_valid: {type: [string, 'null'], format: date}
+        as_of_system: {type: [string, 'null'], format: date}
+        source:
+          type: string
+          description: parameter 为接口参数，parsed 为从问题中识别，model 为模型识别，today 为未指定时间点
+          enum: [parameter, parsed, model, today]
+        unresolved:
+          type: array
+          description: 问题中无法换算为具体日期的相对表述，原文保留
+          items: {type: string}
+    Citation:
+      type: object
+      required: [evidence_id, document_id, version_id, version_no, locator, valid_grade]
+      additionalProperties: false
+      properties:
+        evidence_id: {$ref: '#/components/schemas/EvidenceId'}
+        document_id: {type: string, format: uuid}
+        version_id: {type: string, format: uuid}
+        version_no: {type: [integer, 'null'], minimum: 1}
+        locator: {$ref: '#/components/schemas/Locator'}
+        valid_grade:
+          description: 所引版本生效日的来源等级；记录类文档没有有效期时为 null
+          enum: [explicit, inferred, unknown, null]
+    Claim:
+      type: object
+      description: 回答中的一条结论（9.1）。判为不支持的结论不返回
+      required: [text, status, core, basis, citations]
+      additionalProperties: false
+      properties:
+        text: {type: string}
+        status:
+          type: string
+          description: supported 为通过验证；unverified 为未验证（拿不准、未经 Verified，或来源等级不足）
+          enum: [supported, unverified]
+        core: {type: boolean, description: 是否为回答问题所必需的核心结论}
+        basis:
+          type: string
+          description: |
+            结论的依据。evidence 为证据原文；calculation 为按证据里的单价与问题给的数量写出算式算出（代码核对了算术，
+            status 为 unverified）；common_knowledge 为宽松模式下按常识判断问题中的对象属于哪一类（不引证据，status 为 unverified）
+          enum: [evidence, calculation, common_knowledge]
+        citations:
+          type: array
+          items: {$ref: '#/components/schemas/Citation'}
+    QueryResponse:
+      oneOf:
+        - {$ref: '#/components/schemas/QueryAnswer'}
+        - {$ref: '#/components/schemas/QueryPending'}
+      discriminator:
+        propertyName: status
+        mapping:
+          completed: '#/components/schemas/QueryAnswer'
+          running: '#/components/schemas/QueryPending'
+          cancelled: '#/components/schemas/QueryPending'
+    QueryAnswer:
+      type: object
+      description: 已完成的回答
+      required: [session_id, status, mode, mode_path, time_basis, answer, claims, abstained, notices, reasoning, strict,
+                 standalone_question]
+      additionalProperties: false
+      properties:
+        session_id: {type: string, format: uuid}
+        status: {const: completed}
+        strict: {type: boolean, description: 这次用的回答方式：true 严格模式，false 宽松模式}
+        mode: {$ref: '#/components/schemas/Mode'}
+        mode_path:
+          type: array
+          description: 实际经过的模式，如 [fast, deep, verified]
+          minItems: 1
+          items: {$ref: '#/components/schemas/Mode'}
+        time_basis: {$ref: '#/components/schemas/TimeBasis'}
+        answer: {type: string}
+        claims:
+          type: array
+          items: {$ref: '#/components/schemas/Claim'}
+        abstained: {type: boolean, description: 是否拒答（证据不足、无权或已归档时不编造）}
+        notices:
+          type: array
+          description: 给用户的说明，如所用时间点、未验证的原因
+          items: {type: string}
+        reasoning:
+          type: array
+          description: 模型自身的思考文字，按发生顺序；生成服务未开启思考、或模型不给思考文字时为空
+          items: {$ref: '#/components/schemas/ReasoningStep'}
+        standalone_question:
+          type: [string, 'null']
+          description: 追问结合会话上文改写后的问题（之后的检索与回答都用它）；不是追问、或问题本身完整时为 null
+      if:
+        properties: {abstained: {const: true}}
+      then:
+        properties: {claims: {maxItems: 0}}
+    QueryPending:
+      type: object
+      description: 超过同步时限、已转入后台（running），或执行中被取消（cancelled）；其余字段为空
+      required: [session_id, status, mode, mode_path, time_basis, answer, claims, abstained, notices, reasoning, strict,
+                 standalone_question]
+      additionalProperties: false
+      properties:
+        session_id: {type: string, format: uuid}
+        status: {enum: [running, cancelled]}
+        strict: {type: 'null'}
+        mode: {type: 'null'}
+        mode_path: {type: array, maxItems: 0}
+        time_basis: {type: 'null'}
+        answer: {type: 'null'}
+        claims: {type: array, maxItems: 0}
+        abstained: {type: 'null'}
+        notices: {type: array, maxItems: 0}
+        reasoning: {type: array, maxItems: 0}
+        standalone_question: {type: 'null'}
+    StreamMode:
+      type: object
+      required: [mode]
+      additionalProperties: false
+      properties:
+        mode: {$ref: '#/components/schemas/Mode'}
+    StreamText:
+      type: object
+      required: [text]
+      additionalProperties: false
+      properties:
+        text: {type: string}
+    ReasoningStep:
+      type: object
+      description: |
+        模型在一个步骤里的一次思考（生成服务开启思考时，OpenAI 兼容接口的 message.reasoning_content）。
+        step 为编排的步骤：prepare 时间点与路由、first 检索与生成、escalate 升级判断（含 Deep）、verify 验证、assemble 组装回答。
+        只记在提问记录里，不进 trace。
+      required: [step, text]
+      additionalProperties: false
+      properties:
+        step: {type: string, enum: [prepare, first, escalate, verify, assemble]}
+        text: {type: string, minLength: 1}
+
+    # ---------- 会话 ----------
+    Session:
+      type: object
+      required: [session_id, items]
+      additionalProperties: false
+      properties:
+        session_id: {type: string, format: uuid}
+        items:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/SessionItem'}
+    SessionItem:
+      type: object
+      required: [query_id, asked_at, question, time_basis, mode, mode_path, status, answer, abstained, background, claims,
+                 reasoning, strict, standalone_question]
+      additionalProperties: false
+      properties:
+        query_id: {type: string, format: uuid}
+        asked_at: {type: string, format: date-time}
+        question: {type: string}
+        time_basis:
+          description: 失败的提问为空对象
+          oneOf:
+            - {$ref: '#/components/schemas/TimeBasis'}
+            - {type: object, maxProperties: 0}
+            - {type: 'null'}
+        mode: {$ref: '#/components/schemas/Mode'}
+        mode_path:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/Mode'}
+        status: {type: string, enum: [running, completed, cancelled, failed]}
+        answer: {type: [string, 'null']}
+        abstained: {type: boolean}
+        background: {type: boolean, description: 是否曾转入后台执行}
+        strict:
+          type: [boolean, 'null']
+          description: 这次用的回答方式（true 严格、false 宽松）；加入这个开关之前的提问为 null
+        claims:
+          type: array
+          description: 历史回答的引用记录；文档归档后仍保留，点开引用得到归档提示
+          items: {$ref: '#/components/schemas/Claim'}
+        reasoning:
+          type: array
+          description: 模型自身的思考文字，提问结束时写入（进行中为空）；没有时为空
+          items: {$ref: '#/components/schemas/ReasoningStep'}
+        standalone_question:
+          type: [string, 'null']
+          description: 追问结合会话上文改写后的问题；question 是用户的原话。不是追问时为 null
+        progress: {$ref: '#/components/schemas/Progress'}
+      if:
+        properties: {status: {const: running}}
+      then:
+        required: [progress]
+      else:
+        not: {required: [progress]}
+    Progress:
+      type: object
+      description: 执行中查询的进度（8.5）
+      required: [done, next, mode_path, retrieval_rounds]
+      additionalProperties: false
+      properties:
+        done:
+          type: array
+          description: 已完成的步骤
+          items: {type: string}
+        next: {type: [string, 'null'], description: 下一步}
+        mode_path:
+          type: array
+          items: {$ref: '#/components/schemas/Mode'}
+        retrieval_rounds: {type: integer, minimum: 0}
+        retry_after: {type: string, format: date-time, description: 因依赖服务暂时不可用而等待重试时，下次执行的最早时间}
+        waiting: {type: [string, 'null'], description: 等待重试的原因}
+    CancelResult:
+      type: object
+      required: [session_id, items]
+      additionalProperties: false
+      properties:
+        session_id: {type: string, format: uuid}
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [query_id, status]
+            additionalProperties: false
+            properties:
+              query_id: {type: string, format: uuid}
+              status:
+                type: string
+                description: cancelled 为已取消（排队中）；cancelling 为将在当前步骤结束后停止（执行中）
+                enum: [cancelled, cancelling]
+
+    # ---------- 证据 ----------
+    Validity:
+      type: object
+      description: 版本当前记录的有效期（7.3）；valid_to 是不再有效的第一天
+      required: [valid_from, valid_from_grade, valid_to, valid_to_grade]
+      additionalProperties: false
+      properties:
+        valid_from: {type: [string, 'null'], format: date}
+        valid_from_grade: {$ref: '#/components/schemas/ValidGrade'}
+        valid_to: {type: [string, 'null'], format: date}
+        valid_to_grade: {$ref: '#/components/schemas/ValidGrade'}
+    Evidence:
+      type: object
+      required: [evidence_id, status, modality, content, locator, parse_stage, document, version, validity]
+      additionalProperties: false
+      properties:
+        evidence_id: {$ref: '#/components/schemas/EvidenceId'}
+        status: {const: searchable}
+        modality: {type: string, enum: [text, table, figure]}
+        content: {type: string, description: 原文}
+        locator: {$ref: '#/components/schemas/Locator'}
+        parse_stage: {type: string, description: text 为快速解析，deep 为深度解析, enum: [text, deep]}
+        document:
+          type: object
+          required: [id, title, doc_type]
+          additionalProperties: false
+          properties:
+            id: {type: string, format: uuid}
+            title: {type: string}
+            doc_type:
+              oneOf:
+                - {$ref: '#/components/schemas/DocType'}
+                - {type: 'null'}
+        version:
+          type: object
+          required: [id, version_no, approved_at, doc_date, publisher]
+          additionalProperties: false
+          properties:
+            id: {type: string, format: uuid}
+            version_no: {type: integer, minimum: 1}
+            approved_at: {type: string, format: date-time}
+            doc_date:
+              type: [string, 'null']
+              format: date
+              description: 文档日期（发布日、报告日；数据源给出或从正文识别，不是上传时间），没有时为 null
+            publisher:
+              type: [string, 'null']
+              description: 出处（发布方、来源名称，数据源随文档给出），没有时为 null
+        validity:
+          oneOf:
+            - {$ref: '#/components/schemas/Validity'}
+            - {type: 'null'}
+    ArchivedEvidence:
+      type: object
+      description: 已归档：只给归档提示，不给原文
+      required: [evidence_id, status, notice, document, version]
+      additionalProperties: false
+      properties:
+        evidence_id: {$ref: '#/components/schemas/EvidenceId'}
+        status: {const: archived}
+        notice: {type: string}
+        document:
+          type: object
+          required: [id, title]
+          additionalProperties: false
+          properties:
+            id: {type: string, format: uuid}
+            title: {type: string}
+        version:
+          type: object
+          required: [id, version_no]
+          additionalProperties: false
+          properties:
+            id: {type: string, format: uuid}
+            version_no: {type: integer, minimum: 1}
+
+    VersionEvidence:
+      type: object
+      description: 版本中的一条证据
+      required: [evidence_id, modality, content, locator, parse_stage]
+      additionalProperties: false
+      properties:
+        evidence_id: {$ref: '#/components/schemas/EvidenceId'}
+        modality: {type: string, enum: [text, table, figure]}
+        content: {type: string, description: 原文}
+        locator: {$ref: '#/components/schemas/Locator'}
+        parse_stage: {type: string, enum: [text, deep]}
+    VersionContent:
+      type: object
+      description: 版本全文：全部证据按页（没有页码的在前）、正文段落、表格（表、行、列）、图表排列
+      required: [status, access, document, version, validity, original, evidence]
+      additionalProperties: false
+      properties:
+        status: {type: string, enum: [searchable, pending_review]}
+        access:
+          type: string
+          description: permission 为按文档权限可见（可搜索的版本）；review 为审核人查看待审核的版本
+          enum: [permission, review]
+        document:
+          type: object
+          required: [id, title, doc_type]
+          additionalProperties: false
+          properties:
+            id: {type: string, format: uuid}
+            title: {type: string}
+            doc_type:
+              oneOf:
+                - {$ref: '#/components/schemas/DocType'}
+                - {type: 'null'}
+        version:
+          type: object
+          required: [id, version_no, uploaded_at, approved_at, doc_date, publisher]
+          additionalProperties: false
+          properties:
+            id: {type: string, format: uuid}
+            version_no: {type: integer, minimum: 1}
+            uploaded_at: {type: string, format: date-time}
+            approved_at: {type: [string, 'null'], format: date-time, description: 待审核时为 null}
+            doc_date: {type: [string, 'null'], format: date}
+            publisher: {type: [string, 'null']}
+        validity:
+          description: 当前记录的有效期；待审核的版本与没有有效期的记录类文档为 null（待确认的有效期见审核任务）
+          oneOf:
+            - {$ref: '#/components/schemas/Validity'}
+            - {type: 'null'}
+        original:
+          type: object
+          description: 原件，经 getVersionOriginal 下载
+          required: [filename, content_type]
+          additionalProperties: false
+          properties:
+            filename: {type: string}
+            content_type: {type: string, description: 按文件名推断的媒体类型，仅供显示；下载时一律为附件}
+        evidence:
+          type: array
+          items: {$ref: '#/components/schemas/VersionEvidence'}
+    ArchivedVersion:
+      type: object
+      description: 已归档：只给归档提示，不给原文
+      required: [status, notice, document, version]
+      additionalProperties: false
+      properties:
+        status: {const: archived}
+        notice: {type: string}
+        document:
+          type: object
+          required: [id, title]
+          additionalProperties: false
+          properties:
+            id: {type: string, format: uuid}
+            title: {type: string}
+        version:
+          type: object
+          required: [id, version_no]
+          additionalProperties: false
+          properties:
+            id: {type: string, format: uuid}
+            version_no: {type: integer, minimum: 1}
+
+    # ---------- 文档与审核 ----------
+    UploadResult:
+      type: object
+      required: [document_id, version_id, status, duplicate]
+      additionalProperties: false
+      properties:
+        document_id: {type: string, format: uuid}
+        version_id: {type: string, format: uuid}
+        status: {const: pending_review}
+        duplicate: {type: boolean}
+    ReviewTaskPage:
+      type: object
+      required: [items, next_cursor]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/ReviewTask'}
+        next_cursor: {type: [string, 'null']}
+    ReviewTask:
+      type: object
+      description: |
+        已删除（deleted）的任务只保留谁在何时删除：不再指向版本，版本与文档的字段、入库提示与更正都为 null（6.3）。
+      required: [task_id, batch_id, status, suggestions, corrections, reviewer, decided_at, version_id, version_no,
+                 uploaded_at, import_batch_id, document_id, title, doc_type, extraction_status, draft_validity]
+      additionalProperties: false
+      properties:
+        task_id: {type: string, format: uuid}
+        batch_id: {type: [string, 'null'], format: uuid}
+        status: {type: string, enum: [open, approved, deleted]}
+        suggestions:
+          type: [object, 'null']
+          description: 入库时给审核人的提示：识别出的文档类型、时间表述、可能的关系、指令型文字等
+        corrections:
+          type: [object, 'null']
+          description: 审核人提交的更正
+        reviewer:
+          type: [string, 'null']
+          description: 审核通过或删除的人；open 时为 null
+        decided_at:
+          type: [string, 'null']
+          format: date-time
+          description: 审核通过或删除的时间；open 时为 null
+        version_id: {type: [string, 'null'], format: uuid}
+        version_no: {type: [integer, 'null'], minimum: 1}
+        uploaded_at: {type: [string, 'null'], format: date-time}
+        import_batch_id: {type: [string, 'null']}
+        document_id: {type: [string, 'null'], format: uuid}
+        title: {type: [string, 'null']}
+        doc_type:
+          oneOf:
+            - {$ref: '#/components/schemas/DocType'}
+            - {type: 'null'}
+        extraction_status:
+          description: 分类与抽取任务的状态；通过审核前须为 done
+          enum: [queued, running, done, failed, null]
+        draft_validity:
+          type: [object, 'null']
+          description: 审核前的待确认有效期（valid_from、valid_to 及其等级、无法换算的原文、定位）
+      allOf:
+        - if: {properties: {status: {const: deleted}}}
+          then:
+            properties:
+              suggestions: {type: 'null'}
+              corrections: {type: 'null'}
+              version_id: {type: 'null'}
+              version_no: {type: 'null'}
+              uploaded_at: {type: 'null'}
+              import_batch_id: {type: 'null'}
+              document_id: {type: 'null'}
+              title: {type: 'null'}
+              doc_type: {type: 'null'}
+              extraction_status: {type: 'null'}
+              draft_validity: {type: 'null'}
+          else:
+            properties:
+              version_id: {type: string}
+              version_no: {type: integer}
+              uploaded_at: {type: string}
+              document_id: {type: string}
+              title: {type: string}
+        - if: {properties: {status: {const: open}}}
+          then:
+            properties:
+              reviewer: {type: 'null'}
+              decided_at: {type: 'null'}
+          else:
+            properties:
+              reviewer: {type: string}
+              decided_at: {type: string}
+    Decisions:
+      type: object
+      required: [decisions]
+      properties:
+        decisions:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: {$ref: '#/components/schemas/Decision'}
+    Decision:
+      type: object
+      required: [task_id, decision]
+      properties:
+        task_id: {type: string}
+        decision: {type: string, enum: [approve, delete]}
+        corrections:
+          description: 只用于 approve
+          oneOf:
+            - {$ref: '#/components/schemas/Corrections'}
+            - {type: 'null'}
+    Corrections:
+      type: object
+      description: 审核人的更正；补录的时间记为 explicit 并记录补录人。只写需要更正的字段
+      properties:
+        doc_type: {$ref: '#/components/schemas/DocType'}
+        valid_from:
+          description: 生效日；null 表示清除（等级记为 unknown）
+          oneOf:
+            - {$ref: '#/components/schemas/DatedValue'}
+            - {type: 'null'}
+        valid_to:
+          description: 作废日（不再有效的第一天）；null 表示清除
+          oneOf:
+            - {$ref: '#/components/schemas/DatedValue'}
+            - {type: 'null'}
+        relations:
+          description: 与已发布版本的关系；给出时替换识别出的关系
+          oneOf:
+            - type: array
+              items: {$ref: '#/components/schemas/RelationInput'}
+            - {type: 'null'}
+    DatedValue:
+      type: object
+      required: [value]
+      properties:
+        value: {type: string, format: date}
+        grade:
+          allOf:
+            - {$ref: '#/components/schemas/ValidGrade'}
+          default: explicit
+    RelationInput:
+      type: object
+      required: [to_document_id, to_version_no]
+      properties:
+        relation: {type: string, enum: [supersedes, conflicts, references], default: supersedes}
+        to_document_id: {type: string, format: uuid}
+        to_version_no: {type: integer, minimum: 1}
+    DecisionResults:
+      type: object
+      required: [results]
+      additionalProperties: false
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            required: [task_id, ok, error]
+            additionalProperties: false
+            properties:
+              task_id: {type: string}
+              ok: {type: boolean}
+              error: {type: [string, 'null'], description: 失败原因；成功时为 null}
+            if:
+              properties: {ok: {const: true}}
+            then:
+              properties: {error: {type: 'null'}}
+            else:
+              properties: {error: {type: string}}
+    ArchiveResult:
+      type: object
+      required: [document_id, versions, status]
+      additionalProperties: false
+      properties:
+        document_id: {type: string, format: uuid}
+        versions:
+          type: array
+          description: 本次归档的版本
+          minItems: 1
+          items: {type: string, format: uuid}
+        status: {const: archived}
+    UnarchiveResult:
+      type: object
+      required: [document_id, versions, status]
+      additionalProperties: false
+      properties:
+        document_id: {type: string, format: uuid}
+        versions:
+          type: array
+          description: 本次恢复的版本
+          minItems: 1
+          items: {type: string, format: uuid}
+        status: {const: searchable}
+
+    # ---------- 强制验证清单 ----------
+    AnswerPolicy:
+      type: object
+      required: [strict]
+      additionalProperties: false
+      properties:
+        strict: {type: boolean, description: true 为严格模式，false 为宽松模式}
+    ForcedVerifyList:
+      type: object
+      required: [builtin, rules]
+      additionalProperties: false
+      properties:
+        builtin:
+          type: array
+          description: 内置规则，不能关闭
+          items:
+            type: object
+            required: [id, kind, description]
+            additionalProperties: false
+            properties:
+              id: {type: string, pattern: '^builtin-'}
+              kind: {const: builtin}
+              description: {type: string}
+        rules:
+          type: array
+          description: 租户追加的规则，按追加顺序
+          items: {$ref: '#/components/schemas/ForcedVerifyRule'}
+    ForcedVerifyRuleRequest:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          description: keyword 为问题含该词；document 为答案引用该文档；doc_type 为答案引用该类文档；all 为全部提问
+          enum: [keyword, document, doc_type, all]
+        value:
+          type: [string, 'null']
+          description: kind 为 all 时忽略；其余为 1–100 个字符
+        description: {type: [string, 'null'], maxLength: 200}
+      allOf:
+        - if:
+            properties: {kind: {enum: [keyword, document, doc_type]}}
+            required: [kind]
+          then:
+            required: [value]
+            properties: {value: {type: string, minLength: 1, maxLength: 100}}
+        - if:
+            properties: {kind: {const: doc_type}}
+            required: [kind]
+          then:
+            properties: {value: {enum: [normative, record]}}
+        - if:
+            properties: {kind: {const: document}}
+            required: [kind]
+          then:
+            properties: {value: {format: uuid}}
+    ForcedVerifyRule:
+      type: object
+      required: [id, kind, value, description, created_by, created_at]
+      additionalProperties: false
+      properties:
+        id: {type: string, pattern: '^fv_[0-9a-f]{12}$'}
+        kind: {type: string, enum: [keyword, document, doc_type, all]}
+        value: {type: [string, 'null']}
+        description: {type: [string, 'null']}
+        created_by: {type: string}
+        created_at: {type: string, format: date-time}

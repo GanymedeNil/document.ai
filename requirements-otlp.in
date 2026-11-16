@@ -1,0 +1,2 @@
+# 可选的 OTLP 导出依赖（生成 requirements-otlp.txt 的输入）
+opentelemetry-exporter-otlp-proto-http==1.45.1

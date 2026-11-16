@@ -1,0 +1,5 @@
+# Docling 解析器（PDF、扫描件、PPTX、XLSX、图片）的依赖输入；锁定结果见 requirements-docling.txt。
+# 重新生成（同时满足核心依赖，且全部依赖都发布满 14 天，日期按当天往前推 14 天填写）：
+#   uv pip compile requirements.txt requirements-docling.in --universal --python-version 3.14 \
+#     --exclude-newer 2026-10-29 -o requirements-docling.txt
+docling==2.143.1

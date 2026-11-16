@@ -1,0 +1,18 @@
+[project]
+name = "eaer"
+version = "0.1.0"
+description = "EAER 企业级融合 RAG 系统：可溯源、带时效判断的企业知识问答"
+readme = "README.md"
+
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+
+[project.urls]
+Repository = "https://github.com/GanymedeNil/document.ai"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 第三方库在 Python 3.14 上的弃用提示（langgraph 依赖的 langsmith 0.14.16），与本项目代码无关
+filterwarnings = [
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:langsmith",
+]

@@ -1,0 +1,40 @@
+# 版本规则见开发文档 3.3：发布满 14 天的最新稳定版，精确锁定
+alembic==1.20.1
+fastapi==0.162.0
+starlette==1.10.0
+pydantic==2.14.1
+python-multipart==0.0.32
+uvicorn==0.54.0
+SQLAlchemy==2.1.6
+psycopg[binary]==3.3.6
+opensearch-py==3.2.0
+jieba==0.42.1
+openpyxl==3.1.5
+python-docx==1.2.0
+matplotlib==3.11.2
+pytest==9.2.0
+httpx2==2.16.0
+# OpenAPI 文件（eaer/api/openapi.yaml）：接口进程读取它，契约测试按它的 JSON Schema 校验请求与响应（AC-11-1）；
+# jsonschema 的传递依赖一并锁定，版本与 requirements-docling.txt 相同
+PyYAML==6.0.3
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.9.1
+attrs==26.1.0
+# 查询状态机与会话检查点（开发文档 8.4、8.5）；其下更新频繁的传递依赖一并锁定，避免装到发布不满 14 天的版本
+langgraph==1.2.18
+langgraph-checkpoint==4.3.1
+langgraph-checkpoint-postgres==3.2.0
+langgraph-prebuilt==1.1.1
+langgraph-sdk==0.4.10
+langchain-core==1.7.3
+langchain-protocol==0.0.20
+langsmith==0.14.16
+psycopg-pool==3.3.3
+ormsgpack==1.13.0
+# 可观测（开发文档 3.3、13.3）：每次查询一条 trace。fastapi 已依赖 opentelemetry-api，与 SDK 一并锁定；
+# 导出到 OTLP 接收端（集群版的 Phoenix 等）另装 requirements-otlp.txt
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1

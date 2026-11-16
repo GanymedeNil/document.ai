@@ -1,0 +1,13 @@
+.git
+.venv
+.env
+.claude
+.pytest_cache
+.ruff_cache
+**/__pycache__
+docs
+tests
+factset
+modelserver
+deploy/*.env
+deploy/tokens.json

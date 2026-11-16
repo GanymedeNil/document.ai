@@ -1,0 +1,5 @@
+{
+  "替换为随机令牌-editor": {"user": "editor1", "tenant": "t1", "roles": ["editor"]},
+  "替换为随机令牌-reviewer": {"user": "reviewer1", "tenant": "t1", "roles": ["reviewer"]},
+  "替换为随机令牌-user": {"user": "user1", "tenant": "t1", "roles": [], "principals": ["R_STAFF"]}
+}
