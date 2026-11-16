@@ -165,7 +165,7 @@ paths:
       tags: [证据]
       summary: 取证据原文与定位
       description: |
-        可搜索且有权：返回原文、定位与有效期。已归档且有权：只返回归档提示，不返回原文（6.6）。
+        可搜索且有权：返回原文、定位、有效期，以及所在版本的文档日期与出处。已归档且有权：只返回归档提示，不返回原文（6.6）。
         其余一律 404，不论不存在、无权、待审核还是已删除，响应体除 request_id 外逐字相同（10.2、AC-10-6）。
       parameters:
         - name: evidence_id
@@ -802,12 +802,19 @@ components:
                 - {type: 'null'}
         version:
           type: object
-          required: [id, version_no, approved_at]
+          required: [id, version_no, approved_at, doc_date, publisher]
           additionalProperties: false
           properties:
             id: {type: string, format: uuid}
             version_no: {type: integer, minimum: 1}
             approved_at: {type: string, format: date-time}
+            doc_date:
+              type: [string, 'null']
+              format: date
+              description: 文档日期（发布日、报告日；数据源给出或从正文识别，不是上传时间），没有时为 null
+            publisher:
+              type: [string, 'null']
+              description: 出处（发布方、来源名称，数据源随文档给出），没有时为 null
         validity:
           oneOf:
             - {$ref: '#/components/schemas/Validity'}

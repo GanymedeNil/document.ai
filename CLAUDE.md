@@ -37,6 +37,7 @@ EAER 是面向多家客户交付的标准企业级 RAG 产品。用户不仅得�
 | `modelserver/` | 本地模型服务（参考实现，独立部署）：Qwen3-Embedding-0.6B 与 Qwen3-Reranker-0.6B（另可选 Qwen3-VL-Embedding-2B / Qwen3-VL-Reranker-2B），提供 `/v1/embeddings` 与 `/v1/rerank`；`python -m modelserver --port 8100 --env-file .env`，Mac 用 MPS、Linux 用 CUDA。内存预算 `MODELSERVER_MEMORY_LIMIT`（默认 24G，`memguard.py`）；几个服务一起跑时开看门狗 `python -m modelserver.watchdog --limit 24G` |
 | `factset/` | 合成评测集工具：校验事实表、生成文档、检查文档、计算标准答案、生成合成集（`synth`）、抽检单（`sample`）；评测集在 `docs/评测集/`（当前 v2，2000 条） |
 | `tests/` | 每个测试文件的文档字符串注明对应的验收项（AC-x-y）；`livestack.py` 以子进程启动真实的接口与后台任务进程，`stubmodel.py` 是 OpenAI 兼容的模型服务替身（不调用线上模型） |
+| `web/` | 简易 Web UI（Next.js 16 + TypeScript，界面统一用 shadcn/ui），经 rewrites 把 `/eaer-api/*` 代理到接口进程（`EAER_API_URL`，默认 `http://127.0.0.1:8000`）；覆盖提问（含流式、转后台进度与取消）、会话、上传、审核、归档、证据、强制验证清单与身份切换；启动与演示步骤见 `web/README.md`，桌面版预览配置名 `web`（端口 3200） |
 
 ## 必须遵守的约定
 

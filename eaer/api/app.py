@@ -459,7 +459,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         except ScopeExpired:
             raise ApiError(401, "unauthenticated", "授权范围已过期，请重新登录")
         visible = ("SELECT e.id, e.modality, e.content, e.locator, e.parse_stage, v.id AS version_id, v.version_no, "
-                   "  v.approved_at, v.status, d.id AS document_id, d.title, d.doc_type "
+                   "  v.approved_at, v.doc_date, v.publisher, v.status, d.id AS document_id, d.title, d.doc_type "
                    "FROM evidence e JOIN document_version v ON v.id = e.version_id "
                    "JOIN document d ON d.id = v.document_id JOIN acl_policy p ON p.id = v.acl_policy_id "
                    "WHERE e.id = %s AND d.tenant_id = %s AND p.principals && %s AND v.status = %s")
@@ -475,7 +475,8 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
                     "evidence_id": r["id"], "status": "searchable", "modality": r["modality"],
                     "content": r["content"], "locator": r["locator"], "parse_stage": r["parse_stage"],
                     "document": {"id": r["document_id"], "title": r["title"], "doc_type": r["doc_type"]},
-                    "version": {"id": r["version_id"], "version_no": r["version_no"], "approved_at": r["approved_at"]},
+                    "version": {"id": r["version_id"], "version_no": r["version_no"], "approved_at": r["approved_at"],
+                                "doc_date": r["doc_date"], "publisher": r["publisher"]},
                     "validity": val})
         r = conn.execute(visible, args + ("archived",)).fetchone()
         if r is not None:

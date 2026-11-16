@@ -88,6 +88,17 @@ def test_permitted_searchable_evidence_returns_text_and_locator(env):
     b = r.json()
     assert b["status"] == "searchable" and "650元" in b["content"] and "para" in b["locator"]
     assert b["validity"]["valid_from"] == "2026-01-01" and b["version"]["version_no"] == 1
+    assert "doc_date" in b["version"] and b["version"]["publisher"] is None      # 上传接口不带出处
+
+
+def test_evidence_carries_document_date_and_publisher(env):
+    """证据详情给出所在版本的文档日期与出处（数据源随文档给出，迁移 0012），与证据标注一致。"""
+    client, conn, doc, _ = env
+    _, ev = doc("差旅住宿标准见附表。", "R_STAFF")
+    vid = conn.execute("SELECT version_id FROM evidence WHERE id = %s", (ev,)).fetchone()["version_id"]
+    conn.execute("UPDATE document_version SET doc_date = '2025-12-20', publisher = '财务部' WHERE id = %s", (vid,))
+    b = client.get(f"/v1/evidence/{ev}", headers=H("tok-staff")).json()
+    assert b["version"]["doc_date"] == "2025-12-20" and b["version"]["publisher"] == "财务部"
 
 
 def test_unauthorized_and_nonexistent_are_indistinguishable(env):
