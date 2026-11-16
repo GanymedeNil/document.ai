@@ -317,7 +317,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         执行，等待同步时限（budgets.sync_seconds）；超时返回 status=running，其余字段为空，任务在当前步骤结束后
         交给后台任务进程，客户端轮询会话接口（8.5）。同步完成的回答写入缓存。"""
         from eaer.adapters.online import ModelCallError
-        from eaer.orchestrator import cache, tasks
+        from eaer.orchestrator import cache, memory, tasks
         from eaer.observability import set_attrs, span
         from eaer.orchestrator.engine import QueryResult, log_query, trace_result
 
@@ -332,30 +332,45 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         model_id = getattr(getattr(eng.model, "gen", None), "model", None) or "unknown"
         build_id, ttl = eng._build_id(), float(eng.budgets["cache_ttl_seconds"])
         strict = eng.strict_default if body.strict is None else body.strict
-        # 回答缓存（10.1 第 7 步）：键含租户、授权范围哈希与索引构建编号；命中后仍按当前授权范围核对所引证据
-        ck = cache.key(ident.tenant_id, scope, build_id, body.question, today=asked.date(), as_of_valid=body.as_of_valid,
-                       as_of_system=body.as_of_system, mode_hint=body.mode_hint, model=model_id,
-                       deep_enabled=eng.deep_enabled, verified_enabled=eng.verified_enabled, strict=strict)
+        # 多轮记忆（memory.py）：接着已有会话提问时，取同一用户在这个会话里之前的提问，追问先结合上文改写
+        history = memory.history(conn, session_id=body.session_id, tenant_id=ident.tenant_id, user_id=ident.user,
+                                 scope=scope, authorizer=authorizer_) if body.session_id is not None else []
+
+        def prepare():
+            try:
+                return eng.prepare(body.question, today=asked.date(), as_of_valid=body.as_of_valid,
+                                   as_of_system=body.as_of_system, mode_hint=body.mode_hint, strict=strict,
+                                   history=history)
+            except ModelCallError as e:
+                failed = QueryResult(str(sid), "failed", "fast", ["fast"], {}, {}, None, [], False, [], [], [], 0,
+                                     model_id, build_id)
+                log_query(conn, failed, scope=scope, user_id=ident.user, question=body.question, asked_at=asked,
+                          query_id=qid)
+                raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
+
         # 一次提问一条 trace（13.3）：根 span 在这里，执行段（本进程或后台进程）经查询状态里的 traceparent 挂在它下面
         with span("eaer.query", **{"eaer.tenant": ident.tenant_id, "eaer.session_id": str(sid),
                                    "eaer.query_id": str(qid)}) as root:
             since_epoch = cache.epoch(conn, ident.tenant_id) if ttl > 0 else 0   # 检索之前读失效序号
+            # 有上文时先改写再查缓存：同一句“那二类呢？”在不同会话里是不同的问题，缓存按改写后的问题区分
+            prepared = prepare() if history else None
+            standalone = prepared.get("standalone") if prepared else None
+            # 回答缓存（10.1 第 7 步）：键含租户、授权范围哈希与索引构建编号；命中后仍按当前授权范围核对所引证据
+            ck = cache.key(ident.tenant_id, scope, build_id, standalone or body.question, today=asked.date(),
+                           as_of_valid=body.as_of_valid, as_of_system=body.as_of_system, mode_hint=body.mode_hint,
+                           model=model_id, deep_enabled=eng.deep_enabled, verified_enabled=eng.verified_enabled,
+                           strict=strict)
             hit = cache.get(conn, ck, tenant_id=ident.tenant_id, scope=scope, authorizer=authorizer_, now=asked,
                             session_id=str(sid)) if ttl > 0 else None
-            prepared = None
             if hit is not None:
+                if standalone:                          # 命中的是别处问过的完整问题：告诉用户这次是怎么理解的
+                    hit.standalone_question = standalone
+                    hit.notices = [f"结合上文，问题理解为：{standalone}"] + \
+                        [n for n in hit.notices if not n.startswith("结合上文，问题理解为：")]
                 log_query(conn, hit, scope=scope, user_id=ident.user, question=body.question, asked_at=asked, query_id=qid)
                 outcome, result = "completed", hit
             else:
-                try:
-                    prepared = eng.prepare(body.question, today=asked.date(), as_of_valid=body.as_of_valid,
-                                           as_of_system=body.as_of_system, mode_hint=body.mode_hint, strict=strict)
-                except ModelCallError as e:
-                    failed = QueryResult(str(sid), "failed", "fast", ["fast"], {}, {}, None, [], False, [], [], [], 0,
-                                         model_id, build_id)
-                    log_query(conn, failed, scope=scope, user_id=ident.user, question=body.question, asked_at=asked,
-                              query_id=qid)
-                    raise ApiError(502, "model_error", f"模型服务调用失败，请稍后重试：{e}")
+                prepared = prepared or prepare()
                 tasks.create(conn, query_id=qid, session_id=sid, ident=ident, scope=scope, question=body.question,
                              asked_at=asked, prepared=prepared, model_id=model_id, index_build_id=build_id,
                              owner=runner.owner)
@@ -378,7 +393,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
             else:                                    # running（含已交给后台）或 cancelled：其余字段为空（11.2）
                 resp = {"session_id": str(sid), "status": "cancelled" if outcome == "cancelled" else "running",
                         "mode": None, "mode_path": [], "time_basis": None, "answer": None, "claims": [],
-                        "abstained": None, "notices": [], "reasoning": [], "strict": None}
+                        "abstained": None, "notices": [], "reasoning": [], "strict": None, "standalone_question": None}
             set_attrs(root, {"eaer.cache_hit": hit is not None, "eaer.outcome": outcome})
             if result is not None:
                 trace_result(root, result)
@@ -414,7 +429,8 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
         sid = _sid(session_id)
         rows = conn.execute(
             "SELECT l.id, l.asked_at, l.question, l.time_basis, l.mode, l.mode_path, l.status, l.answer, l.claims, "
-            "l.abstained, l.reasoning, l.strict, t.progress, t.background FROM query_log l LEFT JOIN query_task t ON t.id = l.id "
+            "l.abstained, l.reasoning, l.strict, l.standalone_question, t.progress, t.background FROM query_log l "
+            "LEFT JOIN query_task t ON t.id = l.id "
             "WHERE l.session_id = %s AND l.tenant_id = %s AND l.user_id = %s ORDER BY l.asked_at",
             (sid, ident.tenant_id, ident.user)).fetchall()
         if not rows or not _own_session(conn, ident, sid):
@@ -424,6 +440,7 @@ def create_app(database_url: str, store: FileStore, auth: Authenticator,
             item = {"query_id": str(r["id"]), **{k: r[k] for k in ("asked_at", "question", "time_basis", "mode",
                                                                      "mode_path", "status", "answer", "abstained")},
                     "background": bool(r["background"]), "reasoning": r["reasoning"], "strict": r["strict"],
+                    "standalone_question": r["standalone_question"],
                     "claims": [{**{k: c[k] for k in ("text", "status", "core", "citations")},
                                 "basis": claim_basis(c.get("checks") or {})}
                                for c in r["claims"] if c["status"] != "unsupported"]}

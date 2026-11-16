@@ -247,6 +247,14 @@ def test_query_task_lease_must_match_status(qt):
     conn.execute("UPDATE query_log SET status = 'cancelled' WHERE id = %(run)s", ids)       # 运行中 → 已取消：允许
 
 
+def test_query_log_standalone_question_must_not_be_blank(qt):
+    """迁移 0016：结合上文改写后的问题要么没有（不是追问），要么有内容。"""
+    conn, ids = qt
+    conn.execute("UPDATE query_log SET standalone_question = '二线城市住宿上限是多少' WHERE id = %(run)s", ids)
+    with pytest.raises(errors.CheckViolation):
+        conn.execute("UPDATE query_log SET standalone_question = '   ' WHERE id = %(run)s", ids)
+
+
 @pytest.mark.parametrize("bad", ['{"step": "first"}', '"思考"', "null"])
 def test_query_log_reasoning_must_be_an_array(qt, bad):
     """迁移 0014：模型的思考过程是按步骤的数组；运行中的记录可以写入，但不能写成别的类型。"""

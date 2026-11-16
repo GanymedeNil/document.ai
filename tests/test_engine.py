@@ -65,6 +65,10 @@ class Scripted:
             self.calls.append("judge")
             claim = re.search(r"结论：(.*)", prompt).group(1)
             return Completion("{}", self.judge(claim, prompt), Usage(50, 10), "scripted")
+        if "standalone" in props:                # 多轮记忆的改写（memory.condense）：默认当作完整问题，不改写
+            self.calls.append("condense")
+            return Completion("{}", {"standalone": prompt.rsplit("当前问题：", 1)[-1], "depends_on_history": False},
+                              Usage(20, 5), "scripted")
         if "as_of_valid" in props:
             self.calls.append("time")
             return Completion("{}", {"as_of_valid": ""}, Usage(10, 2), "scripted")

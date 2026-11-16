@@ -227,7 +227,7 @@ function ChatPage() {
       <div key={`err-${idx}-${j}`} className="grid gap-3"><UserBubble text={e.question} /><ErrorTurn result={e.result} /></div>));
     thread.push(
       <div key={it.query_id} className="grid gap-3">
-        <UserBubble text={it.question} at={it.asked_at} />
+        <UserBubble text={it.question} at={it.asked_at} understood={it.standalone_question} />
         <AssistantTurn it={it} extra={extra[it.query_id]} onCancel={cancel} cancelling={cancelling} onOpen={openSource} />
       </div>);
   });

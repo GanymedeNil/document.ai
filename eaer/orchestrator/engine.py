@@ -38,11 +38,11 @@ from psycopg.types.json import Jsonb
 
 from eaer.adapters.model import Message, ModelClient
 from eaer.adapters.model import collect_reasoning
-from eaer.adapters.online import collect_calls, summarize
+from eaer.adapters.online import StructuredOutputError, collect_calls, summarize
 from eaer.domain.identity import Scope
 from eaer.domain.injection import suspicious
 from eaer.observability import call_totals, set_attrs, span, traceparent
-from eaer.orchestrator import codec
+from eaer.orchestrator import codec, memory
 from eaer.orchestrator.deep import DeepOutcome, DeepRunner
 from eaer.orchestrator.fast import (ABSTAIN, ClaimOut, Draft, Steps, claim_basis, derived_claim, evidence_block,
                                     target_of)
@@ -90,6 +90,7 @@ class QueryState(TypedDict, total=False):
     calls: Annotated[list[dict], operator.add]     # 模型调用记录，跨节点、跨进程累加
     steps: Annotated[list[dict], operator.add]     # 已完成的步骤与耗时
     reasoning: Annotated[list[dict], operator.add]  # 模型自身的思考文字 [{"step", "text"}]，跨节点、跨进程累加
+    standalone: str | None             # 追问结合上文改写后的问题（memory.py）；request.question 即是它，request.original 是原话
 
 
 @dataclass
@@ -116,6 +117,7 @@ class QueryResult:
     plan: dict | None = None           # Deep 的计划模板、分组、缺口与动作记录（8.4 的 plan、gaps、history）
     reasoning: list[dict] = field(default_factory=list)  # 模型自身的思考文字，按步骤 [{"step", "text"}]（迁移 0014）
     strict: bool | None = None         # 这次用的回答方式：True 严格、False 宽松（迁移 0015）；之前的缓存与记录为空
+    standalone_question: str | None = None               # 追问结合上文改写后的问题；不是追问时为空（迁移 0016）
 
     @property
     def evidence_ids(self) -> list[str]:
@@ -128,7 +130,7 @@ class QueryResult:
         return {"session_id": self.session_id, "status": self.status, "mode": self.mode, "mode_path": self.mode_path,
                 "time_basis": self.time_basis, "answer": self.answer, "claims": [] if self.abstained else claims,
                 "abstained": self.abstained, "notices": self.notices, "reasoning": self.reasoning,
-                "strict": self.strict}
+                "strict": self.strict, "standalone_question": self.standalone_question}
 
 
 def _worst(a: str, b: str) -> str:
@@ -203,20 +205,38 @@ class Engine:
 
     def prepare(self, question: str, *, today: date, as_of_valid: date | None = None,
                 as_of_system: date | None = None, mode_hint: str | None = None,
-                strict: bool | None = None) -> QueryState:
+                strict: bool | None = None, history: list[memory.Turn] | None = None) -> QueryState:
         """第 1 步：时间点（7.5）与 Router（8.1）。结果是图的输入，也决定提问记录的入口模式。
-        strict：这次用严格模式还是宽松模式；None 时取租户默认。记在状态里，换进程接着执行也不变。"""
+        strict：这次用严格模式还是宽松模式；None 时取租户默认。记在状态里，换进程接着执行也不变。
+        history：同一会话里之前的提问（memory.history）；给出时先把追问结合上文改写成完整的问题，之后都用改写后的。"""
         t0 = time.monotonic()
         root = traceparent()                       # 调用方的 eaer.query；后续执行段都挂在它下面
         with span("eaer.node.prepare", **{"eaer.node": "prepare"}) as sp, collect_calls() as calls, \
                 collect_reasoning() as thoughts:
-            st = self._prepare(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
-                               mode_hint=mode_hint, t0=t0)
+            standalone, memo = self._condense(question, history) if history else (None, None)
+            st = self._prepare(standalone or question, today=today, as_of_valid=as_of_valid,
+                               as_of_system=as_of_system, mode_hint=mode_hint, t0=t0)
             st["request"]["strict"] = self.strict_default if strict is None else bool(strict)
+            st["request"]["original"] = question
+            st["standalone"] = standalone
+            if standalone:
+                st["notices"].insert(0, f"结合上文，问题理解为：{standalone}")
+            if memo:
+                st["notices"].append(memo)
             set_attrs(sp, {"eaer.mode_path": st["mode_path"], "eaer.route": st["route"].get("mode"),
                            **call_totals(calls)})
         return {**st, "calls": codec.calls_out(calls), "traceparent": root,
                 "reasoning": [{"step": "prepare", "text": t} for t in thoughts]}
+
+    def _condense(self, question: str, history: list[memory.Turn]) -> tuple[str | None, str | None]:
+        """追问结合上文改写（memory.condense）。返回 (改写后的问题或 None, 给用户的说明或 None)。
+        模型不能结构化输出、或输出不合格式时按原问题回答并说明；模型调用失败照常抛出（接口返回 502）。"""
+        if not self.model.capabilities().structured_output:
+            return None, "生成模型不支持结构化输出，没有结合上文理解这个问题，按原问题回答"
+        try:
+            return memory.condense(self.model, question, history), None
+        except StructuredOutputError:
+            return None, "没能结合上文改写这个问题（模型输出不合格式），按原问题回答"
 
     def _prepare(self, question: str, *, today: date, as_of_valid, as_of_system, mode_hint, t0) -> QueryState:
         tb = resolve(question, today=today, as_of_valid=as_of_valid, as_of_system=as_of_system,
@@ -268,7 +288,8 @@ class Engine:
             cost=summarize(codec.calls_in(st.get("calls"))),
             seconds=round(sum(x["seconds"] for x in st.get("steps", [])), 3), alerts=st.get("alerts", []),
             signals=st.get("signals", []) + [e for e in escalations if "Deep" in e], plan=st.get("plan"),
-            reasoning=list(st.get("reasoning", [])), strict=st["request"].get("strict"))
+            reasoning=list(st.get("reasoning", [])), strict=st["request"].get("strict"),
+            standalone_question=st.get("standalone"))
 
     # ---------- 节点 ----------
 
@@ -342,7 +363,9 @@ class Engine:
         hits, meta, draft = codec.hits_in(st["hits"]), dict(st["meta"]), codec.draft_in(st["draft"])
         claims = codec.claims_in(st["claims"])
         vt = codec.targets_in(st.get("version_targets"))
-        forced, signals = self._verified_signals(self.scope, question, tb, claims, draft, meta, hits)
+        # 强制验证的关键词规则按原话与改写后的问题一起判断：改写只能让规则多命中，不会让问题绕开规则（8.1“只增不减”）
+        rules_q = "\n".join(dict.fromkeys([st["request"].get("original") or question, question]))
+        forced, signals = self._verified_signals(self.scope, rules_q, tb, claims, draft, meta, hits)
         mode_path, escalations, notices = list(st["mode_path"]), list(st["escalations"]), list(st["notices"])
         rounds = st["rounds"]
         alerts = [f"安全告警：授权核对未通过，已移除证据 {i}" for c in claims for i in c.removed]
@@ -540,7 +563,7 @@ def log_fields(r: QueryResult, scope: Scope) -> dict:
         if not value:
             raise ValueError(f"query_log 缺少必填字段 {name}")
     return {"time_basis": Jsonb(r.time_basis), "mode": r.mode, "mode_path": r.mode_path, "status": r.status,
-            "reasoning": Jsonb(r.reasoning), "strict": r.strict,
+            "reasoning": Jsonb(r.reasoning), "strict": r.strict, "standalone_question": r.standalone_question,
             "answer": r.answer, "claims": Jsonb(claims), "evidence_ids": r.evidence_ids, "abstained": r.abstained,
             "authz_decision": Jsonb(authz), "model_id": r.model, "index_build_id": r.index_build_id,
             "cost": Jsonb({**r.cost, "retrieval_rounds": r.retrieval_rounds, "seconds": r.seconds,

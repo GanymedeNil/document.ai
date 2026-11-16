@@ -42,6 +42,10 @@ paths:
         - 时间点：`as_of_valid`（某天实际生效）与 `as_of_system`（截至某天系统所知）优先于从问题中识别的结果；
           两者都不传时按问题里的时间点，没有则按当前生效。
         - `mode_hint` 只能把模式提高，不能降低（8.1）。
+        - 多轮记忆：接着已有会话提问时，追问（“那二类呢？”“这个规定什么时候生效？”）先结合同一用户在这个会话里
+          最近几次已完成的提问改写成完整的问题，之后的时间点识别、路由、检索与核对都用改写后的问题，回答的
+          `standalone_question` 给出改写结果，`notices` 里说明“结合上文，问题理解为……”。给模型的上文只有之前提问的原话
+          与那些回答引用的、当前仍有权可搜索的文档标题，不含之前回答的正文。强制验证的关键词规则按原话与改写后的问题一起判断。
         - 同步时限（`budgets.sync_seconds`，初值 30 秒）内完成的返回 `completed`；超过时限返回 `running`，
           其余字段为空，查询在当前步骤结束后转入后台，客户端轮询会话接口（8.5）。
         - `stream` 为 true 时以 SSE 返回，事件依次为 `mode`（每个经过的模式各一次）、`notice`、`reasoning`
@@ -769,7 +773,8 @@ components:
     QueryAnswer:
       type: object
       description: 已完成的回答
-      required: [session_id, status, mode, mode_path, time_basis, answer, claims, abstained, notices, reasoning, strict]
+      required: [session_id, status, mode, mode_path, time_basis, answer, claims, abstained, notices, reasoning, strict,
+                 standalone_question]
       additionalProperties: false
       properties:
         session_id: {type: string, format: uuid}
@@ -795,6 +800,9 @@ components:
           type: array
           description: 模型自身的思考文字，按发生顺序；生成服务未开启思考、或模型不给思考文字时为空
           items: {$ref: '#/components/schemas/ReasoningStep'}
+        standalone_question:
+          type: [string, 'null']
+          description: 追问结合会话上文改写后的问题（之后的检索与回答都用它）；不是追问、或问题本身完整时为 null
       if:
         properties: {abstained: {const: true}}
       then:
@@ -802,7 +810,8 @@ components:
     QueryPending:
       type: object
       description: 超过同步时限、已转入后台（running），或执行中被取消（cancelled）；其余字段为空
-      required: [session_id, status, mode, mode_path, time_basis, answer, claims, abstained, notices, reasoning, strict]
+      required: [session_id, status, mode, mode_path, time_basis, answer, claims, abstained, notices, reasoning, strict,
+                 standalone_question]
       additionalProperties: false
       properties:
         session_id: {type: string, format: uuid}
@@ -816,6 +825,7 @@ components:
         abstained: {type: 'null'}
         notices: {type: array, maxItems: 0}
         reasoning: {type: array, maxItems: 0}
+        standalone_question: {type: 'null'}
     StreamMode:
       type: object
       required: [mode]
@@ -854,7 +864,7 @@ components:
     SessionItem:
       type: object
       required: [query_id, asked_at, question, time_basis, mode, mode_path, status, answer, abstained, background, claims,
-                 reasoning, strict]
+                 reasoning, strict, standalone_question]
       additionalProperties: false
       properties:
         query_id: {type: string, format: uuid}
@@ -886,6 +896,9 @@ components:
           type: array
           description: 模型自身的思考文字，提问结束时写入（进行中为空）；没有时为空
           items: {$ref: '#/components/schemas/ReasoningStep'}
+        standalone_question:
+          type: [string, 'null']
+          description: 追问结合会话上文改写后的问题；question 是用户的原话。不是追问时为 null
         progress: {$ref: '#/components/schemas/Progress'}
       if:
         properties: {status: {const: running}}

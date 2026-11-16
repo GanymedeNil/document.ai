@@ -73,6 +73,8 @@ export interface QueryResponse {
   reasoning: ReasoningStep[];
   /** 这次用的回答方式；转入后台或取消时为 null */
   strict: boolean | null;
+  /** 追问结合会话上文改写后的问题；不是追问时为 null */
+  standalone_question: string | null;
 }
 
 export interface Progress {
@@ -99,6 +101,8 @@ export interface SessionItem {
   reasoning: ReasoningStep[];
   /** 这次用的回答方式（true 严格、false 宽松）；加入这个开关之前的提问为 null */
   strict: boolean | null;
+  /** 追问结合会话上文改写后的问题；question 是原话 */
+  standalone_question: string | null;
   progress?: Progress;
 }
 

@@ -3,7 +3,7 @@
 // 对话中的一问一答：用户的问题（右侧气泡）与 EAER 的回答（思考过程、回答、结论与引用）。
 
 import { Fragment } from "react";
-import { ArrowRightIcon, BookOpenIcon, SquareIcon } from "lucide-react";
+import { ArrowRightIcon, BookOpenIcon, CornerDownRightIcon, SquareIcon } from "lucide-react";
 import type { ApiResult, StreamEvent } from "@/lib/api";
 import { useIdentity } from "@/lib/identity";
 import { useEvidence } from "@/lib/useEvidence";
@@ -17,12 +17,17 @@ import { ToneBadge } from "@/components/common";
 import { Reasoning, type ReasoningState } from "./Reasoning";
 import type { SourceView } from "./SourceDrawer";
 
-export function UserBubble({ text, at }: { text: string; at?: string }) {
+export function UserBubble({ text, at, understood }: { text: string; at?: string; understood?: string | null }) {
   return (
     <div className="flex flex-col items-end gap-1">
       <div className="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-2 text-sm whitespace-pre-wrap text-primary-foreground">
         {text}
       </div>
+      {understood && (
+        <span className="flex max-w-[85%] items-center gap-1 text-right text-xs text-muted-foreground" title="多轮记忆：追问结合上文改写成完整的问题后再检索与回答">
+          <CornerDownRightIcon className="size-3 shrink-0" />结合上文理解为：<span className="text-foreground">{understood}</span>
+        </span>
+      )}
       {at && <span className="text-[11px] text-muted-foreground">{formatTime(at)}</span>}
     </div>
   );
@@ -82,12 +87,13 @@ export function streamLines(events: StreamEvent[]): string[] {
 
 function doneLines(it: SessionItem, notices: string[] | undefined): string[] {
   const out: string[] = [];
+  if (it.standalone_question) out.push(`结合上文，问题理解为：${it.standalone_question}（之后的检索与回答都用它）`);
   if (it.mode_path.length) out.push(`经过的模式：${it.mode_path.map((m) => MODE_LABEL[m]).join(" → ")}${it.background ? "（曾转入后台）" : ""}`);
   if (it.strict !== null && it.strict !== undefined) {
     out.push(it.strict ? "回答方式：严格（只认文件原文）" : "回答方式：宽松（可以按文件里的单价算合计、按常识判断对象属于哪一类，都标未验证）");
   }
   out.push(...timeLines(it.time_basis));
-  for (const n of notices ?? []) out.push(`说明：${n}`);
+  for (const n of notices ?? []) if (!n.startsWith("结合上文，问题理解为：")) out.push(`说明：${n}`);
   if (it.abstained) out.push("没有足够的证据，拒答（证据不足、无权或已归档时不编造）");
   else if (it.claims.length) {
     const ok = it.claims.filter((c) => c.status === "supported").length;
