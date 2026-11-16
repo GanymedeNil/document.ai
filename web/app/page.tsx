@@ -33,7 +33,8 @@ const SAMPLES = [
   "我在北京住一周最高能报销多少？",
 ];
 
-interface Pending { question: string; startedAt: number; events: StreamEvent[] }
+/** 等接口返回的一次提问；sessionId 是它所属的会话：切到别的会话时不在那里显示 */
+interface Pending { sessionId: string; question: string; startedAt: number; events: StreamEvent[] }
 interface LocalError { question: string; result: ApiResult<unknown>; afterCount: number }
 
 function ChatPage() {
@@ -158,7 +159,7 @@ function ChatPage() {
     const afterCount = itemsRef.current.length;
     const startedAt = Date.now();
     setText("");
-    setPending({ question: q, startedAt, events: [] });
+    setPending({ sessionId: sid, question: q, startedAt, events: [] });
     const body: QueryRequest = {
       question: q, session_id: sid, as_of_valid: asOfValid || null, as_of_system: asOfSystem || null,
       mode_hint: mode || null, strict: policy ? policy === "strict" : null, stream,
@@ -217,7 +218,9 @@ function ChatPage() {
     router.replace("/", { scroll: false });
   };
 
-  const empty = !items.length && !pending && !errors.length && !loadErr && !loading;
+  // 等待中的提问只在它所属的会话里显示（等的时候切到别的会话，那边不该出现它）
+  const pendingHere = pending && pending.sessionId === sessionId ? pending : null;
+  const empty = !items.length && !pendingHere && !errors.length && !loadErr && !loading;
 
   // 会话里的记录，加上没记进会话的本地失败（按发生时的位置插入）
   const thread: React.ReactNode[] = [];
@@ -290,10 +293,10 @@ function ChatPage() {
             {loading && <p className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />读取会话…</p>}
             <ApiError result={loadErr} title="读取会话失败" />
             {thread}
-            {pending && (
+            {pendingHere && (
               <div className="grid gap-3">
-                <UserBubble text={pending.question} />
-                <PendingTurn startedAt={pending.startedAt} events={pending.events} />
+                <UserBubble text={pendingHere.question} />
+                <PendingTurn startedAt={pendingHere.startedAt} events={pendingHere.events} />
               </div>
             )}
             <ApiError result={cancelErr} title="取消失败" />
@@ -334,7 +337,10 @@ function ChatPage() {
                 {(asOfValid || asOfSystem) && (
                   <ToneBadge tone="info">{asOfValid && `实际生效 ${asOfValid}`}{asOfValid && asOfSystem && " · "}{asOfSystem && `截至 ${asOfSystem} 所知`}</ToneBadge>
                 )}
-                <div className="ml-auto">
+                <div className="ml-auto flex items-center gap-2">
+                  {pending && !pendingHere && (
+                    <span className="text-xs text-muted-foreground">另一个会话的提问还在等待回答</span>
+                  )}
                   {pending ? (
                     <Button type="button" size="icon-sm" variant="outline" aria-label="停止等待" title="停止等待（接口照常执行）"
                       onClick={() => abort.current?.abort()}>
